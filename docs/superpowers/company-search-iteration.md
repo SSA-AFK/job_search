@@ -23,15 +23,15 @@ This is the living delivery document for the AI Company Search project. It is th
 
 | Field | Value |
 |-------|-------|
-| Overall status | Implementation in progress |
-| Current stage | Stage one - Web search foundation |
-| Current task | Stage one whole-branch review and completion gate |
+| Overall status | Stage one complete; stage two ready |
+| Current stage | Stage one complete - Web search foundation |
+| Current task | Integration decision before stage two |
 | Execution method | Subagent-Driven Development |
 | Active branch/worktree | `codex/company-search-web-foundation` at `.worktrees/codex-company-search-web-foundation` |
-| Stage one progress | 8/8 tasks complete; completion gate pending |
+| Stage one progress | 8/8 tasks complete; completion gate passed |
 | Stage two progress | 0/12 tasks complete |
-| Last verified artifact state | Design and both plans passed structural verification on 2026-07-31 |
-| Next action | Run the independent whole-branch review, resolve final findings, and verify the stage-one completion gate |
+| Last verified artifact state | Stage one controller verification passed on 2026-07-31 at `04cfc4d` |
+| Next action | Choose how to integrate the stage-one branch, then begin stage two Task 1 from the accepted baseline |
 
 ## Delivery Sequence
 
@@ -64,14 +64,14 @@ Plan: [`plans/2026-07-31-company-search-web-foundation.md`](plans/2026-07-31-com
 
 ### Stage One Gate
 
-- [ ] Backend Ruff and pytest suites pass with pristine output.
-- [ ] Frontend Vitest, build, and Playwright suites pass.
-- [ ] Alembic upgrades an empty SQLite database.
-- [ ] Repeated seed import does not increase unique entity counts.
-- [ ] Seeded company search and details work without external services.
-- [ ] Collection endpoint returns the documented `503 collection_unavailable` response.
-- [ ] The generated 10,000-company/100,000-job dataset query p95 is at most 300 ms.
-- [ ] No credentials, database files, virtual environments, build outputs, or SDD scratch artifacts are tracked.
+- [x] Backend Ruff and pytest suites pass with pristine output.
+- [x] Frontend Vitest, build, and Playwright suites pass.
+- [x] Alembic upgrades an empty SQLite database.
+- [x] Repeated seed import does not increase unique entity counts.
+- [x] Seeded company search and details work without external services.
+- [x] Collection endpoint returns the documented `503 collection_unavailable` response.
+- [x] The generated 10,000-company/100,000-job dataset query p95 is at most 300 ms.
+- [x] No credentials, database files, virtual environments, build outputs, or SDD scratch artifacts are tracked.
 
 ## Stage Two Tracker
 
@@ -79,18 +79,18 @@ Plan: [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31
 
 | Task | Deliverable | Status | Commit(s) | Review | Verification |
 |------|-------------|--------|-----------|--------|--------------|
-| 1 | Ingestion configuration and collection requests | Blocked by stage one gate | - | - | - |
-| 2 | Provider contracts and safe HTTP infrastructure | Blocked by stage one gate | - | - | - |
-| 3 | Zhihu Global Search Provider | Blocked by stage one gate | - | - | - |
-| 4 | Allowlisted company website Provider | Blocked by stage one gate | - | - | - |
-| 5 | Structured CrewAI extraction adapters | Blocked by stage one gate | - | - | - |
-| 6 | Deterministic normalization and deduplication | Blocked by stage one gate | - | - | - |
-| 7 | Transactional idempotent persistence | Blocked by stage one gate | - | - | - |
-| 8 | Orchestrator and terminal-state classification | Blocked by stage one gate | - | - | - |
-| 9 | Celery tasks, daily refresh, and job expiration | Blocked by stage one gate | - | - | - |
-| 10 | Optional Redis caching and invalidation | Blocked by stage one gate | - | - | - |
-| 11 | Frontend collection polling | Blocked by stage one gate | - | - | - |
-| 12 | End-to-end failure verification and runbook | Blocked by stage one gate | - | - | - |
+| 1 | Ingestion configuration and collection requests | Ready | - | - | - |
+| 2 | Provider contracts and safe HTTP infrastructure | Pending Task 1 | - | - | - |
+| 3 | Zhihu Global Search Provider | Pending Task 2 | - | - | - |
+| 4 | Allowlisted company website Provider | Pending Task 3 | - | - | - |
+| 5 | Structured CrewAI extraction adapters | Pending Task 4 | - | - | - |
+| 6 | Deterministic normalization and deduplication | Pending Task 5 | - | - | - |
+| 7 | Transactional idempotent persistence | Pending Task 6 | - | - | - |
+| 8 | Orchestrator and terminal-state classification | Pending Task 7 | - | - | - |
+| 9 | Celery tasks, daily refresh, and job expiration | Pending Task 8 | - | - | - |
+| 10 | Optional Redis caching and invalidation | Pending Task 9 | - | - | - |
+| 11 | Frontend collection polling | Pending Task 10 | - | - | - |
+| 12 | End-to-end failure verification and runbook | Pending Task 11 | - | - | - |
 
 ### Stage Two Gate
 
@@ -149,7 +149,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | SQLite/PostgreSQL behavior diverges | Later production migration may fail | Use SQLAlchemy types, named constraints, Alembic, and dialect-aware index tests | Open |
 | LLM output is malformed or follows hostile page text | Incorrect or unsafe data could be written | Bounded plain-text evidence, fixed roles, no tools, Pydantic validation, evidence-id checks | Open until stage two |
 | Duplicate task delivery or source replay | Duplicate entities and unstable status | Database unique constraints, run idempotency, repeated-delivery integration tests | Open until stage two |
-| Search performance degrades at target volume | User-visible latency exceeds target | Indexed query paths and a 10k/100k p95 gate in stage one | Controlled at 22.9 ms p95 in Task 8 |
+| Search performance degrades at target volume | User-visible latency exceeds target | Indexed query paths and a 10k/100k p95 gate in stage one | Controlled at 20.5 ms p95 in final verification |
 
 ## Verification Evidence
 
@@ -157,6 +157,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 |------|-------|---------------------|--------|
 | 2026-07-31 | Design and implementation plans | Structural script checked required terms, obsolete terms, placeholders, trailing whitespace, balanced fences, required headers, and five steps per task | PASS: stage one 8 tasks/40 steps; stage two 12 tasks/60 steps |
 | 2026-07-31 | Stage one Task 8 acceptance matrix | Ruff, normal pytest, Vitest, build, desktop/mobile Playwright, empty migration, repeated seed, collection 503, artifact hygiene, and 10k/100k performance fixture | PASS: p95 22.9 ms; one deferred dependency deprecation warning |
+| 2026-07-31 | Stage one final review and controller verification | Independent whole-branch review, one final fix wave, scoped re-review, then fresh backend/frontend/browser/performance commands | PASS: Ruff clean; pytest 75 passed/2 deselected with no warnings; p95 20.5 ms; Vitest 28 passed; build passed; resolver 6 passed; Playwright 7 passed; tracked generated artifacts 0 |
 
 ## Iteration History
 
@@ -173,6 +174,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-07-31 | Stage one Task 6 | Built URL-driven responsive search workspace; fixed out-of-range recovery, focus contrast, and live status in review round 1 | Add detail and browser workflows |
 | 2026-07-31 | Stage one Task 7 | Added company details, paginated active jobs, provider-paired application links, terminal empty-query collection handling, and desktop/mobile browser flows; added HTTP(S)-only logo validation in review round 1 | Add performance verification and developer runbook |
 | 2026-07-31 | Stage one Task 8 | Added deterministic 10k-company/100k-job performance verification, a complete PowerShell runbook, sample environment, generated-artifact policy, and the full acceptance matrix; restored explicit frontend ignores in review round 1 | Run whole-branch review and close the stage-one completion gate |
+| 2026-07-31 | Stage one final review | Corrected enum contracts, sanitized correlated 500 handling, URL boundaries, warning cleanliness, queryless relevance, and E2E interpreter resolution; added real seeded browser-to-backend coverage; scoped re-review approved all findings | Choose integration path, then begin stage two Task 1 |
 
 ## Update Template
 
