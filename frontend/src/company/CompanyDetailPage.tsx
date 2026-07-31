@@ -29,8 +29,9 @@ const providerLabels: Record<string, string> = {
 
 function CompanyLogo({ company }: { company: CompanyDetail }) {
   const [failed, setFailed] = useState(false);
-  if (company.logo_url && !failed) {
-    return <img className="detail-logo" src={company.logo_url} alt="" width="64" height="64" onError={() => setFailed(true)} />;
+  const logoUrl = safeHttpUrl(company.logo_url);
+  if (logoUrl && !failed) {
+    return <img className="detail-logo" src={logoUrl} alt="" width="64" height="64" onError={() => setFailed(true)} />;
   }
   return <span className="detail-logo logo-fallback" aria-hidden="true">{company.canonical_name.trim().slice(0, 2).toUpperCase()}</span>;
 }

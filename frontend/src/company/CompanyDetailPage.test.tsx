@@ -130,6 +130,16 @@ describe("CompanyDetailPage", () => {
     expect(screen.getByText(/30,000-60,000 元\/月 · 16 薪/)).toBeInTheDocument();
   });
 
+  it("falls back instead of rendering a non-HTTP company logo", async () => {
+    renderCompanyDetail((input) => String(input).includes("/jobs")
+      ? response(jobsPage([]))
+      : response({ ...company, logo_url: "data:image/svg+xml,<svg></svg>" }));
+
+    await screen.findByRole("heading", { name: "DeepSeek", level: 1 });
+    expect(document.querySelector("img.detail-logo")).not.toBeInTheDocument();
+    expect(document.querySelector(".detail-logo.logo-fallback")).toHaveTextContent("DE");
+  });
+
   it("shows explicit loading and not-found states", async () => {
     const pending = new Promise<Response>(() => undefined);
     const view = renderCompanyDetail(() => pending);
