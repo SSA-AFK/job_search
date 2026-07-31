@@ -25,13 +25,13 @@ This is the living delivery document for the AI Company Search project. It is th
 |-------|-------|
 | Overall status | Implementation in progress |
 | Current stage | Stage one - Web search foundation |
-| Current task | Stage one Task 6 - Build the Search Workspace Frontend |
+| Current task | Stage one Task 7 - Add Company Detail, Empty-State Collection Handling, and Browser Tests |
 | Execution method | Subagent-Driven Development |
 | Active branch/worktree | `codex/company-search-web-foundation` at `.worktrees/codex-company-search-web-foundation` |
-| Stage one progress | 5/8 tasks complete |
+| Stage one progress | 6/8 tasks complete |
 | Stage two progress | 0/12 tasks complete |
 | Last verified artifact state | Design and both plans passed structural verification on 2026-07-31 |
-| Next action | Dispatch stage one Task 6 to build the URL-driven search workspace |
+| Next action | Dispatch stage one Task 7 to complete detail and browser workflows |
 
 ## Delivery Sequence
 
@@ -58,8 +58,8 @@ Plan: [`plans/2026-07-31-company-search-web-foundation.md`](plans/2026-07-31-com
 | 3 | Normalization and idempotent seed import | Complete | `961bc75` | Approved, no findings | focused pytest 10 passed; full pytest 21 passed; Ruff passed; repeated CLI idempotent |
 | 4 | Company query services and REST endpoints | Complete | `06fedd8`, `4d74880` | Approved after artifact-only fix round 1; one deferred Minor | focused pytest 30 passed; full pytest 51 passed; Ruff passed |
 | 5 | Stage-one collection API contract | Complete | `3530d72` | Approved, no findings | focused pytest 5 passed; full pytest 56 passed; OpenAPI smoke and Ruff passed |
-| 6 | Search workspace frontend | Ready | - | - | - |
-| 7 | Company detail, empty state, and browser flows | Pending | - | - | - |
+| 6 | Search workspace frontend | Complete | `ba7b44c`, `50ef731` | Approved after fix round 1; two deferred Minors | Vitest 13 passed; build passed; contrast and responsive checks passed |
+| 7 | Company detail, empty state, and browser flows | Ready | - | - | - |
 | 8 | Performance verification and developer runbook | Pending | - | - | - |
 
 ### Stage One Gate
@@ -169,6 +169,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-07-31 | Stage one Task 3 | Added strict seed schemas, Unicode/URL normalization, five-company seed data, and one-transaction idempotent import; review approved with no findings | Implement company query APIs |
 | 2026-07-31 | Stage one Task 4 | Added company search, detail, jobs, filters, ranking, pagination, stable errors, and source ordering; removed accidentally tracked SDD report in review round 1 | Establish disabled collection API contract |
 | 2026-07-31 | Stage one Task 5 | Added disabled collection POST/GET routes with normalized validation, stable 503/422 errors, and OpenAPI coverage; review approved with no findings | Build search workspace frontend |
+| 2026-07-31 | Stage one Task 6 | Built URL-driven responsive search workspace; fixed out-of-range recovery, focus contrast, and live status in review round 1 | Add detail and browser workflows |
 
 ## Update Template
 
