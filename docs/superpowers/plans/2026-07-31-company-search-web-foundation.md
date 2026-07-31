@@ -160,7 +160,7 @@ Expected: FAIL during model imports.
 Use SQLAlchemy 2.x `Mapped` declarations and a reusable GUID `TypeDecorator` that stores native PostgreSQL UUID later and 36-character strings on SQLite. Represent JSON fields with SQLAlchemy `JSON`; use named unique constraints exactly as specified in the design.
 
 ```python
-class JobSource(Base, TimestampMixin):
+class JobSource(Base):
     __tablename__ = "job_sources"
     __table_args__ = (
         UniqueConstraint("provider", "source_raw_id", name="uq_job_source_provider_raw_id"),
@@ -175,6 +175,8 @@ class JobSource(Base, TimestampMixin):
     last_seen_at: Mapped[datetime]
     is_active: Mapped[bool] = mapped_column(default=True)
 ```
+
+`JobSource` intentionally does not inherit `TimestampMixin`: `first_seen_at` and `last_seen_at` are its lifecycle timestamps and the approved design does not define redundant `created_at` or `updated_at` fields for this table.
 
 The migration must create indexes for company filter columns, normalized name/alias, `job_postings(company_id, is_active)`, and collection status/query lookup.
 
