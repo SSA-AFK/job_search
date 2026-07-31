@@ -25,13 +25,13 @@ This is the living delivery document for the AI Company Search project. It is th
 |-------|-------|
 | Overall status | Implementation in progress |
 | Current stage | Stage one - Web search foundation |
-| Current task | Stage one Task 4 - Implement Company Query Services and REST Endpoints |
+| Current task | Stage one Task 5 - Establish the Stage-One Collection Contract |
 | Execution method | Subagent-Driven Development |
 | Active branch/worktree | `codex/company-search-web-foundation` at `.worktrees/codex-company-search-web-foundation` |
-| Stage one progress | 3/8 tasks complete |
+| Stage one progress | 4/8 tasks complete |
 | Stage two progress | 0/12 tasks complete |
 | Last verified artifact state | Design and both plans passed structural verification on 2026-07-31 |
-| Next action | Dispatch stage one Task 4 against the reviewed schema and seed fixtures |
+| Next action | Dispatch stage one Task 5 against the reviewed API error boundary |
 
 ## Delivery Sequence
 
@@ -56,8 +56,8 @@ Plan: [`plans/2026-07-31-company-search-web-foundation.md`](plans/2026-07-31-com
 | 1 | Backend application bootstrap | Complete | `6ab6b06` | Approved, no findings | pytest 1 passed; Ruff passed; 93 third-party Python 3.13 deprecation warnings documented |
 | 2 | Normalized database schema and migration | Complete | `1635a5a`, `c6e4bd0` | Approved after fix round 1 | full pytest 11 passed; Ruff passed; migration parity verified; SQLite UTC round trip covered |
 | 3 | Normalization and idempotent seed import | Complete | `961bc75` | Approved, no findings | focused pytest 10 passed; full pytest 21 passed; Ruff passed; repeated CLI idempotent |
-| 4 | Company query services and REST endpoints | Ready | - | - | - |
-| 5 | Stage-one collection API contract | Pending | - | - | - |
+| 4 | Company query services and REST endpoints | Complete | `06fedd8`, `4d74880` | Approved after artifact-only fix round 1; one deferred Minor | focused pytest 30 passed; full pytest 51 passed; Ruff passed |
+| 5 | Stage-one collection API contract | Ready | - | - | - |
 | 6 | Search workspace frontend | Pending | - | - | - |
 | 7 | Company detail, empty state, and browser flows | Pending | - | - | - |
 | 8 | Performance verification and developer runbook | Pending | - | - | - |
@@ -166,6 +166,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-07-31 | Stage one Task 1 | Bootstrapped FastAPI, typed settings, SQLAlchemy session factory, SQLite foreign keys, and `/api/v1/health`; independent review approved with no findings | Implement normalized schema and migration |
 | 2026-07-31 | Stage one Task 2 | Added nine normalized tables and Alembic migration; fixed SQLite UTC normalization in review round 1; scoped re-review approved | Add normalization and idempotent seed import |
 | 2026-07-31 | Stage one Task 3 | Added strict seed schemas, Unicode/URL normalization, five-company seed data, and one-transaction idempotent import; review approved with no findings | Implement company query APIs |
+| 2026-07-31 | Stage one Task 4 | Added company search, detail, jobs, filters, ranking, pagination, stable errors, and source ordering; removed accidentally tracked SDD report in review round 1 | Establish disabled collection API contract |
 
 ## Update Template
 
