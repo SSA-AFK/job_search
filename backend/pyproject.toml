@@ -27,6 +27,10 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not performance'"
+markers = [
+    "performance: representative-dataset performance acceptance tests",
+]
 
 [tool.ruff]
 line-length = 100

@@ -1,2 +1,21 @@
 .worktrees/
 .superpowers/
+
+# Local backend environments, databases, and Python tooling output.
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.db
+*.sqlite
+*.sqlite3
