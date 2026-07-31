@@ -25,13 +25,13 @@ This is the living delivery document for the AI Company Search project. It is th
 |-------|-------|
 | Overall status | Implementation in progress |
 | Current stage | Stage one - Web search foundation |
-| Current task | Stage one Task 8 - Add Performance Verification and Developer Runbook |
+| Current task | Stage one whole-branch review and completion gate |
 | Execution method | Subagent-Driven Development |
 | Active branch/worktree | `codex/company-search-web-foundation` at `.worktrees/codex-company-search-web-foundation` |
-| Stage one progress | 7/8 tasks complete |
+| Stage one progress | 8/8 tasks complete; completion gate pending |
 | Stage two progress | 0/12 tasks complete |
 | Last verified artifact state | Design and both plans passed structural verification on 2026-07-31 |
-| Next action | Dispatch stage one Task 8 to add the performance gate and developer runbook |
+| Next action | Run the independent whole-branch review, resolve final findings, and verify the stage-one completion gate |
 
 ## Delivery Sequence
 
@@ -60,7 +60,7 @@ Plan: [`plans/2026-07-31-company-search-web-foundation.md`](plans/2026-07-31-com
 | 5 | Stage-one collection API contract | Complete | `3530d72` | Approved, no findings | focused pytest 5 passed; full pytest 56 passed; OpenAPI smoke and Ruff passed |
 | 6 | Search workspace frontend | Complete | `ba7b44c`, `50ef731` | Approved after fix round 1; two deferred Minors | Vitest 13 passed; build passed; contrast and responsive checks passed |
 | 7 | Company detail, empty state, and browser flows | Complete | `43b442f`, `4a26e0c` | Approved after fix round 1 | focused Vitest 8 passed; full Vitest 23 passed; build passed; Playwright desktop 3 passed and mobile 3 passed; responsive visual checks passed |
-| 8 | Performance verification and developer runbook | Pending | - | - | - |
+| 8 | Performance verification and developer runbook | Complete | `9170d5e`, `eb0a575` | Approved after fix round 1; one deferred Minor | Ruff passed; normal pytest 56 passed/2 deselected; Vitest 23 passed; build passed; Playwright 6 passed; performance 2 passed at 22.9 ms p95; migration/seed/503/artifact checks passed |
 
 ### Stage One Gate
 
@@ -149,13 +149,14 @@ The whole stage receives a separate broad review after all of its task reviews p
 | SQLite/PostgreSQL behavior diverges | Later production migration may fail | Use SQLAlchemy types, named constraints, Alembic, and dialect-aware index tests | Open |
 | LLM output is malformed or follows hostile page text | Incorrect or unsafe data could be written | Bounded plain-text evidence, fixed roles, no tools, Pydantic validation, evidence-id checks | Open until stage two |
 | Duplicate task delivery or source replay | Duplicate entities and unstable status | Database unique constraints, run idempotency, repeated-delivery integration tests | Open until stage two |
-| Search performance degrades at target volume | User-visible latency exceeds target | Indexed query paths and a 10k/100k p95 gate in stage one | Open until stage one Task 8 |
+| Search performance degrades at target volume | User-visible latency exceeds target | Indexed query paths and a 10k/100k p95 gate in stage one | Controlled at 22.9 ms p95 in Task 8 |
 
 ## Verification Evidence
 
 | Date | Scope | Command or evidence | Result |
 |------|-------|---------------------|--------|
 | 2026-07-31 | Design and implementation plans | Structural script checked required terms, obsolete terms, placeholders, trailing whitespace, balanced fences, required headers, and five steps per task | PASS: stage one 8 tasks/40 steps; stage two 12 tasks/60 steps |
+| 2026-07-31 | Stage one Task 8 acceptance matrix | Ruff, normal pytest, Vitest, build, desktop/mobile Playwright, empty migration, repeated seed, collection 503, artifact hygiene, and 10k/100k performance fixture | PASS: p95 22.9 ms; one deferred dependency deprecation warning |
 
 ## Iteration History
 
@@ -171,6 +172,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-07-31 | Stage one Task 5 | Added disabled collection POST/GET routes with normalized validation, stable 503/422 errors, and OpenAPI coverage; review approved with no findings | Build search workspace frontend |
 | 2026-07-31 | Stage one Task 6 | Built URL-driven responsive search workspace; fixed out-of-range recovery, focus contrast, and live status in review round 1 | Add detail and browser workflows |
 | 2026-07-31 | Stage one Task 7 | Added company details, paginated active jobs, provider-paired application links, terminal empty-query collection handling, and desktop/mobile browser flows; added HTTP(S)-only logo validation in review round 1 | Add performance verification and developer runbook |
+| 2026-07-31 | Stage one Task 8 | Added deterministic 10k-company/100k-job performance verification, a complete PowerShell runbook, sample environment, generated-artifact policy, and the full acceptance matrix; restored explicit frontend ignores in review round 1 | Run whole-branch review and close the stage-one completion gate |
 
 ## Update Template
 
