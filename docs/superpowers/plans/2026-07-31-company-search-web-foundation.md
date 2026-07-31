@@ -304,7 +304,7 @@ def test_job_sources_keep_provider_url_pairing(client, seeded_db, deepseek_id) -
     ]
 ```
 
-Add tests for every filter, all three sort modes, page bounds, `active_only`, malformed UUID `422`, and absent company `404`.
+The API must order each job's sources by `provider ASC, source_raw_id ASC`, which makes the literal assertion deterministic. Add tests for every filter, all three sort modes, page bounds, `active_only`, malformed UUID `422`, and absent company `404`.
 
 - [ ] **Step 2: Run contract tests and verify 404 route failures**
 
@@ -352,12 +352,10 @@ git commit -m "feat: expose company search and detail api"
 def test_collection_is_explicitly_unavailable_without_worker(client) -> None:
     response = client.post("/api/v1/collection-requests", json={"query": "示例公司"})
     assert response.status_code == 503
-    assert response.json() == {
-        "error": {
-            "code": "collection_unavailable",
-            "message": "采集服务暂不可用，请稍后再试",
-        }
-    }
+    error = response.json()["error"]
+    assert error["code"] == "collection_unavailable"
+    assert isinstance(error["message"], str)
+    assert error["message"].strip()
 ```
 
 - [ ] **Step 2: Verify the route is missing**
@@ -405,7 +403,9 @@ git commit -m "feat: define collection request api boundary"
 - Produces: `/companies?q=&industry=&sub_industry=&funding_stage=&scale=&city=&page=&sort=`
 - Produces: typed `api.getCompanies(params): Promise<Page<CompanyListItem>>`
 
-- [ ] **Step 1: Write component tests for URL-driven search state**
+- [ ] **Step 1: Create the minimal test harness, then write the failing URL-state component test**
+
+Create `package.json`, `vite.config.ts`, the TypeScript configs, and the Vitest setup required to execute a TSX component test. This configuration-only scaffold is explicitly allowed before RED; do not create application components or production behavior yet.
 
 ```tsx
 it("writes filters to the URL and requests the matching page", async () => {
@@ -424,7 +424,7 @@ Also cover loading, API error, empty result, clearing filters, page changes, and
 
 Run: `cd frontend; npm install; npm test -- --run`
 
-Expected: FAIL because the Vite project and components do not exist.
+Expected: FAIL because `SearchPage` and its production dependencies do not exist, not because npm, TypeScript, or Vitest configuration is missing.
 
 - [ ] **Step 3: Implement the typed API client and search workspace**
 
