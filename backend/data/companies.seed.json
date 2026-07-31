@@ -1,0 +1,234 @@
+{
+  "version": 1,
+  "companies": [
+    {
+      "canonical_name": "DeepSeek（深度求索）",
+      "aliases": ["DeepSeek", "深度求索"],
+      "industry": "Artificial Intelligence",
+      "sub_industry": "Foundation Models",
+      "funding_stage": "private",
+      "scale": "100-499",
+      "city": "Hangzhou",
+      "logo_url": "https://www.deepseek.com/favicon.ico",
+      "website": "https://www.deepseek.com/",
+      "description": "Develops large language models and AI assistants.",
+      "jobs": [
+        {
+          "title": "Large Model Algorithm Engineer",
+          "job_type": "full_time",
+          "city": "Hangzhou",
+          "salary_min_monthly": 35000,
+          "salary_max_monthly": 70000,
+          "salary_months": 14,
+          "description": "Research and train large language models.",
+          "posted_at": "2026-07-10",
+          "is_active": true,
+          "sources": [
+            {
+              "provider": "official",
+              "source_raw_id": "deepseek-llm-001",
+              "apply_url": "https://www.deepseek.com/careers/llm-001",
+              "first_seen_at": "2026-07-10T00:00:00Z",
+              "last_seen_at": "2026-07-31T00:00:00Z",
+              "is_active": true
+            },
+            {
+              "provider": "linkedin",
+              "source_raw_id": "deepseek-987001",
+              "apply_url": "https://www.linkedin.com/jobs/view/987001",
+              "first_seen_at": "2026-07-12T00:00:00Z",
+              "last_seen_at": "2026-07-30T00:00:00Z",
+              "is_active": true
+            }
+          ]
+        },
+        {
+          "title": "Research Intern",
+          "job_type": "internship",
+          "city": "Hangzhou",
+          "salary_min_monthly": 8000,
+          "salary_max_monthly": 12000,
+          "salary_months": 12,
+          "description": "Support model evaluation research.",
+          "posted_at": "2025-11-01",
+          "is_active": false,
+          "sources": [
+            {
+              "provider": "official",
+              "source_raw_id": "deepseek-intern-2025",
+              "apply_url": "https://www.deepseek.com/careers/intern-2025",
+              "first_seen_at": "2025-11-01T00:00:00Z",
+              "last_seen_at": "2026-01-15T00:00:00Z",
+              "is_active": false
+            }
+          ]
+        }
+      ],
+      "filings": [
+        {
+          "filing_type": "icp",
+          "filing_number": "浙ICP备2023025841号",
+          "filing_name": "DeepSeek official website",
+          "filing_authority": "Ministry of Industry and Information Technology",
+          "filing_date": "2023-08-01",
+          "filing_status": "active",
+          "detail_url": "https://beian.miit.gov.cn/"
+        }
+      ]
+    },
+    {
+      "canonical_name": "月之暗面",
+      "aliases": ["Moonshot AI", "Kimi"],
+      "industry": "Artificial Intelligence",
+      "sub_industry": "Foundation Models",
+      "funding_stage": "series_b",
+      "scale": "500-999",
+      "city": "Beijing",
+      "logo_url": "https://www.moonshot.cn/favicon.ico",
+      "website": "https://www.moonshot.cn/",
+      "description": "Builds Kimi and long-context language models.",
+      "jobs": [
+        {
+          "title": "AI Product Manager",
+          "job_type": "experienced",
+          "city": "Beijing",
+          "salary_min_monthly": 30000,
+          "salary_max_monthly": 55000,
+          "salary_months": 15,
+          "description": "Design AI assistant product experiences.",
+          "posted_at": "2026-07-15",
+          "is_active": true,
+          "sources": [
+            {
+              "provider": "official",
+              "source_raw_id": "moonshot-pm-101",
+              "apply_url": "https://www.moonshot.cn/careers/pm-101",
+              "first_seen_at": "2026-07-15T00:00:00Z",
+              "last_seen_at": "2026-07-31T00:00:00Z",
+              "is_active": true
+            }
+          ]
+        }
+      ],
+      "filings": [
+        {
+          "filing_type": "algorithm",
+          "filing_number": "110108123456789240001",
+          "filing_name": "Kimi intelligent dialogue generation algorithm",
+          "filing_authority": "Cyberspace Administration of China",
+          "filing_date": "2024-03-01",
+          "filing_status": "published",
+          "detail_url": "https://www.cac.gov.cn/"
+        }
+      ]
+    },
+    {
+      "canonical_name": "智谱AI",
+      "aliases": ["Zhipu AI", "智谱华章"],
+      "industry": "Artificial Intelligence",
+      "sub_industry": "Foundation Models",
+      "funding_stage": "series_c",
+      "scale": "1000-4999",
+      "city": "Beijing",
+      "logo_url": "https://www.zhipuai.cn/favicon.ico",
+      "website": "https://www.zhipuai.cn/",
+      "description": "Develops the GLM family of foundation models.",
+      "jobs": [
+        {
+          "title": "Backend Engineer",
+          "job_type": "full_time",
+          "city": "Beijing",
+          "salary_min_monthly": 25000,
+          "salary_max_monthly": 50000,
+          "salary_months": 14,
+          "description": "Build reliable model platform services.",
+          "posted_at": "2026-07-18",
+          "is_active": true,
+          "sources": [
+            {
+              "provider": "official",
+              "source_raw_id": "zhipu-backend-301",
+              "apply_url": "https://www.zhipuai.cn/careers/backend-301",
+              "first_seen_at": "2026-07-18T00:00:00Z",
+              "last_seen_at": "2026-07-31T00:00:00Z",
+              "is_active": true
+            }
+          ]
+        }
+      ],
+      "filings": []
+    },
+    {
+      "canonical_name": "MiniMax",
+      "aliases": ["稀宇科技", "MiniMax AI"],
+      "industry": "Artificial Intelligence",
+      "sub_industry": "Multimodal Models",
+      "funding_stage": "series_b",
+      "scale": "500-999",
+      "city": "Shanghai",
+      "logo_url": "https://www.minimaxi.com/favicon.ico",
+      "website": "https://www.minimaxi.com/",
+      "description": "Builds multimodal foundation models and AI applications.",
+      "jobs": [
+        {
+          "title": "Multimodal Research Scientist",
+          "job_type": "full_time",
+          "city": "Shanghai",
+          "salary_min_monthly": 40000,
+          "salary_max_monthly": 75000,
+          "salary_months": 15,
+          "description": "Research multimodal generation systems.",
+          "posted_at": "2026-07-20",
+          "is_active": true,
+          "sources": [
+            {
+              "provider": "official",
+              "source_raw_id": "minimax-mm-201",
+              "apply_url": "https://www.minimaxi.com/careers/mm-201",
+              "first_seen_at": "2026-07-20T00:00:00Z",
+              "last_seen_at": "2026-07-31T00:00:00Z",
+              "is_active": true
+            }
+          ]
+        }
+      ],
+      "filings": []
+    },
+    {
+      "canonical_name": "字节跳动",
+      "aliases": ["ByteDance", "火山引擎"],
+      "industry": "Internet Technology",
+      "sub_industry": "AI Platforms",
+      "funding_stage": "private",
+      "scale": "10000+",
+      "city": "Beijing",
+      "logo_url": "https://www.bytedance.com/favicon.ico",
+      "website": "https://www.bytedance.com/",
+      "description": "Operates global content products and AI platforms.",
+      "jobs": [
+        {
+          "title": "Machine Learning Platform Engineer",
+          "job_type": "experienced",
+          "city": "Beijing",
+          "salary_min_monthly": 30000,
+          "salary_max_monthly": 65000,
+          "salary_months": 15,
+          "description": "Develop large-scale machine learning infrastructure.",
+          "posted_at": "2026-07-22",
+          "is_active": true,
+          "sources": [
+            {
+              "provider": "official",
+              "source_raw_id": "bytedance-mlp-401",
+              "apply_url": "https://jobs.bytedance.com/experienced/position/401",
+              "first_seen_at": "2026-07-22T00:00:00Z",
+              "last_seen_at": "2026-07-31T00:00:00Z",
+              "is_active": true
+            }
+          ]
+        }
+      ],
+      "filings": []
+    }
+  ]
+}
