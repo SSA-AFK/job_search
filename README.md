@@ -59,13 +59,15 @@ npm test -- --run
 npm run build
 ```
 
-Install the browser binaries once, then run both desktop and mobile browser projects:
+Install the browser binaries once, then run the desktop, mobile, and real seeded browser projects:
 
 ```powershell
 Set-Location frontend
 npx playwright install
 npm run test:e2e
 ```
+
+The Playwright command starts both Vite and FastAPI without requiring a shell activation of the backend virtual environment. Its seeded backend resolves `backend/.venv/Scripts/python.exe` on Windows or `backend/.venv/bin/python` on POSIX before a resolved `PATH` fallback. To intentionally use another interpreter, set `PLAYWRIGHT_PYTHON` to its absolute executable path; the launcher validates the path and preflights the backend dependencies. Its seeded project validates and replaces only the ignored `backend/.playwright-seeded.sqlite3` file, upgrades it with Alembic, imports `backend/data/companies.seed.json` twice, verifies stable row counts, and then searches and opens the real seed through Vite's `/api` proxy. It does not require Redis, Celery, LLM credentials, collection services, or external data fetches. The mocked desktop/mobile flows remain isolated and continue to cover their existing UI states.
 
 Run the representative SQLite search performance acceptance check separately. It creates exactly 10,000 companies and 100,000 jobs using a fixed random seed, performs five warm-up requests, then measures 50 requests. The p95 must remain at or below 300 ms.
 
@@ -83,7 +85,7 @@ python -m pytest -m performance tests/performance/test_company_queries.py -q
 | `python -m pytest -q` | Backend unit, API, seed, and migration tests; excludes `performance` |
 | `npm test -- --run` | Frontend component and API-client tests |
 | `npm run build` | TypeScript and Vite production build |
-| `npm run test:e2e` | Playwright `desktop` and `mobile` projects |
+| `npm run test:e2e` | Playwright mocked `desktop`/`mobile` projects plus the real Alembic/seed/FastAPI/Vite `seeded` flow |
 | `python -m pytest -m performance tests/performance/test_company_queries.py -q` | 10,000-company / 100,000-job search p95 acceptance check |
 
 ## Collection availability

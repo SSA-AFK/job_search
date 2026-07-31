@@ -12,7 +12,7 @@ const deepSeek: CompanyListItem = {
   industry: "人工智能",
   sub_industry: "大语言模型",
   funding_stage: "series_b",
-  scale: "100-499",
+  scale: "200_to_499",
   city: "北京",
   logo_url: "https://www.deepseek.com/favicon.ico",
   website: "https://www.deepseek.com",
@@ -27,8 +27,8 @@ const moonshot: CompanyListItem = {
   canonical_name: "月之暗面",
   industry: "人工智能",
   sub_industry: "大语言模型",
-  funding_stage: "series_c",
-  scale: "100-499",
+  funding_stage: "series_c_plus",
+  scale: "500_plus",
   city: "北京",
   logo_url: null,
   website: "https://www.moonshot.cn",
@@ -88,18 +88,27 @@ describe("SearchPage", () => {
     renderSearchPage("/companies?q=deepseek&city=Beijing");
 
     expect(await screen.findByText("DeepSeek")).toBeInTheDocument();
-    await userEvent.selectOptions(screen.getByLabelText("融资阶段"), "series_b");
+    await userEvent.selectOptions(screen.getByLabelText("融资阶段"), "series_c_plus");
 
-    await waitFor(() => expect(window.location.search).toContain("funding_stage=series_b"));
+    await waitFor(() => expect(window.location.search).toContain("funding_stage=series_c_plus"));
     await waitFor(() => expect(requests).toHaveLength(2));
     expect(Object.fromEntries(requests[1].searchParams)).toEqual({
       q: "deepseek",
       city: "Beijing",
-      funding_stage: "series_b",
+      funding_stage: "series_c_plus",
       page: "1",
       page_size: "20",
       sort: "relevance",
     });
+  });
+
+  it("renders approved funding-stage and scale labels", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => jsonResponse(page([moonshot]))));
+    renderSearchPage();
+
+    const row = (await screen.findByText("月之暗面")).closest("li");
+    expect(row).toHaveTextContent("C 轮及以后");
+    expect(row).toHaveTextContent("500 人以上");
   });
 
   it("keeps a shared URL value visible when it is not in the preset options", async () => {
@@ -128,6 +137,57 @@ describe("SearchPage", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("clearing a relevance query removes the stale URL sort and requests recent updates", async () => {
+    const requests: URL[] = [];
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      requests.push(new URL(String(input), window.location.origin));
+      return jsonResponse(page());
+    }));
+    renderSearchPage("/companies?q=deepseek&sort=relevance");
+
+    await screen.findByText("DeepSeek");
+    vi.useFakeTimers();
+
+    try {
+      fireEvent.change(screen.getByRole("searchbox", { name: "搜索公司" }), {
+        target: { value: "" },
+      });
+      await act(() => vi.advanceTimersByTimeAsync(250));
+
+      expect(window.location.search).not.toContain("sort=relevance");
+      expect(requests).toHaveLength(2);
+      expect(screen.getByLabelText("排序")).toHaveValue("updated_at");
+      expect(Object.fromEntries(requests[1].searchParams)).toMatchObject({
+        page: "1",
+        page_size: "20",
+        sort: "updated_at",
+      });
+      expect(requests[1].searchParams.has("q")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("normalizes a direct queryless relevance URL to recent updates", async () => {
+    const requests: URL[] = [];
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      requests.push(new URL(String(input), window.location.origin));
+      return jsonResponse(page());
+    }));
+    renderSearchPage("/companies?sort=relevance");
+
+    await screen.findByText("DeepSeek");
+
+    expect(window.location.search).not.toContain("sort=relevance");
+    expect(screen.getByLabelText("排序")).toHaveValue("updated_at");
+    expect(Object.fromEntries(requests[0].searchParams)).toMatchObject({
+      page: "1",
+      page_size: "20",
+      sort: "updated_at",
+    });
+    expect(requests).toHaveLength(1);
   });
 
   it("aborts a stale request when URL filters change", async () => {
@@ -284,6 +344,21 @@ describe("SearchPage", () => {
     await screen.findByText("DeepSeek");
     expect(screen.queryByRole("link", { name: "访问 DeepSeek 官网" })).not.toBeInTheDocument();
     expect(screen.getByText("官网待确认")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["non-HTTP", "data:image/svg+xml,<svg></svg>"],
+    ["credential-bearing", "https://user:password@example.com/logo.png"],
+  ])("falls back to initials for a %s list logo", async (_case, logoUrl) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => jsonResponse(page([{ ...deepSeek, logo_url: logoUrl }]))),
+    );
+    renderSearchPage();
+
+    await screen.findByText("DeepSeek");
+    expect(document.querySelector("img.company-logo")).not.toBeInTheDocument();
+    expect(document.querySelector(".company-logo.logo-fallback")).toHaveTextContent("DE");
   });
 
   it("clears every active filter and returns to the first page", async () => {

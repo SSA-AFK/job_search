@@ -4,9 +4,11 @@ from typing import Annotated, Literal
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
 from app.core.normalization import normalize_url
-from app.models.enums import FilingType, JobType
+from app.models.enums import CompanyScale, FilingType, FundingStage, JobType
 
 NonEmptyText = Annotated[str, Field(min_length=1)]
+CompanyUrl = Annotated[str, Field(min_length=1, max_length=1000)]
+ExternalUrl = Annotated[str, Field(min_length=1, max_length=2000)]
 
 
 class StrictSeedModel(BaseModel):
@@ -16,7 +18,7 @@ class StrictSeedModel(BaseModel):
 class SeedJobSource(StrictSeedModel):
     provider: NonEmptyText
     source_raw_id: NonEmptyText
-    apply_url: NonEmptyText
+    apply_url: ExternalUrl
     first_seen_at: AwareDatetime
     last_seen_at: AwareDatetime
     is_active: bool = True
@@ -52,7 +54,7 @@ class SeedFiling(StrictSeedModel):
     filing_authority: str | None = None
     filing_date: date | None = None
     filing_status: str | None = None
-    detail_url: str | None = None
+    detail_url: ExternalUrl | None = None
 
     @field_validator("detail_url", mode="before")
     @classmethod
@@ -65,11 +67,11 @@ class SeedCompany(StrictSeedModel):
     aliases: list[NonEmptyText] = Field(default_factory=list)
     industry: str | None = None
     sub_industry: str | None = None
-    funding_stage: str = "unknown"
-    scale: str = "unknown"
+    funding_stage: FundingStage = FundingStage.UNKNOWN
+    scale: CompanyScale = CompanyScale.UNKNOWN
     city: str | None = None
-    logo_url: str | None = None
-    website: str | None = None
+    logo_url: CompanyUrl | None = None
+    website: CompanyUrl | None = None
     description: str | None = None
     jobs: list[SeedJob] = Field(default_factory=list)
     filings: list[SeedFiling] = Field(default_factory=list)

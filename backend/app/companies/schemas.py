@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.enums import FilingType, JobType
+from app.models.enums import CompanyScale, FilingType, FundingStage, JobType
 
 
 class CompanySort(StrEnum):
@@ -26,8 +26,8 @@ class CompanyQuery(PageQuery):
     q: Annotated[str | None, Field(max_length=255)] = None
     industry: Annotated[str | None, Field(max_length=100)] = None
     sub_industry: Annotated[str | None, Field(max_length=100)] = None
-    funding_stage: Annotated[str | None, Field(max_length=50)] = None
-    scale: Annotated[str | None, Field(max_length=50)] = None
+    funding_stage: FundingStage | None = None
+    scale: CompanyScale | None = None
     city: Annotated[str | None, Field(max_length=50)] = None
     sort: CompanySort | None = None
 
@@ -49,8 +49,8 @@ class CompanyListItem(BaseModel):
     canonical_name: str
     industry: str | None
     sub_industry: str | None
-    funding_stage: str
-    scale: str
+    funding_stage: FundingStage
+    scale: CompanyScale
     city: str | None
     logo_url: str | None
     website: str | None

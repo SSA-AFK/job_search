@@ -1,7 +1,14 @@
 from app.models.base import GUID, Base, TimestampMixin, UTCDateTime
 from app.models.collection import CollectionRequest, CrawlRun
 from app.models.company import Company, CompanyAlias
-from app.models.enums import CollectionStatus, FilingType, JobType, RunType
+from app.models.enums import (
+    CollectionStatus,
+    CompanyScale,
+    FilingType,
+    FundingStage,
+    JobType,
+    RunType,
+)
 from app.models.filing import RegulatoryFiling
 from app.models.job import JobPosting, JobSource
 from app.models.source import CompanySource, SourceDocument
@@ -13,9 +20,11 @@ __all__ = [
     "CollectionStatus",
     "Company",
     "CompanyAlias",
+    "CompanyScale",
     "CompanySource",
     "CrawlRun",
     "FilingType",
+    "FundingStage",
     "JobPosting",
     "JobSource",
     "JobType",

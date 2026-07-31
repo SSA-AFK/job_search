@@ -40,6 +40,13 @@ export function SearchPage() {
   }, [params.q]);
 
   useEffect(() => {
+    if (params.q || searchParams.get("sort") !== "relevance") return;
+    const next = new URLSearchParams(searchParams);
+    next.delete("sort");
+    setSearchParams(next, { replace: true });
+  }, [params.q, searchParams, setSearchParams]);
+
+  useEffect(() => {
     if (searchValue.trim() === (params.q ?? "")) return;
     const timeout = window.setTimeout(() => {
       setSearchParams(withSearchParam(searchParams, "q", searchValue), { replace: true });
@@ -48,6 +55,7 @@ export function SearchPage() {
   }, [params.q, searchParams, searchValue, setSearchParams]);
 
   useEffect(() => {
+    if (!params.q && searchParams.get("sort") === "relevance") return;
     const controller = new AbortController();
     setLoading(true);
     setError(false);

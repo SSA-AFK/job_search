@@ -1,6 +1,6 @@
 import { Search, X } from "lucide-react";
 
-import type { CompanySearchParams } from "../api/types";
+import type { CompanyScale, CompanySearchParams, FundingStage } from "../api/types";
 import type { SearchParamKey } from "./search-params";
 
 type FiltersProps = {
@@ -23,21 +23,23 @@ const options = {
     ["AI Platforms", "AI 平台"],
   ],
   funding_stage: [
-    ["private", "未公开"],
+    ["seed", "种子轮"],
     ["angel", "天使轮"],
+    ["pre_a", "Pre-A 轮"],
     ["series_a", "A 轮"],
     ["series_b", "B 轮"],
-    ["series_c", "C 轮及以后"],
-    ["ipo", "已上市"],
-  ],
+    ["series_c_plus", "C 轮及以后"],
+    ["public", "已上市"],
+    ["unfunded", "未融资"],
+    ["unknown", "未知"],
+  ] satisfies ReadonlyArray<readonly [FundingStage, string]>,
   scale: [
-    ["1-99", "1-99 人"],
-    ["100-499", "100-499 人"],
-    ["500-999", "500-999 人"],
-    ["1000-4999", "1,000-4,999 人"],
-    ["5000-9999", "5,000-9,999 人"],
-    ["10000+", "10,000 人以上"],
-  ],
+    ["one_to_49", "1-49 人"],
+    ["50_to_199", "50-199 人"],
+    ["200_to_499", "200-499 人"],
+    ["500_plus", "500 人以上"],
+    ["unknown", "未知"],
+  ] satisfies ReadonlyArray<readonly [CompanyScale, string]>,
   city: [
     ["Beijing", "北京"],
     ["Shanghai", "上海"],

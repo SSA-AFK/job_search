@@ -1,5 +1,6 @@
 from collections.abc import Iterator
 from datetime import UTC, timedelta
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
@@ -43,8 +44,8 @@ def seed_data() -> dict[str, object]:
                 "aliases": ["Deep Seek", "深度求索"],
                 "industry": "Artificial Intelligence",
                 "sub_industry": "Foundation Models",
-                "funding_stage": "private",
-                "scale": "100-499",
+                "funding_stage": "unknown",
+                "scale": "200_to_499",
                 "city": "Hangzhou",
                 "website": "https://deepseek.com/",
                 "description": "Builds foundation models.",
@@ -155,6 +156,67 @@ def test_seed_schema_rejects_non_http_urls(seed_data: dict[str, object]) -> None
     seed_data["companies"][0]["website"] = "file:///etc/passwd"  # type: ignore[index]
 
     with pytest.raises(ValidationError, match="HTTP"):
+        SeedPayload.model_validate(seed_data)
+
+
+def _set_seed_url(seed_data: dict[str, object], target: str, value: str) -> None:
+    company = cast(dict[str, Any], cast(list[object], seed_data["companies"])[0])
+    if target in {"logo_url", "website"}:
+        company[target] = value
+    elif target == "apply_url":
+        company["jobs"][0]["sources"][0][target] = value
+    else:
+        company["filings"][0][target] = value
+
+
+@pytest.mark.parametrize("target", ["logo_url", "website", "apply_url", "detail_url"])
+def test_seed_schema_rejects_credential_bearing_urls(
+    seed_data: dict[str, object],
+    target: str,
+) -> None:
+    _set_seed_url(seed_data, target, "https://user:password@example.com/resource")
+
+    with pytest.raises(ValidationError, match="credentials"):
+        SeedPayload.model_validate(seed_data)
+
+
+@pytest.mark.parametrize(
+    ("target", "maximum_length"),
+    [
+        ("logo_url", 1000),
+        ("website", 1000),
+        ("apply_url", 2000),
+        ("detail_url", 2000),
+    ],
+)
+def test_seed_schema_rejects_overlong_urls(
+    seed_data: dict[str, object],
+    target: str,
+    maximum_length: int,
+) -> None:
+    _set_seed_url(seed_data, target, "https://example.com/" + "x" * maximum_length)
+
+    with pytest.raises(ValidationError):
+        SeedPayload.model_validate(seed_data)
+
+
+@pytest.mark.parametrize(
+    ("field", "unsupported_value"),
+    [
+        ("funding_stage", "private"),
+        ("funding_stage", "series_c"),
+        ("funding_stage", "ipo"),
+        ("scale", "100-499"),
+    ],
+)
+def test_seed_schema_rejects_unsupported_company_vocabulary(
+    seed_data: dict[str, object],
+    field: str,
+    unsupported_value: str,
+) -> None:
+    seed_data["companies"][0][field] = unsupported_value  # type: ignore[index]
+
+    with pytest.raises(ValidationError):
         SeedPayload.model_validate(seed_data)
 
 

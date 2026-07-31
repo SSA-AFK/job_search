@@ -158,8 +158,8 @@ def test_alias_exact_match_precedes_contains_match(client: TestClient) -> None:
             ["DeepSeek", "MiniMax", "智谱AI", "月之暗面"],
         ),
         ("sub_industry", "Multimodal Models", ["MiniMax"]),
-        ("funding_stage", "private", ["DeepSeek", "字节跳动"]),
-        ("scale", "1000-4999", ["智谱AI"]),
+        ("funding_stage", "series_c_plus", ["智谱AI"]),
+        ("scale", "200_to_499", ["DeepSeek"]),
         ("city", "Shanghai", ["MiniMax"]),
     ],
 )
@@ -176,6 +176,31 @@ def test_company_search_applies_each_exact_filter(
 
     assert response.status_code == 200
     assert [item["canonical_name"] for item in response.json()["items"]] == expected_names
+
+
+@pytest.mark.parametrize(
+    ("parameter", "unsupported_value"),
+    [
+        ("funding_stage", "private"),
+        ("funding_stage", "series_c"),
+        ("funding_stage", "ipo"),
+        ("scale", "100-499"),
+    ],
+)
+def test_company_search_rejects_unsupported_company_vocabulary(
+    client: TestClient,
+    parameter: str,
+    unsupported_value: str,
+) -> None:
+    response = client.get("/api/v1/companies", params={parameter: unsupported_value})
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "error": {
+            "code": "validation_error",
+            "message": "Request validation failed",
+        }
+    }
 
 
 def test_company_search_combines_filters(client: TestClient) -> None:

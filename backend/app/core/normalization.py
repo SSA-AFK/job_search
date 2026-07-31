@@ -13,6 +13,8 @@ def normalize_url(value: str) -> str:
     scheme = parts.scheme.casefold()
     if scheme not in {"http", "https"} or not parts.hostname:
         raise ValueError("URL must use HTTP or HTTPS and include a host")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("URL must not include credentials")
 
     host = parts.hostname.casefold()
     if ":" in host and not host.startswith("["):
@@ -21,11 +23,4 @@ def normalize_url(value: str) -> str:
         scheme == "https" and parts.port == 443
     )
     port = "" if parts.port is None or default_port else f":{parts.port}"
-    userinfo = ""
-    if parts.username is not None:
-        userinfo = parts.username
-        if parts.password is not None:
-            userinfo += f":{parts.password}"
-        userinfo += "@"
-
-    return urlunsplit((scheme, f"{userinfo}{host}{port}", parts.path, parts.query, ""))
+    return urlunsplit((scheme, f"{host}{port}", parts.path, parts.query, ""))

@@ -1,7 +1,65 @@
+import logging
+from uuid import uuid4
+
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+logger = logging.getLogger("app.errors")
+
+
+class UnexpectedErrorMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        response_started = False
+
+        async def tracked_send(message: Message) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, tracked_send)
+        except Exception:  # noqa: BLE001 - this is the process-wide HTTP error boundary.
+            request_id = str(uuid4())
+            route = getattr(scope.get("route"), "path", "unmatched")
+            logger.error(
+                "Unhandled request failure",
+                extra={
+                    "error_code": "internal_error",
+                    "method": scope.get("method", "UNKNOWN"),
+                    "request_id": request_id,
+                    "route": route,
+                },
+            )
+            if response_started:
+                return
+            response = JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={
+                    "error": {
+                        "code": "internal_error",
+                        "message": "Internal server error",
+                        "request_id": request_id,
+                    }
+                },
+                headers={"X-Request-ID": request_id},
+            )
+            await response(scope, receive, send)
 
 
 class DomainError(Exception):
@@ -57,6 +115,7 @@ async def http_error_handler(_request: Request, error: StarletteHTTPException) -
 
 
 def register_error_handlers(app: FastAPI) -> None:
+    app.add_middleware(UnexpectedErrorMiddleware)
     app.add_exception_handler(DomainError, domain_error_handler)  # type: ignore[arg-type]
     app.add_exception_handler(RequestValidationError, validation_error_handler)  # type: ignore[arg-type]
     app.add_exception_handler(StarletteHTTPException, http_error_handler)  # type: ignore[arg-type]

@@ -4,16 +4,33 @@ import { Link, useParams } from "react-router-dom";
 
 import { api, ApiError } from "../api/client";
 import { safeHttpUrl } from "../api/http-url";
-import type { CompanyDetail, JobListItem, Page } from "../api/types";
+import type {
+  CompanyDetail,
+  CompanyScale,
+  FundingStage,
+  JobListItem,
+  Page,
+} from "../api/types";
 import { JobList } from "./JobList";
 
-const fundingLabels: Record<string, string> = {
-  private: "未公开",
+const fundingLabels: Record<FundingStage, string> = {
+  seed: "种子轮",
   angel: "天使轮",
+  pre_a: "Pre-A 轮",
   series_a: "A 轮",
   series_b: "B 轮",
-  series_c: "C 轮及以后",
-  ipo: "已上市",
+  series_c_plus: "C 轮及以后",
+  public: "已上市",
+  unfunded: "未融资",
+  unknown: "未知",
+};
+
+const scaleLabels: Record<CompanyScale, string> = {
+  one_to_49: "1-49 人",
+  "50_to_199": "50-199 人",
+  "200_to_499": "200-499 人",
+  "500_plus": "500 人以上",
+  unknown: "未知",
 };
 
 const filingLabels: Record<string, string> = {
@@ -51,7 +68,7 @@ function DetailContent({ company, activeJobCount }: { company: CompanyDetail; ac
         <div>
           <h1>{company.canonical_name}</h1>
           <p className="detail-tags">
-            {[company.industry, company.sub_industry, fundingLabels[company.funding_stage] ?? company.funding_stage, company.scale, company.city]
+            {[company.industry, company.sub_industry, fundingLabels[company.funding_stage], scaleLabels[company.scale], company.city]
               .filter(Boolean).join(" · ")}
           </p>
         </div>

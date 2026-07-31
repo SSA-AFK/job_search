@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "test": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "node --test node-tests/python-interpreter.test.mjs && playwright test",
+    "test:e2e:backend": "node tests/start-seeded-backend.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

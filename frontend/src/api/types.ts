@@ -1,11 +1,27 @@
 export type CompanySort = "relevance" | "name" | "updated_at";
+export type FundingStage =
+  | "seed"
+  | "angel"
+  | "pre_a"
+  | "series_a"
+  | "series_b"
+  | "series_c_plus"
+  | "public"
+  | "unfunded"
+  | "unknown";
+export type CompanyScale =
+  | "one_to_49"
+  | "50_to_199"
+  | "200_to_499"
+  | "500_plus"
+  | "unknown";
 
 export type CompanySearchParams = {
   q?: string;
   industry?: string;
   sub_industry?: string;
-  funding_stage?: string;
-  scale?: string;
+  funding_stage?: FundingStage;
+  scale?: CompanyScale;
   city?: string;
   page: number;
   page_size: number;
@@ -16,8 +32,8 @@ export type CompanyListItem = {
   canonical_name: string;
   industry: string | null;
   sub_industry: string | null;
-  funding_stage: string;
-  scale: string;
+  funding_stage: FundingStage;
+  scale: CompanyScale;
   city: string | null;
   logo_url: string | null;
   website: string | null;

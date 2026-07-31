@@ -1,4 +1,9 @@
-import type { CompanySearchParams, CompanySort } from "../api/types";
+import type {
+  CompanyScale,
+  CompanySearchParams,
+  CompanySort,
+  FundingStage,
+} from "../api/types";
 
 export const PAGE_SIZE = 20;
 
@@ -25,12 +30,14 @@ export function readCompanySearchParams(searchParams: URLSearchParams): CompanyS
     q,
     industry: searchParams.get("industry")?.trim() || undefined,
     sub_industry: searchParams.get("sub_industry")?.trim() || undefined,
-    funding_stage: searchParams.get("funding_stage")?.trim() || undefined,
-    scale: searchParams.get("scale")?.trim() || undefined,
+    funding_stage: searchParams.get("funding_stage")?.trim() as FundingStage || undefined,
+    scale: searchParams.get("scale")?.trim() as CompanyScale || undefined,
     city: searchParams.get("city")?.trim() || undefined,
     page: positiveInteger(searchParams.get("page")),
     page_size: PAGE_SIZE,
-    sort: requestedSort && sorts.has(requestedSort) ? requestedSort : q ? "relevance" : "updated_at",
+    sort: requestedSort && sorts.has(requestedSort) && (requestedSort !== "relevance" || q)
+      ? requestedSort
+      : q ? "relevance" : "updated_at",
   };
 }
 
@@ -44,6 +51,7 @@ export function withSearchParam(
 
   if (normalized) next.set(key, normalized);
   else next.delete(key);
+  if (key === "q" && !normalized && next.get("sort") === "relevance") next.delete("sort");
   next.delete("page");
   return next;
 }
