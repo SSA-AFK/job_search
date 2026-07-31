@@ -19,3 +19,13 @@ htmlcov/
 *.db
 *.sqlite
 *.sqlite3
+
+# Local frontend dependencies, builds, and browser-test output.
+frontend/node_modules/
+frontend/dist/
+frontend/playwright-report/
+frontend/test-results/
+frontend/blob-report/
+frontend/.vite/
+frontend/coverage/
+frontend/*.tsbuildinfo
