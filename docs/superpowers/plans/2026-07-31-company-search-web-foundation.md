@@ -386,6 +386,7 @@ git commit -m "feat: define collection request api boundary"
 ### Task 6: Build the Search Workspace Frontend
 
 **Files:**
+- Create: `frontend/.gitignore`
 - Create: `frontend/package.json`
 - Create: `frontend/vite.config.ts`
 - Create: `frontend/playwright.config.ts`
@@ -407,7 +408,7 @@ git commit -m "feat: define collection request api boundary"
 
 - [ ] **Step 1: Create the minimal test harness, then write the failing URL-state component test**
 
-Create `package.json`, `vite.config.ts`, the TypeScript configs, and the Vitest setup required to execute a TSX component test. This configuration-only scaffold is explicitly allowed before RED; do not create application components or production behavior yet.
+Create `.gitignore` with `node_modules/`, `dist/`, `playwright-report/`, and `test-results/`; then create `package.json`, `vite.config.ts`, the TypeScript configs, and the Vitest setup required to execute a TSX component test. This configuration-only scaffold is explicitly allowed before RED; do not create application components or production behavior yet.
 
 ```tsx
 it("writes filters to the URL and requests the matching page", async () => {
@@ -457,7 +458,7 @@ Expected: PASS; Vite emits a production bundle without TypeScript errors.
 - [ ] **Step 5: Commit the search workspace**
 
 ```powershell
-git add frontend
+git add frontend/.gitignore frontend/package.json frontend/package-lock.json frontend/*.config.* frontend/tsconfig*.json frontend/index.html frontend/src
 git commit -m "feat: add url-driven company search workspace"
 ```
 

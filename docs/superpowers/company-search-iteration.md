@@ -139,6 +139,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-07-31 | Execute with Subagent-Driven Development | Provides a fresh implementer and independent review gate per task | Inline execution option |
 | 2026-07-31 | Resolve stage-one test preflight in favor of behavioral assertions | Keep user-facing error copy changeable, define deterministic source ordering, and allow only the minimal frontend test harness before RED | Ambiguous plan test details |
 | 2026-07-31 | Keep `JobSource` without `TimestampMixin` | `first_seen_at` and `last_seen_at` already define source lifecycle; the approved design does not include redundant creation/update fields | Conflicting Task 2 code example |
+| 2026-07-31 | Ignore frontend generated artifacts when the frontend is created | `npm install` and browser tooling generate large local directories before Task 8; guarding them in Task 6 prevents accidental staging | Task 8-only `.gitignore` timing |
 
 ## Active Risks
 
