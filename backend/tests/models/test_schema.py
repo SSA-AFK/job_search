@@ -1,5 +1,5 @@
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine, event, func, select
@@ -220,3 +220,21 @@ def test_enum_columns_keep_documented_storage_widths() -> None:
 def test_crawl_run_counters_have_database_defaults() -> None:
     for column_name in ("documents_found", "jobs_found", "jobs_written"):
         assert CrawlRun.__table__.c[column_name].server_default is not None
+
+
+def test_sqlite_datetime_round_trip_normalizes_aware_values_to_utc(session: Session) -> None:
+    utc_plus_eight = timezone(timedelta(hours=8))
+    source = SourceDocument(
+        provider="official",
+        url="https://example.com/time",
+        text_excerpt="Timestamp evidence",
+        content_hash="b" * 64,
+        published_at=datetime(2026, 7, 31, 12, 30, tzinfo=utc_plus_eight),
+        fetched_at=datetime(2026, 7, 31, 13, 45, tzinfo=utc_plus_eight),
+    )
+    session.add(source)
+    session.commit()
+    session.expire(source)
+
+    assert source.published_at == datetime(2026, 7, 31, 4, 30, tzinfo=UTC)
+    assert source.fetched_at == datetime(2026, 7, 31, 5, 45, tzinfo=UTC)

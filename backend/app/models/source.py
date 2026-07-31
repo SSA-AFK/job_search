@@ -4,7 +4,6 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     JSON,
-    DateTime,
     ForeignKey,
     Numeric,
     SmallInteger,
@@ -14,7 +13,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import GUID, Base
+from app.models.base import GUID, Base, UTCDateTime
 
 
 class SourceDocument(Base):
@@ -33,8 +32,8 @@ class SourceDocument(Base):
     text_excerpt: Mapped[str] = mapped_column(Text)
     content_hash: Mapped[str] = mapped_column(String(64))
     authority_level: Mapped[int | None] = mapped_column(SmallInteger)
-    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    fetched_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
 
 class CompanySource(Base):

@@ -4,7 +4,6 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     Boolean,
     Date,
-    DateTime,
     Enum,
     ForeignKey,
     Index,
@@ -16,7 +15,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import GUID, Base, TimestampMixin, utc_now
+from app.models.base import GUID, Base, TimestampMixin, UTCDateTime, utc_now
 from app.models.enums import JobType
 
 
@@ -67,9 +66,9 @@ class JobSource(Base):
     source_raw_id: Mapped[str] = mapped_column(String(255))
     apply_url: Mapped[str] = mapped_column(String(2000))
     first_seen_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
+        UTCDateTime(), default=utc_now, nullable=False
     )
     last_seen_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
+        UTCDateTime(), default=utc_now, nullable=False
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)

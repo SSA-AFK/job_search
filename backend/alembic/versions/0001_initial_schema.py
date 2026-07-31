@@ -10,7 +10,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 
 from alembic import op
-from app.models.base import GUID
+from app.models.base import GUID, UTCDateTime
 
 revision: str = "0001_initial_schema"
 down_revision: str | None = None
@@ -86,9 +86,9 @@ def upgrade() -> None:
         sa.Column("logo_url", sa.String(1000), nullable=True),
         sa.Column("website", sa.String(1000), nullable=True),
         sa.Column("description", sa.Text(), nullable=True),
-        sa.Column("last_collected_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("last_collected_at", UTCDateTime(), nullable=True),
+        sa.Column("created_at", UTCDateTime(), nullable=False),
+        sa.Column("updated_at", UTCDateTime(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("normalized_name", name="uq_company_normalized_name"),
     )
@@ -109,8 +109,8 @@ def upgrade() -> None:
         sa.Column("text_excerpt", sa.Text(), nullable=False),
         sa.Column("content_hash", sa.String(64), nullable=False),
         sa.Column("authority_level", sa.SmallInteger(), nullable=True),
-        sa.Column("published_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("fetched_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("published_at", UTCDateTime(), nullable=True),
+        sa.Column("fetched_at", UTCDateTime(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint(
             "provider", "external_id", name="uq_source_document_provider_external_id"
@@ -158,8 +158,8 @@ def upgrade() -> None:
         sa.Column("description", sa.Text(), nullable=False),
         sa.Column("posted_at", sa.Date(), nullable=True),
         sa.Column("is_active", sa.Boolean(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("created_at", UTCDateTime(), nullable=False),
+        sa.Column("updated_at", UTCDateTime(), nullable=False),
         sa.ForeignKeyConstraint(["company_id"], ["companies.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
     )
@@ -175,8 +175,8 @@ def upgrade() -> None:
         sa.Column("provider", sa.String(50), nullable=False),
         sa.Column("source_raw_id", sa.String(255), nullable=False),
         sa.Column("apply_url", sa.String(2000), nullable=False),
-        sa.Column("first_seen_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("first_seen_at", UTCDateTime(), nullable=False),
+        sa.Column("last_seen_at", UTCDateTime(), nullable=False),
         sa.Column("is_active", sa.Boolean(), nullable=False),
         sa.ForeignKeyConstraint(
             ["job_posting_id"], ["job_postings.id"], ondelete="CASCADE"
@@ -200,8 +200,8 @@ def upgrade() -> None:
         sa.Column("filing_date", sa.Date(), nullable=True),
         sa.Column("filing_status", sa.String(50), nullable=True),
         sa.Column("detail_url", sa.String(2000), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("created_at", UTCDateTime(), nullable=False),
+        sa.Column("updated_at", UTCDateTime(), nullable=False),
         sa.ForeignKeyConstraint(["company_id"], ["companies.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(
             ["source_document_id"], ["source_documents.id"], ondelete="SET NULL"
@@ -218,9 +218,9 @@ def upgrade() -> None:
         sa.Column("status", collection_status, nullable=False),
         sa.Column("company_id", GUID(), nullable=True),
         sa.Column("error_code", sa.String(50), nullable=True),
-        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("completed_at", UTCDateTime(), nullable=True),
+        sa.Column("created_at", UTCDateTime(), nullable=False),
+        sa.Column("updated_at", UTCDateTime(), nullable=False),
         sa.ForeignKeyConstraint(["company_id"], ["companies.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),
     )
@@ -244,9 +244,9 @@ def upgrade() -> None:
         sa.Column("jobs_written", sa.Integer(), server_default=sa.text("0"), nullable=False),
         sa.Column("error_code", sa.String(50), nullable=True),
         sa.Column("error_detail", sa.Text(), nullable=True),
-        sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("started_at", UTCDateTime(), nullable=True),
+        sa.Column("completed_at", UTCDateTime(), nullable=True),
+        sa.Column("created_at", UTCDateTime(), nullable=False),
         sa.ForeignKeyConstraint(
             ["collection_request_id"], ["collection_requests.id"], ondelete="SET NULL"
         ),

@@ -1,10 +1,10 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import GUID, Base, TimestampMixin
+from app.models.base import GUID, Base, TimestampMixin, UTCDateTime
 
 
 class Company(Base, TimestampMixin):
@@ -30,7 +30,7 @@ class Company(Base, TimestampMixin):
     logo_url: Mapped[str | None] = mapped_column(String(1000))
     website: Mapped[str | None] = mapped_column(String(1000))
     description: Mapped[str | None] = mapped_column(Text)
-    last_collected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_collected_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class CompanyAlias(Base):

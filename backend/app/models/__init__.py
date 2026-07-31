@@ -1,4 +1,4 @@
-from app.models.base import GUID, Base, TimestampMixin
+from app.models.base import GUID, Base, TimestampMixin, UTCDateTime
 from app.models.collection import CollectionRequest, CrawlRun
 from app.models.company import Company, CompanyAlias
 from app.models.enums import CollectionStatus, FilingType, JobType, RunType
@@ -23,4 +23,5 @@ __all__ = [
     "RunType",
     "SourceDocument",
     "TimestampMixin",
+    "UTCDateTime",
 ]

@@ -1,10 +1,10 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, Enum, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import GUID, Base, TimestampMixin, utc_now
+from app.models.base import GUID, Base, TimestampMixin, UTCDateTime, utc_now
 from app.models.enums import CollectionStatus, RunType
 
 
@@ -37,7 +37,7 @@ class CollectionRequest(Base, TimestampMixin):
         ForeignKey("companies.id", ondelete="SET NULL")
     )
     error_code: Mapped[str | None] = mapped_column(String(50))
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class CrawlRun(Base):
@@ -61,8 +61,8 @@ class CrawlRun(Base):
     jobs_written: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     error_code: Mapped[str | None] = mapped_column(String(50))
     error_detail: Mapped[str | None] = mapped_column(Text)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
+        UTCDateTime(), default=utc_now, nullable=False
     )

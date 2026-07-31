@@ -35,14 +35,35 @@ class GUID(TypeDecorator[UUID]):
         return value if isinstance(value, UUID) else UUID(value)
 
 
+class UTCDateTime(TypeDecorator[datetime]):
+    """Persist timezone-aware values as UTC and return UTC-aware datetimes."""
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, _dialect: Any) -> datetime | None:
+        if value is None:
+            return None
+        if value.utcoffset() is None:
+            raise ValueError("UTCDateTime requires a timezone-aware datetime")
+        return value.astimezone(UTC)
+
+    def process_result_value(self, value: datetime | None, _dialect: Any) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+
 class Base(DeclarativeBase):
     pass
 
 
 class TimestampMixin:
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
+        UTCDateTime(), default=utc_now, nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+        UTCDateTime(), default=utc_now, onupdate=utc_now, nullable=False
     )
