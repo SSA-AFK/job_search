@@ -179,8 +179,39 @@ describe("SearchPage", () => {
     vi.stubGlobal("fetch", vi.fn(() => jsonResponse(page([]))));
     renderSearchPage("/companies?q=不存在公司");
 
-    expect(await screen.findByText("没有找到符合条件的公司")).toBeInTheDocument();
+    const emptyHeading = await screen.findByText("没有找到符合条件的公司");
+    expect(emptyHeading.closest('[role="status"]')).toHaveAttribute("aria-live", "polite");
     expect(screen.getAllByRole("button", { name: "清除全部筛选" })[0]).toBeEnabled();
+  });
+
+  it("offers a valid-page recovery when the requested page is out of range", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = new URL(String(input), window.location.origin);
+        const currentPage = Number(url.searchParams.get("page") ?? "1");
+        return currentPage === 999
+          ? jsonResponse(page([], 999, 21))
+          : jsonResponse(page([moonshot], currentPage, 21));
+      }),
+    );
+    renderSearchPage("/companies?q=deepseek&page=999");
+
+    const recoveryHeading = await screen.findByText("当前页超出结果范围");
+    expect(recoveryHeading.closest('[role="status"]')).toHaveAttribute("aria-live", "polite");
+    await userEvent.click(screen.getByRole("button", { name: "返回第 2 页" }));
+
+    expect(await screen.findByText("月之暗面")).toBeInTheDocument();
+    expect(window.location.search).toContain("page=2");
+  });
+
+  it("announces the populated result count as a polite live status", async () => {
+    renderSearchPage();
+
+    await screen.findByText("DeepSeek");
+    const status = screen.getByRole("status");
+    expect(status).toHaveAttribute("aria-live", "polite");
+    expect(status).toHaveTextContent("共 1 家");
   });
 
   it("does not render an executable website URL", async () => {

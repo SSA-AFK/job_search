@@ -13,6 +13,7 @@
   --primary: oklch(0.55 0.145 150);
   --primary-hover: oklch(0.49 0.14 150);
   --primary-soft: oklch(0.95 0.04 150);
+  --focus-ring: oklch(0.47 0.155 255);
   --link: oklch(0.47 0.155 255);
   --danger: oklch(0.49 0.17 25);
   --danger-soft: oklch(0.96 0.025 25);
@@ -35,7 +36,7 @@ a { color: var(--link); }
 button, select, input { transition: border-color 180ms ease-out, background-color 180ms ease-out, color 180ms ease-out; }
 
 button:focus-visible, select:focus-visible, input:focus-visible, a:focus-visible {
-  outline: 3px solid var(--primary-soft);
+  outline: 3px solid var(--focus-ring);
   outline-offset: 2px;
   border-color: var(--primary);
 }
@@ -78,7 +79,7 @@ h1 { margin: 0; font-size: 1.625rem; line-height: 1.25; font-weight: 720; }
 
 .search-input-wrap svg { flex: 0 0 auto; color: var(--muted); }
 
-.search-input-wrap:focus-within { outline: 3px solid var(--primary-soft); border-color: var(--primary); }
+.search-input-wrap:focus-within { outline: 3px solid var(--focus-ring); border-color: var(--primary); }
 
 .search-input-wrap input { width: 100%; min-width: 0; height: 100%; padding: 0; border: 0; outline: 0; background: transparent; color: var(--ink); }
 

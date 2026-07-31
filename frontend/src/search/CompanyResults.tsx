@@ -140,9 +140,11 @@ export function CompanyResults({
     );
   }
 
-  if (!data || data.items.length === 0) {
+  const pageCount = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1;
+
+  if (!data || data.total === 0) {
     return (
-      <div className="result-message empty-message">
+      <div className="result-message empty-message" role="status" aria-live="polite" aria-atomic="true">
         <div>
           <h2>没有找到符合条件的公司</h2>
           <p>尝试缩短关键词或减少筛选条件。</p>
@@ -154,13 +156,26 @@ export function CompanyResults({
     );
   }
 
-  const pageCount = Math.max(1, Math.ceil(data.total / data.page_size));
+  if (data.items.length === 0 && data.page > pageCount) {
+    return (
+      <div className="result-message empty-message" role="status" aria-live="polite" aria-atomic="true">
+        <div>
+          <h2>当前页超出结果范围</h2>
+          <p>结果共有 {pageCount} 页，请返回最后一个有效页面。</p>
+        </div>
+        <button className="secondary-button" type="button" onClick={() => onPageChange(pageCount)}>
+          返回第 {pageCount} 页
+        </button>
+      </div>
+    );
+  }
+
   return (
     <section className="results" aria-labelledby="result-heading">
       <div className="results-toolbar">
         <div>
           <h2 id="result-heading">公司结果</h2>
-          <p>共 {data.total} 家</p>
+          <p role="status" aria-live="polite" aria-atomic="true">共 {data.total} 家</p>
         </div>
         <label className="sort-control">
           <span>排序</span>
