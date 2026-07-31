@@ -1,6 +1,8 @@
 import { ArrowLeft, ArrowRight, ExternalLink, RotateCw } from "lucide-react";
 import { useState } from "react";
+import { Link } from "react-router-dom";
 
+import { safeHttpUrl } from "../api/http-url";
 import type { CompanyListItem, CompanySort, Page } from "../api/types";
 
 type CompanyResultsProps = {
@@ -13,6 +15,7 @@ type CompanyResultsProps = {
   onPageChange: (page: number) => void;
   onClear: () => void;
   onRetry: () => void;
+  emptyQueryStatus: React.ReactNode;
 };
 
 const fundingLabels: Record<string, string> = {
@@ -30,16 +33,6 @@ const locationLabels: Record<string, string> = {
   Hangzhou: "杭州",
   Shenzhen: "深圳",
 };
-
-function safeWebsiteUrl(value: string | null) {
-  if (!value) return null;
-  try {
-    const url = new URL(value);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
-  } catch {
-    return null;
-  }
-}
 
 function CompanyLogo({ company }: { company: CompanyListItem }) {
   const [failed, setFailed] = useState(false);
@@ -63,14 +56,14 @@ function CompanyLogo({ company }: { company: CompanyListItem }) {
 }
 
 function CompanyRow({ company }: { company: CompanyListItem }) {
-  const websiteUrl = safeWebsiteUrl(company.website);
+  const websiteUrl = safeHttpUrl(company.website);
 
   return (
     <li className="company-row">
       <CompanyLogo company={company} />
       <div className="company-copy">
         <div className="company-title-line">
-          <h3>{company.canonical_name}</h3>
+          <h3><Link className="company-detail-link" to={`/companies/${company.id}`}>{company.canonical_name}</Link></h3>
           <span>{company.city ? locationLabels[company.city] ?? company.city : "城市待确认"}</span>
         </div>
         <p className="company-tags">
@@ -122,6 +115,7 @@ export function CompanyResults({
   onPageChange,
   onClear,
   onRetry,
+  emptyQueryStatus,
 }: CompanyResultsProps) {
   if (loading) return <LoadingRows />;
 
@@ -143,6 +137,7 @@ export function CompanyResults({
   const pageCount = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1;
 
   if (!data || data.total === 0) {
+    if (emptyQueryStatus) return emptyQueryStatus;
     return (
       <div className="result-message empty-message" role="status" aria-live="polite" aria-atomic="true">
         <div>

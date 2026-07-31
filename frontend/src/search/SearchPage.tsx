@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import { api } from "../api/client";
+import { api, ApiError } from "../api/client";
 import type { CompanyListItem, Page } from "../api/types";
+import { CollectionStatus, type CollectionState } from "../collection/CollectionStatus";
 import { CompanyResults } from "./CompanyResults";
 import { Filters } from "./Filters";
 import {
@@ -24,6 +25,15 @@ export function SearchPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
+  const [collectionStates, setCollectionStates] = useState(() => new Map<string, CollectionState>());
+  const submittedQueries = useRef(new Set<string>());
+  const hasStructuredFilters = Boolean(
+    params.industry
+    || params.sub_industry
+    || params.funding_stage
+    || params.scale
+    || params.city,
+  );
 
   useEffect(() => {
     setSearchValue(params.q ?? "");
@@ -57,6 +67,20 @@ export function SearchPage() {
     return () => controller.abort();
   }, [serializedParams, retryCount]);
 
+  useEffect(() => {
+    const query = params.q?.trim();
+    if (hasStructuredFilters || !query || query.length < 2 || query.length > 100 || !data || data.total !== 0 || error) return;
+    if (submittedQueries.current.has(query)) return;
+    submittedQueries.current.add(query);
+    setCollectionStates((states) => new Map(states).set(query, "loading"));
+    api.createCollectionRequest(query).catch((requestError: unknown) => {
+      const state = requestError instanceof ApiError && requestError.code === "collection_unavailable"
+        ? "unavailable"
+        : "error";
+      setCollectionStates((states) => new Map(states).set(query, state));
+    });
+  }, [data, error, hasStructuredFilters, params.q]);
+
   const hasActiveFilters = [
     params.q,
     params.industry,
@@ -76,6 +100,8 @@ export function SearchPage() {
     setSearchValue("");
     setSearchParams(new URLSearchParams());
   };
+
+  const collectionState = params.q ? collectionStates.get(params.q) : undefined;
 
   return (
     <main>
@@ -113,6 +139,7 @@ export function SearchPage() {
           onPageChange={(page) => setSearchParams(withPage(searchParams, page))}
           onClear={clearFilters}
           onRetry={() => setRetryCount((count) => count + 1)}
+          emptyQueryStatus={collectionState ? <CollectionStatus state={collectionState} /> : null}
         />
       </div>
     </main>

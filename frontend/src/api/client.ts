@@ -1,10 +1,27 @@
-import type { CompanyListItem, CompanySearchParams, Page } from "./types";
+import type {
+  CompanyDetail,
+  CompanyListItem,
+  CompanySearchParams,
+  JobListItem,
+  Page,
+} from "./types";
 
 export class ApiError extends Error {
-  constructor(public readonly status: number) {
+  constructor(public readonly status: number, public readonly code?: string) {
     super("API request failed");
     this.name = "ApiError";
   }
+}
+
+async function apiError(response: Response) {
+  let code: string | undefined;
+  try {
+    const body = await response.json() as { error?: { code?: string } };
+    code = body.error?.code;
+  } catch {
+    // The HTTP status remains useful when an upstream error is not JSON.
+  }
+  return new ApiError(response.status, code);
 }
 
 function buildCompanyQuery(params: CompanySearchParams) {
@@ -35,7 +52,33 @@ export const api = {
     signal?: AbortSignal,
   ): Promise<Page<CompanyListItem>> {
     const response = await fetch(`/api/v1/companies?${buildCompanyQuery(params)}`, { signal });
-    if (!response.ok) throw new ApiError(response.status);
+    if (!response.ok) throw await apiError(response);
     return (await response.json()) as Page<CompanyListItem>;
+  },
+  async getCompany(companyId: string, signal?: AbortSignal): Promise<CompanyDetail> {
+    const response = await fetch(`/api/v1/companies/${encodeURIComponent(companyId)}`, { signal });
+    if (!response.ok) throw await apiError(response);
+    return (await response.json()) as CompanyDetail;
+  },
+  async getCompanyJobs(
+    companyId: string,
+    page: number,
+    signal?: AbortSignal,
+  ): Promise<Page<JobListItem>> {
+    const query = new URLSearchParams({ page: String(page), page_size: "10" });
+    const response = await fetch(
+      `/api/v1/companies/${encodeURIComponent(companyId)}/jobs?${query}`,
+      { signal },
+    );
+    if (!response.ok) throw await apiError(response);
+    return (await response.json()) as Page<JobListItem>;
+  },
+  async createCollectionRequest(query: string): Promise<void> {
+    const response = await fetch("/api/v1/collection-requests", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: query.trim() }),
+    });
+    if (!response.ok) throw await apiError(response);
   },
 };

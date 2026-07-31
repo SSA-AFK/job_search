@@ -175,13 +175,73 @@ describe("SearchPage", () => {
     expect(screen.getByRole("button", { name: "重新加载" })).toBeEnabled();
   });
 
-  it("shows a useful empty result", async () => {
-    vi.stubGlobal("fetch", vi.fn(() => jsonResponse(page([]))));
-    renderSearchPage("/companies?q=不存在公司");
+  it("shows a useful filtered empty result without collecting a known query", async () => {
+    const fetchMock = vi.fn(() => jsonResponse(page([])));
+    vi.stubGlobal("fetch", fetchMock);
+    renderSearchPage("/companies?q=DeepSeek&city=Shanghai");
 
     const emptyHeading = await screen.findByText("没有找到符合条件的公司");
     expect(emptyHeading.closest('[role="status"]')).toHaveAttribute("aria-live", "polite");
     expect(screen.getAllByRole("button", { name: "清除全部筛选" })[0]).toBeEnabled();
+    await act(() => new Promise((resolve) => window.setTimeout(resolve, 50)));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a stable empty state when collection is disabled", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      requests.push({ url, init });
+      if (url === "/api/v1/collection-requests") {
+        return jsonResponse({
+          error: {
+            code: "collection_unavailable",
+            message: "Collection service is unavailable.",
+          },
+        }, 503);
+      }
+      return jsonResponse(page([]));
+    }));
+    renderSearchPage("/companies?q=%20%20不存在公司%20%20");
+
+    expect(await screen.findByText("暂未收录这家公司")).toBeInTheDocument();
+    expect(await screen.findByText("采集服务暂不可用，请稍后再试")).toBeInTheDocument();
+    await waitFor(() => expect(requests.filter(({ url }) => url === "/api/v1/collection-requests")).toHaveLength(1));
+    expect(requests.find(({ url }) => url === "/api/v1/collection-requests")?.init).toMatchObject({
+      method: "POST",
+      body: JSON.stringify({ query: "不存在公司" }),
+    });
+  });
+
+  it("keeps collection outcomes isolated when empty-query responses arrive out of order", async () => {
+    let resolveFirstCollection!: (response: Response) => void;
+    const collectionUnavailable = () => new Response(JSON.stringify({
+      error: {
+        code: "collection_unavailable",
+        message: "Collection service is unavailable.",
+      },
+    }), { status: 503, headers: { "Content-Type": "application/json" } });
+
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) !== "/api/v1/collection-requests") return jsonResponse(page([]));
+      const query = JSON.parse(String(init?.body)).query;
+      if (query === "第一家公司") {
+        return new Promise<Response>((resolve) => { resolveFirstCollection = resolve; });
+      }
+      return Promise.resolve(collectionUnavailable());
+    }));
+    renderSearchPage("/companies?q=第一家公司");
+    expect(await screen.findByText("正在确认是否可以补充资料")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索公司" }), {
+      target: { value: "第二家公司" },
+    });
+    await waitFor(() => expect(window.location.search).toContain(encodeURIComponent("第二家公司")));
+    expect(await screen.findByText("采集服务暂不可用，请稍后再试")).toBeInTheDocument();
+
+    await act(async () => resolveFirstCollection(collectionUnavailable()));
+    expect(screen.getByText("采集服务暂不可用，请稍后再试")).toBeInTheDocument();
+    expect(screen.queryByText("没有找到符合条件的公司")).not.toBeInTheDocument();
   });
 
   it("offers a valid-page recovery when the requested page is out of range", async () => {
