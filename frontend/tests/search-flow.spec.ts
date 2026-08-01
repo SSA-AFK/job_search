@@ -19,6 +19,13 @@ const companyItem = {
   updated_at: "2026-07-30T08:00:00Z",
 };
 
+const initialCompanyItem = {
+  ...companyItem,
+  id: "44444444-4444-4444-8444-444444444444",
+  canonical_name: "Moonshot AI",
+  website: "https://www.moonshot.ai/",
+};
+
 const companyDetail = {
   ...companyItem,
   aliases: ["深度求索"],
@@ -49,12 +56,15 @@ async function mockApi(page: Page, collectionRequests: string[]) {
     }
     if (url.pathname === `/api/v1/companies/${companyId}`) return json(route, companyDetail);
     if (url.pathname === "/api/v1/companies") {
-      const isMissing = url.searchParams.get("q") === "不存在公司";
+      const query = url.searchParams.get("q");
+      const items = query === "不存在公司"
+        ? []
+        : query === "DeepSeek" ? [companyItem] : [initialCompanyItem];
       return json(route, {
-        items: isMissing ? [] : [companyItem],
+        items,
         page: Number(url.searchParams.get("page") ?? "1"),
         page_size: Number(url.searchParams.get("page_size") ?? "20"),
-        total: isMissing ? 0 : 1,
+        total: items.length,
       });
     }
     return json(route, { error: { code: "not_found", message: "Resource not found" } }, 404);
@@ -65,10 +75,12 @@ test("search URL state navigates to the company detail route", async ({ page }) 
   await mockApi(page, []);
   await page.goto("/companies");
 
-  const companyLink = page.getByRole("link", { name: "DeepSeek", exact: true });
-  await expect(companyLink).toBeVisible({ timeout: readinessTimeout });
+  const initialCompanyLink = page.getByRole("link", { name: "Moonshot AI", exact: true });
+  await expect(initialCompanyLink).toBeVisible({ timeout: readinessTimeout });
   await page.getByRole("searchbox", { name: "搜索公司" }).fill("DeepSeek");
   await expect(page).toHaveURL(/\/companies\?q=DeepSeek/, { timeout: readinessTimeout });
+  await expect(initialCompanyLink).toHaveCount(0, { timeout: readinessTimeout });
+  const companyLink = page.getByRole("link", { name: "DeepSeek", exact: true });
   await expect(companyLink).toBeVisible({ timeout: readinessTimeout });
   await companyLink.click();
 
