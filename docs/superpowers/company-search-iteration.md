@@ -16,7 +16,7 @@ This is the living delivery document for the AI Company Search project. It is th
 |----------|---------|--------|
 | [`specs/2026-07-31-ai-company-search-agent-design.md`](specs/2026-07-31-ai-company-search-agent-design.md) | Product, architecture, contracts, data model, and acceptance criteria | Approved |
 | [`plans/2026-07-31-company-search-web-foundation.md`](plans/2026-07-31-company-search-web-foundation.md) | Stage one implementation plan | Executed and integrated locally into `main` |
-| [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31-company-search-ingestion-pipeline.md) | Stage two implementation plan | Executing Task 1 |
+| [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31-company-search-ingestion-pipeline.md) | Stage two implementation plan | Task 1 complete; Task 2 starting |
 | [`../zhihu.md`](../../zhihu.md) | Supplied Zhihu Global Search API contract | Reference |
 
 ## Current Snapshot
@@ -25,13 +25,13 @@ This is the living delivery document for the AI Company Search project. It is th
 |-------|-------|
 | Overall status | Stage one complete; stage two in progress |
 | Current stage | Stage two - Asynchronous ingestion pipeline |
-| Current task | Task 1 - Ingestion configuration and collection requests |
+| Current task | Task 2 - Provider contracts and safe HTTP infrastructure |
 | Execution method | Subagent-Driven Development |
 | Active branch/worktree | `codex/company-search-ingestion-pipeline` at `.worktrees/codex-company-search-ingestion-pipeline` |
 | Stage one progress | 8/8 tasks complete; completion gate passed |
-| Stage two progress | 0/12 tasks complete |
-| Last verified artifact state | Stage one implementation and final mobile readiness stabilization reviewed through `af63ec0` |
-| Next action | Implement and independently review stage two Task 1 |
+| Stage two progress | 1/12 tasks complete |
+| Last verified artifact state | Stage two Task 1 implementation and task review through `0395040` |
+| Next action | Implement and independently review stage two Task 2 |
 
 ## Delivery Sequence
 
@@ -79,8 +79,8 @@ Plan: [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31
 
 | Task | Deliverable | Status | Commit(s) | Review | Verification |
 |------|-------------|--------|-----------|--------|--------------|
-| 1 | Ingestion configuration and collection requests | Ready | - | - | - |
-| 2 | Provider contracts and safe HTTP infrastructure | Pending Task 1 | - | - | - |
+| 1 | Ingestion configuration and collection requests | Complete | `0395040` | Approved; no Critical/Important; one deferred Minor | focused collection/API/migration 15 passed; full pytest 87 passed/2 deselected; Ruff passed |
+| 2 | Provider contracts and safe HTTP infrastructure | Ready | - | - | - |
 | 3 | Zhihu Global Search Provider | Pending Task 2 | - | - | - |
 | 4 | Allowlisted company website Provider | Pending Task 3 | - | - | - |
 | 5 | Structured CrewAI extraction adapters | Pending Task 4 | - | - | - |
@@ -163,6 +163,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-08-01 | Finishing mobile search readiness | Applied the same local 20-second readiness allowance to the two remaining mocked mobile flows and removed a fixed sleep; all navigation and collection assertions remain | PASS: focused mobile 2 passed; resolver 6 passed; Playwright 7 passed; Vitest 28 passed; build passed; scoped follow-up approved |
 | 2026-08-01 | Final mobile result-transition stabilization and local integration | Waited for the initial mocked result before filtering, used distinct initial and filtered companies, independently approved the scoped test change, then merged the stage-one branch into `main` | PASS: Ruff clean; pytest 75 passed/2 deselected; performance 2 passed at 19.3 ms p95; Vitest 28 passed; build passed; resolver 6 passed; Playwright 7 passed; final reviewed commit `af63ec0` |
 | 2026-08-01 | Stage two baseline | Isolated worktree at `ed7755f`; backend and frontend baseline commands | PASS: Ruff clean; pytest 75 passed/2 deselected; Vitest 28 passed; build passed |
+| 2026-08-01 | Stage two Task 1 | Database-backed collection request implementation and independent task review | PASS: focused 15 passed; full pytest 87 passed/2 deselected; Ruff clean; review approved with one deferred concurrency-test Minor |
 
 ## Iteration History
 
@@ -184,6 +185,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-08-01 | Stage one finishing verification follow-up | Unified mocked mobile search readiness waits after current-HEAD verification exposed the same host-specific WebKit latency in the remaining flows; removed arbitrary sleep and preserved behavioral assertions | Run final current-HEAD verification and choose integration path |
 | 2026-08-01 | Stage one final stabilization and local integration | Prevented stale-result false positives by waiting for initial readiness and distinguishing initial `Moonshot AI` from filtered `DeepSeek`; independent review approved `af63ec0`; merged locally into `main` and removed the completed feature branch/worktree | Begin stage two Task 1 from the accepted `main` baseline |
 | 2026-08-01 | Stage two execution start | Created the isolated ingestion-pipeline worktree, verified the Stage 1 baseline, and resolved preflight state-machine and async-interface conflicts with user approval | Implement stage two Task 1 with TDD and independent review |
+| 2026-08-01 | Stage two Task 1 | Activated POST/GET collection requests, normalized active-request reuse, atomic request/run creation, post-commit dispatch tracking, discoverable dispatch failure, and the cross-dialect partial unique index; independent review approved | Implement provider contracts and safe HTTP infrastructure |
 
 ## Update Template
 
