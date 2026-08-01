@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from ipaddress import ip_address
 
+import httpcore
 import httpx
 
 from app.ingestion.errors import ProviderError
@@ -22,6 +23,68 @@ class HttpDocument:
     url: str
     text: str
     content_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedUrl:
+    url: httpx.URL
+    address: str
+
+
+class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
+    """Dial validated addresses while preserving the original HTTP origin for Host and SNI."""
+
+    def __init__(self, delegate: httpcore.AsyncNetworkBackend) -> None:
+        self._delegate = delegate
+        self._addresses: dict[str, str] = {}
+
+    def pin(self, host: str, address: str) -> None:
+        self._addresses[host.lower().rstrip(".")] = address
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        address = self._addresses.get(host.lower().rstrip("."))
+        if address is None:
+            raise httpcore.ConnectError("attempted connection without a validated address")
+        return await self._delegate.connect_tcp(
+            address,
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+    async def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        return await self._delegate.connect_unix_socket(
+            path, timeout=timeout, socket_options=socket_options
+        )
+
+    async def sleep(self, seconds: float) -> None:
+        await self._delegate.sleep(seconds)
+
+
+class _PinnedAsyncHTTPTransport(httpx.AsyncHTTPTransport):
+    def __init__(self, network_backend: httpcore.AsyncNetworkBackend | None) -> None:
+        super().__init__(trust_env=False)
+        delegate = network_backend or self._pool._network_backend
+        self._pinned_network_backend = _PinnedNetworkBackend(delegate)
+        self._pool._network_backend = self._pinned_network_backend
+
+    def pin(self, validated_url: _ValidatedUrl) -> None:
+        host = validated_url.url.host
+        assert host is not None
+        self._pinned_network_backend.pin(host, validated_url.address)
 
 
 class _PlainTextExtractor(HTMLParser):
@@ -79,10 +142,12 @@ class SafeHttpClient:
         dns_resolver: DnsResolver = resolve_host,
         connect_timeout_seconds: float = 5.0,
         total_timeout_seconds: float = 15.0,
+        network_backend: httpcore.AsyncNetworkBackend | None = None,
     ) -> None:
         self._dns_resolver = dns_resolver
         self._connect_timeout_seconds = connect_timeout_seconds
         self._total_timeout_seconds = total_timeout_seconds
+        self._network_backend = network_backend
 
     async def get_text(self, url: str, *, allowed_hosts: set[str]) -> HttpDocument:
         """Fetch an allowlisted public URL, following only validated redirects."""
@@ -104,10 +169,16 @@ class SafeHttpClient:
     async def _get_text(self, url: str, allowed_hosts: frozenset[str]) -> HttpDocument:
         current_url = await self._validate_url(url, allowed_hosts, error_code="unsafe_url")
         timeout = httpx.Timeout(self._connect_timeout_seconds)
+        transport = _PinnedAsyncHTTPTransport(self._network_backend)
 
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        async with httpx.AsyncClient(
+            timeout=timeout, follow_redirects=False, transport=transport, trust_env=False
+        ) as client:
             for _ in range(MAX_REDIRECTS + 1):
-                async with client.stream("GET", current_url) as response:
+                transport.pin(current_url)
+                async with client.stream(
+                    "GET", current_url.url, headers={"Accept-Encoding": "identity"}
+                ) as response:
                     if response.is_redirect:
                         location = response.headers.get("location")
                         if location is None:
@@ -117,7 +188,9 @@ class SafeHttpClient:
                                 detail="redirect response did not include a Location header",
                             )
                         current_url = await self._validate_url(
-                            str(current_url.join(location)), allowed_hosts, error_code="unsafe_redirect"
+                            str(current_url.url.join(location)),
+                            allowed_hosts,
+                            error_code="unsafe_redirect",
                         )
                         continue
 
@@ -128,7 +201,7 @@ class SafeHttpClient:
                             detail=f"received HTTP {response.status_code}",
                         )
 
-                    content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+                    content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
                     if content_type not in SUPPORTED_CONTENT_TYPES:
                         raise ProviderError(
                             code="unsupported_content_type",
@@ -136,10 +209,21 @@ class SafeHttpClient:
                             detail=f"received {content_type or 'no content type'}",
                         )
 
+                    # httpx decodes content before aiter_bytes(); reject compression first.
+                    content_encoding = response.headers.get("content-encoding", "identity").strip().lower()
+                    if content_encoding not in {"", "identity"}:
+                        raise ProviderError(
+                            code="unsupported_content_encoding",
+                            retryable=False,
+                            detail=f"received {content_encoding}",
+                        )
+
                     body = await self._read_limited_body(response)
                     decoded = body.decode(response.encoding or "utf-8", errors="replace")
                     text = self._to_text(decoded, content_type)
-                    return HttpDocument(url=str(current_url), text=text[:MAX_TEXT_LENGTH], content_type=content_type)
+                    return HttpDocument(
+                        url=str(current_url.url), text=text[:MAX_TEXT_LENGTH], content_type=content_type
+                    )
 
         raise ProviderError(
             code="too_many_redirects", retryable=False, detail="redirect limit exceeded"
@@ -147,7 +231,7 @@ class SafeHttpClient:
 
     async def _validate_url(
         self, url: str, allowed_hosts: frozenset[str], *, error_code: str
-    ) -> httpx.URL:
+    ) -> _ValidatedUrl:
         try:
             parsed = httpx.URL(url)
         except httpx.InvalidURL as error:
@@ -166,7 +250,7 @@ class SafeHttpClient:
         if literal_address is not None:
             if not is_public_ip(str(literal_address)) or normalized_host not in allowed_hosts:
                 raise ProviderError(code=error_code, retryable=False, detail="URL host is not public")
-            return parsed
+            return _ValidatedUrl(url=parsed, address=str(literal_address))
 
         if normalized_host not in allowed_hosts:
             raise ProviderError(code=error_code, retryable=False, detail="URL host is not allowlisted")
@@ -174,7 +258,7 @@ class SafeHttpClient:
         addresses = await self._dns_resolver(normalized_host)
         if not addresses or any(not is_public_ip(address) for address in addresses):
             raise ProviderError(code=error_code, retryable=False, detail="URL DNS result is not public")
-        return parsed
+        return _ValidatedUrl(url=parsed, address=addresses[0])
 
     async def _read_limited_body(self, response: httpx.Response) -> bytes:
         chunks: list[bytes] = []
