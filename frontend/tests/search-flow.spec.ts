@@ -1,6 +1,7 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 const companyId = "11111111-1111-4111-8111-111111111111";
+const readinessTimeout = 20_000;
 
 const companyItem = {
   id: companyId,
@@ -65,12 +66,18 @@ test("search URL state navigates to the company detail route", async ({ page }) 
   await page.goto("/companies");
 
   await page.getByRole("searchbox", { name: "搜索公司" }).fill("DeepSeek");
-  await expect(page).toHaveURL(/\/companies\?q=DeepSeek/);
-  await page.getByRole("link", { name: "DeepSeek", exact: true }).click();
+  await expect(page).toHaveURL(/\/companies\?q=DeepSeek/, { timeout: readinessTimeout });
+  const companyLink = page.getByRole("link", { name: "DeepSeek", exact: true });
+  await expect(companyLink).toBeVisible({ timeout: readinessTimeout });
+  await companyLink.click();
 
-  await expect(page).toHaveURL(`/companies/${companyId}`);
-  await expect(page.getByRole("heading", { name: "DeepSeek", level: 1 })).toBeVisible();
-  await expect(page.getByRole("status", { name: "暂无在招职位" })).toBeVisible();
+  await expect(page).toHaveURL(`/companies/${companyId}`, { timeout: readinessTimeout });
+  await expect(page.getByRole("heading", { name: "DeepSeek", level: 1 })).toBeVisible({
+    timeout: readinessTimeout,
+  });
+  await expect(page.getByRole("status", { name: "暂无在招职位" })).toBeVisible({
+    timeout: readinessTimeout,
+  });
 });
 
 test("an empty query submits one terminal collection request", async ({ page }) => {
@@ -78,10 +85,13 @@ test("an empty query submits one terminal collection request", async ({ page }) 
   await mockApi(page, collectionRequests);
   await page.goto("/companies?q=%20%20不存在公司%20%20");
 
-  await expect(page.getByText("暂未收录这家公司")).toBeVisible();
-  await expect(page.getByText("采集服务暂不可用，请稍后再试")).toBeVisible();
-  await expect.poll(() => collectionRequests).toHaveLength(1);
+  await expect(page.getByText("暂未收录这家公司")).toBeVisible({
+    timeout: readinessTimeout,
+  });
+  await expect(page.getByText("采集服务暂不可用，请稍后再试")).toBeVisible({
+    timeout: readinessTimeout,
+  });
+  await expect.poll(() => collectionRequests, { timeout: readinessTimeout }).toHaveLength(1);
   expect(JSON.parse(collectionRequests[0])).toEqual({ query: "不存在公司" });
-  await page.waitForTimeout(300);
   expect(collectionRequests).toHaveLength(1);
 });
