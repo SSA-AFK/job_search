@@ -22,6 +22,7 @@ dev = [
     "mypy",
     "pytest",
     "pytest-cov",
+    "respx",
     "ruff",
 ]
 
