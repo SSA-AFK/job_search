@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, Enum, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, Enum, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import GUID, Base, TimestampMixin, UTCDateTime, utc_now
@@ -25,6 +25,13 @@ class CollectionRequest(Base, TimestampMixin):
     __tablename__ = "collection_requests"
     __table_args__ = (
         Index("ix_collection_requests_status_query", "status", "normalized_query"),
+        Index(
+            "uq_collection_requests_active_query",
+            "normalized_query",
+            unique=True,
+            sqlite_where=text("status IN ('queued', 'running')"),
+            postgresql_where=text("status IN ('queued', 'running')"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)

@@ -43,8 +43,18 @@ def test_initial_migration_round_trip(tmp_path: Path) -> None:
         "ix_job_postings_company_active"
     }
     assert {index["name"] for index in inspector.get_indexes("collection_requests")} == {
-        "ix_collection_requests_status_query"
+        "ix_collection_requests_status_query",
+        "uq_collection_requests_active_query",
     }
+    with engine.connect() as connection:
+        index_sql = connection.scalar(
+            text(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type = 'index' AND name = 'uq_collection_requests_active_query'"
+            )
+        )
+    assert index_sql is not None
+    assert "WHERE status IN ('queued', 'running')" in index_sql
 
     with engine.begin() as connection:
         connection.execute(

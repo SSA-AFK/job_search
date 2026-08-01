@@ -1,31 +1,39 @@
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Depends, status
+from sqlalchemy.orm import Session
 
-from app.collection.schemas import CollectionRequestCreate
-from app.core.config import settings
-from app.core.errors import DomainError
+from app.collection.schemas import CollectionRequestCreate, CollectionRequestRead
+from app.collection.service import CollectionService
+from app.core.database import get_session
 
 router = APIRouter(prefix="/collection-requests", tags=["collection-requests"])
 
 
-def _raise_collection_unavailable() -> None:
-    raise DomainError(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        code="collection_unavailable",
-        message="Collection service is unavailable.",
-    )
+def dispatch_collection(run_id: UUID) -> str:
+    from app.tasks.collection import run_ingestion
+
+    return str(run_ingestion.delay(str(run_id)).id)
 
 
-@router.post("")
-def create_collection_request(_payload: CollectionRequestCreate) -> None:
-    if not settings.collection_enabled:
-        _raise_collection_unavailable()
-    _raise_collection_unavailable()
+def get_collection_service(
+    session: Annotated[Session, Depends(get_session)],
+) -> CollectionService:
+    return CollectionService(session, dispatch_collection)
 
 
-@router.get("/{request_id}")
-def get_collection_request(request_id: UUID) -> None:
-    if not settings.collection_enabled:
-        _raise_collection_unavailable()
-    _raise_collection_unavailable()
+@router.post("", response_model=CollectionRequestRead, status_code=status.HTTP_202_ACCEPTED)
+def create_collection_request(
+    payload: CollectionRequestCreate,
+    service: Annotated[CollectionService, Depends(get_collection_service)],
+) -> CollectionRequestRead:
+    return service.submit(payload.query)
+
+
+@router.get("/{request_id}", response_model=CollectionRequestRead)
+def get_collection_request(
+    request_id: UUID,
+    service: Annotated[CollectionService, Depends(get_collection_service)],
+) -> CollectionRequestRead:
+    return service.get(request_id)
