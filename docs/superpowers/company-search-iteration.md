@@ -30,7 +30,7 @@ This is the living delivery document for the AI Company Search project. It is th
 | Active branch/worktree | `codex/company-search-web-foundation` at `.worktrees/codex-company-search-web-foundation` |
 | Stage one progress | 8/8 tasks complete; completion gate passed |
 | Stage two progress | 0/12 tasks complete |
-| Last verified artifact state | Stage one implementation and finishing stabilization reviewed through `d8c7a9d` |
+| Last verified artifact state | Stage one implementation and finishing stabilization reviewed through `2751950` |
 | Next action | Choose how to integrate the stage-one branch, then begin stage two Task 1 from the accepted baseline |
 
 ## Delivery Sequence
@@ -159,6 +159,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-07-31 | Stage one Task 8 acceptance matrix | Ruff, normal pytest, Vitest, build, desktop/mobile Playwright, empty migration, repeated seed, collection 503, artifact hygiene, and 10k/100k performance fixture | PASS: p95 22.9 ms; one deferred dependency deprecation warning |
 | 2026-07-31 | Stage one final review and controller verification | Independent whole-branch review, one final fix wave, scoped re-review, then fresh backend/frontend/browser/performance commands | PASS: Ruff clean; pytest 75 passed/2 deselected with no warnings; p95 20.5 ms; Vitest 28 passed; build passed; resolver 6 passed; Playwright 7 passed; tracked generated artifacts 0 |
 | 2026-08-01 | Finishing mobile E2E stabilization | Diagnosed a WebKit first-load timeout from a loading-state snapshot; added a user-visible detail-ready wait without changing product code; independent scoped review | PASS: focused mobile 1 passed; resolver 6 passed; Playwright 7 passed; Vitest 28 passed; build passed; review approved |
+| 2026-08-01 | Finishing mobile search readiness | Applied the same local 20-second readiness allowance to the two remaining mocked mobile flows and removed a fixed sleep; all navigation and collection assertions remain | PASS: focused mobile 2 passed; resolver 6 passed; Playwright 7 passed; Vitest 28 passed; build passed; scoped follow-up approved |
 
 ## Iteration History
 
@@ -177,6 +178,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-07-31 | Stage one Task 8 | Added deterministic 10k-company/100k-job performance verification, a complete PowerShell runbook, sample environment, generated-artifact policy, and the full acceptance matrix; restored explicit frontend ignores in review round 1 | Run whole-branch review and close the stage-one completion gate |
 | 2026-07-31 | Stage one final review | Corrected enum contracts, sanitized correlated 500 handling, URL boundaries, warning cleanliness, queryless relevance, and E2E interpreter resolution; added real seeded browser-to-backend coverage; scoped re-review approved all findings | Choose integration path, then begin stage two Task 1 |
 | 2026-08-01 | Stage one finishing verification | Stabilized the mocked mobile detail test at the visible loaded boundary after a reproducible slow WebKit first render; source-link assertions remain unchanged and scoped review approved | Run current-HEAD verification and choose integration path |
+| 2026-08-01 | Stage one finishing verification follow-up | Unified mocked mobile search readiness waits after current-HEAD verification exposed the same host-specific WebKit latency in the remaining flows; removed arbitrary sleep and preserved behavioral assertions | Run final current-HEAD verification and choose integration path |
 
 ## Update Template
 
