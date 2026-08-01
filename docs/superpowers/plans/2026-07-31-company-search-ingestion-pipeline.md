@@ -181,7 +181,7 @@ git commit -m "feat: add safe ingestion provider contracts"
 
 **Interfaces:**
 - Produces: `ZhihuGlobalSearchProvider.search(query: ProviderQuery) -> ProviderResult`
-- Extends: immutable `ProviderQuery` with `allowed_hosts: frozenset[str]` and `max_results: int`; immutable `ProviderResult` with `truncated: bool = False`
+- Evolves: immutable `ProviderQuery` replaces the unused base `limit` field with `allowed_hosts: frozenset[str] = frozenset()` and `max_results: int = 10` constrained to 1-20; immutable `ProviderResult` adds `truncated: bool = False`
 - Consumes: `ZHIHU_ACCESS_SECRET`, required only when `ZHIHU_PROVIDER_ENABLED=true`
 
 - [ ] **Step 1: Write HTTP-mocked request, parsing, and retry tests**
