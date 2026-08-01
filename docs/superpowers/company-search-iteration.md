@@ -16,22 +16,22 @@ This is the living delivery document for the AI Company Search project. It is th
 |----------|---------|--------|
 | [`specs/2026-07-31-ai-company-search-agent-design.md`](specs/2026-07-31-ai-company-search-agent-design.md) | Product, architecture, contracts, data model, and acceptance criteria | Approved |
 | [`plans/2026-07-31-company-search-web-foundation.md`](plans/2026-07-31-company-search-web-foundation.md) | Stage one implementation plan | Executed and integrated locally into `main` |
-| [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31-company-search-ingestion-pipeline.md) | Stage two implementation plan | Approved, waits for stage one gate |
+| [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31-company-search-ingestion-pipeline.md) | Stage two implementation plan | Executing Task 1 |
 | [`../zhihu.md`](../../zhihu.md) | Supplied Zhihu Global Search API contract | Reference |
 
 ## Current Snapshot
 
 | Field | Value |
 |-------|-------|
-| Overall status | Stage one complete; stage two ready |
-| Current stage | Stage one complete - Web search foundation |
-| Current task | Stage two Task 1 ready to begin |
+| Overall status | Stage one complete; stage two in progress |
+| Current stage | Stage two - Asynchronous ingestion pipeline |
+| Current task | Task 1 - Ingestion configuration and collection requests |
 | Execution method | Subagent-Driven Development |
-| Active branch/worktree | `main`; stage-one feature worktree and branch cleaned up after local merge |
+| Active branch/worktree | `codex/company-search-ingestion-pipeline` at `.worktrees/codex-company-search-ingestion-pipeline` |
 | Stage one progress | 8/8 tasks complete; completion gate passed |
 | Stage two progress | 0/12 tasks complete |
 | Last verified artifact state | Stage one implementation and final mobile readiness stabilization reviewed through `af63ec0` |
-| Next action | Begin stage two Task 1 from the locally integrated `main` baseline |
+| Next action | Implement and independently review stage two Task 1 |
 
 ## Delivery Sequence
 
@@ -140,6 +140,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-07-31 | Resolve stage-one test preflight in favor of behavioral assertions | Keep user-facing error copy changeable, define deterministic source ordering, and allow only the minimal frontend test harness before RED | Ambiguous plan test details |
 | 2026-07-31 | Keep `JobSource` without `TimestampMixin` | `first_seen_at` and `last_seen_at` already define source lifecycle; the approved design does not include redundant creation/update fields | Conflicting Task 2 code example |
 | 2026-07-31 | Ignore frontend generated artifacts when the frontend is created | `npm install` and browser tooling generate large local directories before Task 8; guarding them in Task 6 prevents accidental staging | Task 8-only `.gitignore` timing |
+| 2026-08-01 | Permit `queued -> failed` only for pre-worker dispatch failure and make Task 6 deduplication resolution async | Prevent undiscoverable queued rows while preserving the normal worker state machine; align deduplication with the async semantic judge | Conflicting Task 1 transition text and synchronous Task 6 examples |
 
 ## Active Risks
 
@@ -161,6 +162,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-08-01 | Finishing mobile E2E stabilization | Diagnosed a WebKit first-load timeout from a loading-state snapshot; added a user-visible detail-ready wait without changing product code; independent scoped review | PASS: focused mobile 1 passed; resolver 6 passed; Playwright 7 passed; Vitest 28 passed; build passed; review approved |
 | 2026-08-01 | Finishing mobile search readiness | Applied the same local 20-second readiness allowance to the two remaining mocked mobile flows and removed a fixed sleep; all navigation and collection assertions remain | PASS: focused mobile 2 passed; resolver 6 passed; Playwright 7 passed; Vitest 28 passed; build passed; scoped follow-up approved |
 | 2026-08-01 | Final mobile result-transition stabilization and local integration | Waited for the initial mocked result before filtering, used distinct initial and filtered companies, independently approved the scoped test change, then merged the stage-one branch into `main` | PASS: Ruff clean; pytest 75 passed/2 deselected; performance 2 passed at 19.3 ms p95; Vitest 28 passed; build passed; resolver 6 passed; Playwright 7 passed; final reviewed commit `af63ec0` |
+| 2026-08-01 | Stage two baseline | Isolated worktree at `ed7755f`; backend and frontend baseline commands | PASS: Ruff clean; pytest 75 passed/2 deselected; Vitest 28 passed; build passed |
 
 ## Iteration History
 
@@ -181,6 +183,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-08-01 | Stage one finishing verification | Stabilized the mocked mobile detail test at the visible loaded boundary after a reproducible slow WebKit first render; source-link assertions remain unchanged and scoped review approved | Run current-HEAD verification and choose integration path |
 | 2026-08-01 | Stage one finishing verification follow-up | Unified mocked mobile search readiness waits after current-HEAD verification exposed the same host-specific WebKit latency in the remaining flows; removed arbitrary sleep and preserved behavioral assertions | Run final current-HEAD verification and choose integration path |
 | 2026-08-01 | Stage one final stabilization and local integration | Prevented stale-result false positives by waiting for initial readiness and distinguishing initial `Moonshot AI` from filtered `DeepSeek`; independent review approved `af63ec0`; merged locally into `main` and removed the completed feature branch/worktree | Begin stage two Task 1 from the accepted `main` baseline |
+| 2026-08-01 | Stage two execution start | Created the isolated ingestion-pipeline worktree, verified the Stage 1 baseline, and resolved preflight state-machine and async-interface conflicts with user approval | Implement stage two Task 1 with TDD and independent review |
 
 ## Update Template
 

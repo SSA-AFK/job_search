@@ -17,7 +17,7 @@
 - The Zhihu global search endpoint processes at most one response and 20 results because the supplied API contract has no cursor parameter.
 - `(provider, source_raw_id)` is the job-source identity; task retries and duplicate delivery must not create new source rows.
 - Database rows, not Celery task state, are the source of truth for collection status.
-- Allowed run transitions are `queued -> running -> succeeded|partial|failed`.
+- Normal worker run transitions are `queued -> running -> succeeded|partial|failed`; a dispatch failure before the worker starts may transition `queued -> failed` with `collection_unavailable`.
 - Never implement access-control, login, CAPTCHA, robots.txt, or service-term bypasses.
 - Make each commit only after the task's focused tests and the relevant broader suite pass.
 
@@ -84,7 +84,7 @@ Expected: FAIL because the stage-one endpoint always returns `collection_unavail
 
 - [ ] **Step 3: Implement request creation and an outbox-style dispatch boundary**
 
-Create `CollectionRequest` and `CrawlRun` in one transaction. After commit, call the injected dispatcher with the run id and store its returned Celery task id in a second short transaction. If dispatch fails, mark both rows `failed` with `collection_unavailable`; do not leave an undiscoverable queued row.
+Create `CollectionRequest` and `CrawlRun` in one transaction. After commit, call the injected dispatcher with the run id and store its returned Celery task id in a second short transaction. If dispatch fails before the worker starts, use the documented `queued -> failed` exception and mark both rows `failed` with `collection_unavailable`; do not leave an undiscoverable queued row.
 
 `CollectionService.__init__` accepts `Session` and `Callable[[UUID], str]`. Its public methods are exactly `submit(query: str) -> CollectionRequestRead` and `get(request_id: UUID) -> CollectionRequestRead`.
 
@@ -349,20 +349,20 @@ git commit -m "feat: add validated crewai extraction roles"
 **Interfaces:**
 - Produces: `normalize_company(candidate) -> NormalizedCompanyCandidate`
 - Produces: `normalize_job(candidate) -> NormalizedJobCandidate`
-- Produces: `CompanyDeduplicator.resolve(candidate) -> CompanyMatch`
-- Produces: `JobDeduplicator.resolve(company_id, candidate) -> JobMatch`
+- Produces: async `CompanyDeduplicator.resolve(candidate) -> CompanyMatch`
+- Produces: async `JobDeduplicator.resolve(company_id, candidate) -> JobMatch`
 
 - [ ] **Step 1: Write threshold, source-id, city, and salary tests**
 
 ```python
-def test_exact_source_id_wins_without_fuzzy_or_llm(job_deduplicator, semantic_judge) -> None:
-    match = job_deduplicator.resolve(company_id, candidate(provider="zhihu", source_raw_id="42"))
+async def test_exact_source_id_wins_without_fuzzy_or_llm(job_deduplicator, semantic_judge) -> None:
+    match = await job_deduplicator.resolve(company_id, candidate(provider="zhihu", source_raw_id="42"))
     assert match.job_posting_id == existing_job_id
     semantic_judge.assert_not_called()
 
 
-def test_same_title_in_different_city_is_not_auto_merged(job_deduplicator) -> None:
-    match = job_deduplicator.resolve(company_id, candidate(title="算法工程师", city="上海"))
+async def test_same_title_in_different_city_is_not_auto_merged(job_deduplicator) -> None:
+    match = await job_deduplicator.resolve(company_id, candidate(title="算法工程师", city="上海"))
     assert match.kind == "new"
 ```
 

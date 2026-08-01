@@ -400,9 +400,10 @@ LLM 调用失败、超时或输出无效时，保留已获取的来源证据，�
 queued -> running -> succeeded
                   -> partial
                   -> failed
+queued -----------> failed  # 仅限 Worker 启动前的派发失败
 ```
 
-Worker 重试继续使用同一个 `crawl_run`。持久化事务提交后才可设置 `succeeded`；任务重复投递必须返回相同最终结果，不重复创建来源记录。
+Worker 重试继续使用同一个 `crawl_run`。Worker 启动前若派发失败，允许以 `collection_unavailable` 将关联的 `collection_request` 和 `crawl_run` 从 `queued` 直接标记为 `failed`，避免留下无法发现的排队记录。持久化事务提交后才可设置 `succeeded`；任务重复投递必须返回相同最终结果，不重复创建来源记录。
 
 ## 11. 缓存
 
