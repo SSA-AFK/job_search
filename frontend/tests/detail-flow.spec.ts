@@ -93,6 +93,9 @@ test("detail keeps source labels paired, paginates jobs, and has no horizontal o
   await mockDetailApi(page);
   await page.goto(`/companies/${companyId}`);
 
+  await expect(page.getByRole("heading", { name: "DeepSeek", level: 1 })).toBeVisible({
+    timeout: 20_000,
+  });
   const official = page.getByRole("link", { name: "公司官网投递" });
   await expect(official).toHaveAttribute("href", "https://example.com/jobs/1");
   await expect(official).toHaveAttribute("target", "_blank");
