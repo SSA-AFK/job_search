@@ -65,9 +65,10 @@ test("search URL state navigates to the company detail route", async ({ page }) 
   await mockApi(page, []);
   await page.goto("/companies");
 
+  const companyLink = page.getByRole("link", { name: "DeepSeek", exact: true });
+  await expect(companyLink).toBeVisible({ timeout: readinessTimeout });
   await page.getByRole("searchbox", { name: "搜索公司" }).fill("DeepSeek");
   await expect(page).toHaveURL(/\/companies\?q=DeepSeek/, { timeout: readinessTimeout });
-  const companyLink = page.getByRole("link", { name: "DeepSeek", exact: true });
   await expect(companyLink).toBeVisible({ timeout: readinessTimeout });
   await companyLink.click();
 
