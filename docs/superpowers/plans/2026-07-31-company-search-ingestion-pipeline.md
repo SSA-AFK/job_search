@@ -173,12 +173,15 @@ git commit -m "feat: add safe ingestion provider contracts"
 ### Task 3: Implement the Zhihu Global Search Provider
 
 **Files:**
+- Modify: `backend/app/ingestion/contracts.py`
 - Create: `backend/app/ingestion/providers/zhihu.py`
 - Create: `backend/tests/ingestion/providers/test_zhihu.py`
+- Modify: `backend/tests/ingestion/providers/test_security.py`
 - Modify: `.env.example`
 
 **Interfaces:**
 - Produces: `ZhihuGlobalSearchProvider.search(query: ProviderQuery) -> ProviderResult`
+- Extends: immutable `ProviderQuery` with `allowed_hosts: frozenset[str]` and `max_results: int`; immutable `ProviderResult` with `truncated: bool = False`
 - Consumes: `ZHIHU_ACCESS_SECRET`, required only when `ZHIHU_PROVIDER_ENABLED=true`
 
 - [ ] **Step 1: Write HTTP-mocked request, parsing, and retry tests**
@@ -221,19 +224,21 @@ Expected: PASS and zero unmocked HTTP requests.
 - [ ] **Step 5: Commit Zhihu integration**
 
 ```powershell
-git add backend/app/ingestion/providers/zhihu.py backend/tests/ingestion/providers/test_zhihu.py .env.example
+git add backend/app/ingestion/contracts.py backend/app/ingestion/providers/zhihu.py backend/tests/ingestion/providers/test_zhihu.py backend/tests/ingestion/providers/test_security.py .env.example
 git commit -m "feat: integrate zhihu global search provider"
 ```
 
 ### Task 4: Implement the Allowlisted Company Website Provider
 
 **Files:**
+- Modify: `backend/app/ingestion/contracts.py`
 - Create: `backend/app/ingestion/providers/company_site.py`
 - Create: `backend/app/ingestion/providers/robots.py`
 - Create: `backend/tests/ingestion/providers/test_company_site.py`
 
 **Interfaces:**
 - Produces: `CompanySiteProvider.search(query: ProviderQuery) -> ProviderResult`
+- Extends: immutable `ProviderQuery` with `website: HttpUrl | None`; immutable `ProviderResult` with `warnings: tuple[str, ...] = ()`
 - Consumes: an already validated company website and an injected `RobotsPolicy`
 
 - [ ] **Step 1: Write compliance and bounded-crawl tests**

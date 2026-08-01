@@ -141,6 +141,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-07-31 | Keep `JobSource` without `TimestampMixin` | `first_seen_at` and `last_seen_at` already define source lifecycle; the approved design does not include redundant creation/update fields | Conflicting Task 2 code example |
 | 2026-07-31 | Ignore frontend generated artifacts when the frontend is created | `npm install` and browser tooling generate large local directories before Task 8; guarding them in Task 6 prevents accidental staging | Task 8-only `.gitignore` timing |
 | 2026-08-01 | Permit `queued -> failed` only for pre-worker dispatch failure and make Task 6 deduplication resolution async | Prevent undiscoverable queued rows while preserving the normal worker state machine; align deduplication with the async semantic judge | Conflicting Task 1 transition text and synchronous Task 6 examples |
+| 2026-08-01 | Assign Provider contract field evolution to Tasks 3 and 4 | The original File Maps created immutable base contracts in Task 2 but omitted ownership for fields explicitly consumed by the Zhihu and company-site Providers | Under-specified downstream ProviderQuery/ProviderResult evolution |
 
 ## Active Risks
 
