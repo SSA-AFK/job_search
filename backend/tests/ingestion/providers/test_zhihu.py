@@ -8,7 +8,6 @@ from app.ingestion.contracts import ProviderQuery
 from app.ingestion.errors import ProviderError
 from app.ingestion.providers.zhihu import ZhihuGlobalSearchProvider
 
-
 ENDPOINT = "https://developer.zhihu.com/api/v1/content/global_search"
 
 

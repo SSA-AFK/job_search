@@ -23,6 +23,8 @@ class HttpDocument:
     url: str
     text: str
     content_type: str
+    title: str | None = None
+    links: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,29 +112,52 @@ class _PlainTextExtractor(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self._parts: list[str] = []
+        self._title_parts: list[str] = []
+        self._links: list[str] = []
         self._ignored_depth = 0
+        self._title_depth = 0
 
     def handle_starttag(self, tag: str, attrs: Iterable[tuple[str, str | None]]) -> None:
-        del attrs
         normalized_tag = tag.lower()
         if normalized_tag in {"script", "style"}:
             self._ignored_depth += 1
-        elif not self._ignored_depth and normalized_tag in self._BLOCK_TAGS:
-            self._parts.append(" ")
+        elif not self._ignored_depth:
+            if normalized_tag == "title":
+                self._title_depth += 1
+            elif normalized_tag == "a":
+                href = next(
+                    (value for name, value in attrs if name.lower() == "href" and value), None
+                )
+                if href is not None:
+                    self._links.append(href)
+            if normalized_tag in self._BLOCK_TAGS:
+                self._parts.append(" ")
 
     def handle_endtag(self, tag: str) -> None:
         normalized_tag = tag.lower()
         if normalized_tag in {"script", "style"} and self._ignored_depth:
             self._ignored_depth -= 1
-        elif not self._ignored_depth and normalized_tag in self._BLOCK_TAGS:
-            self._parts.append(" ")
+        elif not self._ignored_depth:
+            if normalized_tag == "title" and self._title_depth:
+                self._title_depth -= 1
+            if normalized_tag in self._BLOCK_TAGS:
+                self._parts.append(" ")
 
     def handle_data(self, data: str) -> None:
         if not self._ignored_depth:
             self._parts.append(data)
+            if self._title_depth:
+                self._title_parts.append(data)
 
     def text(self) -> str:
         return " ".join("".join(self._parts).split())
+
+    def title(self) -> str | None:
+        title = " ".join("".join(self._title_parts).split())
+        return title or None
+
+    def links(self) -> tuple[str, ...]:
+        return tuple(self._links)
 
 
 class SafeHttpClient:
@@ -220,9 +245,13 @@ class SafeHttpClient:
 
                     body = await self._read_limited_body(response)
                     decoded = body.decode(response.encoding or "utf-8", errors="replace")
-                    text = self._to_text(decoded, content_type)
+                    text, title, links = self._extract_content(decoded, content_type)
                     return HttpDocument(
-                        url=str(current_url.url), text=text[:MAX_TEXT_LENGTH], content_type=content_type
+                        url=str(current_url.url),
+                        text=text[:MAX_TEXT_LENGTH],
+                        content_type=content_type,
+                        title=title,
+                        links=links,
                     )
 
         raise ProviderError(
@@ -273,10 +302,12 @@ class SafeHttpClient:
         return b"".join(chunks)
 
     @staticmethod
-    def _to_text(body: str, content_type: str) -> str:
+    def _extract_content(
+        body: str, content_type: str
+    ) -> tuple[str, str | None, tuple[str, ...]]:
         if content_type == "text/plain":
-            return body
+            return body, None, ()
         parser = _PlainTextExtractor()
         parser.feed(body)
         parser.close()
-        return parser.text()
+        return parser.text(), parser.title(), parser.links()

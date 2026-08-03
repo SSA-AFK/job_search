@@ -1,5 +1,6 @@
 import asyncio
 import gzip
+from dataclasses import FrozenInstanceError
 
 import httpcore
 import httpx
@@ -80,6 +81,53 @@ async def test_converts_html_to_plain_text_without_scripts_or_styles(
     assert document.text == "Title Visible text"
     assert "steal" not in document.text
     assert "hidden" not in document.text
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_extracts_immutable_title_and_links_from_bounded_html(
+    safe_client: SafeHttpClient,
+) -> None:
+    respx.get("https://example.com/about").mock(
+        return_value=httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text=(
+                "<html><head><title> Example Company </title></head><body>"
+                '<a href="/careers">Careers</a><a href="team">Team</a>'
+                '<script><a href="https://evil.test/hidden">hidden</a></script>'
+                "</body></html>"
+            ),
+        )
+    )
+
+    document = await safe_client.get_text(
+        "https://example.com/about", allowed_hosts={"example.com"}
+    )
+
+    assert document.title == "Example Company"
+    assert document.links == ("/careers", "team")
+    with pytest.raises(FrozenInstanceError):
+        document.title = "Changed"
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_plain_text_response_has_no_html_metadata(safe_client: SafeHttpClient) -> None:
+    respx.get("https://example.com/robots.txt").mock(
+        return_value=httpx.Response(
+            200,
+            headers={"content-type": "text/plain"},
+            text="User-agent: *\nDisallow: /private",
+        )
+    )
+
+    document = await safe_client.get_text(
+        "https://example.com/robots.txt", allowed_hosts={"example.com"}
+    )
+
+    assert document.title is None
+    assert document.links == ()
 
 
 @pytest.mark.anyio
