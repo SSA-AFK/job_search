@@ -110,16 +110,14 @@ class NormalizedBatchBuilder:
             and normalize_url(str(profile.website)) != normalize_url(str(discovery.website))
         ):
             raise _PipelineError("invalid_evidence")
-        if (
-            profile.description is not None
-            and discovery.description is not None
-            and profile.description != discovery.description
-        ):
+        profile_description = _plain_text(profile.description)
+        discovery_description = _plain_text(discovery.description)
+        if profile_description is not None and discovery_description is not None and profile_description != discovery_description:
             raise _PipelineError("invalid_evidence")
         company_candidate = CompanyCandidate(
-            name=profile.name,
+            name=discovery.name,
             website=profile.website or discovery.website,
-            description=profile.description or discovery.description,
+            description=profile_description or discovery_description,
             evidence_ids=discovery.evidence_ids,
             confidence=discovery.confidence,
         )
@@ -128,7 +126,7 @@ class NormalizedBatchBuilder:
             if self.company_deduplicator is not None
             else CompanyMatch("new", None)
         )
-        field_evidence = self._field_evidence(discovery, profile)
+        field_evidence = self._field_evidence(discovery, profile, profile_description)
         normalized_jobs: list[NormalizedJobRecord] = []
         for job in jobs:
             self._require_known_evidence(job.evidence_ids, document_by_evidence)
@@ -184,7 +182,7 @@ class NormalizedBatchBuilder:
 
     @staticmethod
     def _field_evidence(
-        discovered: CompanyCandidate, profile: CompanyProfileCandidate
+        discovered: CompanyCandidate, profile: CompanyProfileCandidate, profile_description: str | None
     ) -> tuple[CompanyFieldEvidence, ...]:
         fields: list[tuple[CompanyFieldName, tuple[str, ...], float]] = [
             ("canonical_name", discovered.evidence_ids, discovered.confidence)
@@ -193,9 +191,9 @@ class NormalizedBatchBuilder:
             fields.append(("website", profile.evidence_ids, profile.confidence))
         elif discovered.website is not None:
             fields.append(("website", discovered.evidence_ids, discovered.confidence))
-        if profile.description is not None:
+        if profile_description is not None:
             fields.append(("description", profile.evidence_ids, profile.confidence))
-        elif discovered.description is not None:
+        elif _plain_text(discovered.description) is not None:
             fields.append(("description", discovered.evidence_ids, discovered.confidence))
         return tuple(
             CompanyFieldEvidence(
@@ -386,6 +384,13 @@ def _public_code(error: Exception, fallback: str) -> str:
 
 def _warning_code(warning: str) -> str:
     return warning if _PUBLIC_CODE.fullmatch(warning) else "provider_warning"
+
+
+def _plain_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = " ".join(value.split())
+    return normalized or None
 
 
 def _select_company(

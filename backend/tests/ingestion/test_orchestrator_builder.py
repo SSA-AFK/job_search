@@ -57,6 +57,34 @@ async def test_builder_uses_discovery_evidence_for_discovery_fallback_fields() -
 
 
 @pytest.mark.asyncio
+async def test_builder_treats_whitespace_profile_description_as_discovery_fallback() -> None:
+    batch = await NormalizedBatchBuilder().build(
+        company=CompanyRef(name="Acme"),
+        discovered=CompanyCandidate(name="Acme Holdings", description="Discovery text", evidence_ids=("company",), confidence=1),
+        profile=CompanyProfileCandidate(name="  Acme   Holdings ", description="   ", evidence_ids=("profile",), confidence=1),
+        jobs=(), documents=(source("company"), source("profile")),
+    )
+
+    assert batch.company.candidate.candidate.name == "Acme Holdings"
+    assert batch.company.candidate.candidate.description == "Discovery text"
+    assert {(item.field_name, item.evidence_id) for item in batch.company.field_evidence} == {
+        ("canonical_name", "company"), ("description", "company")
+    }
+
+
+@pytest.mark.asyncio
+async def test_builder_cites_profile_evidence_for_profile_description() -> None:
+    batch = await NormalizedBatchBuilder().build(
+        company=CompanyRef(name="Acme"), discovered=CompanyCandidate(name="Acme", evidence_ids=("company",), confidence=1),
+        profile=CompanyProfileCandidate(name="Acme", description=" Profile text ", evidence_ids=("profile",), confidence=1),
+        jobs=(), documents=(source("company"), source("profile")),
+    )
+
+    assert batch.company.candidate.candidate.description == "Profile text"
+    assert ("description", "profile") in {(item.field_name, item.evidence_id) for item in batch.company.field_evidence}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "profile",
     [
