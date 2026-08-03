@@ -55,8 +55,8 @@ class SemanticJudge:
 def test_runtime_rejects_each_reused_session_pair(reused: tuple[str, str]) -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
-    with Session(engine) as first, Session(engine) as second, pytest.raises(ValueError, match="distinct sessions"):
-        sessions = {"run": first, "dedup": second, "write": Session(engine)}
+    with Session(engine) as first, Session(engine) as second, Session(engine) as third, pytest.raises(ValueError, match="distinct sessions"):
+        sessions = {"run": first, "dedup": second, "write": third}
         sessions[reused[1]] = sessions[reused[0]]
         build_ingestion_orchestrator(
             run_state_session=sessions["run"],
@@ -69,8 +69,8 @@ def test_runtime_rejects_each_reused_session_pair(reused: tuple[str, str]) -> No
 
 
 @pytest.mark.asyncio
-async def test_runtime_runs_real_three_session_pipeline_and_terminal_retry() -> None:
-    engine = create_engine("sqlite:///:memory:")
+async def test_runtime_runs_real_three_session_pipeline_and_terminal_retry(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'runtime.sqlite3'}")
     Base.metadata.create_all(engine)
     with Session(engine, expire_on_commit=False) as state, Session(engine, expire_on_commit=False) as dedup, Session(engine, expire_on_commit=False) as write:
         request, run = CollectionRepository(state).create_request("Acme", "acme")
@@ -90,5 +90,32 @@ async def test_runtime_runs_real_three_session_pipeline_and_terminal_retry() -> 
         assert state.get(CollectionRequest, request.id).status is CollectionStatus.SUCCEEDED
         assert state.query(SourceDocument).count() == 1
         assert state.query(JobPosting).count() == 1 and state.query(JobSource).count() == 1
-        await orchestrator.run(run.id)
-        assert provider.calls == 1 and extractor.calls == 1
+        assert state.query(SourceDocument).one().external_id == "job-1"
+        assert state.get(CrawlRun, run.id).providers_attempted == ["careers"]
+        assert state.query(JobSource).one().source_raw_id == "job-1"
+
+    class FailProvider:
+        name = "fail"
+
+        async def search(self, _query):
+            raise AssertionError("terminal retry must not call providers")
+
+    class FailExtractor:
+        async def discover(self, _documents):
+            raise AssertionError("terminal retry must not call extraction")
+
+        async def extract_profile(self, _company, _documents):
+            raise AssertionError("terminal retry must not call extraction")
+
+        async def extract_jobs(self, _company, _documents):
+            raise AssertionError("terminal retry must not call extraction")
+
+    with Session(engine, expire_on_commit=False) as state, Session(engine, expire_on_commit=False) as dedup, Session(engine, expire_on_commit=False) as write:
+        retry = build_ingestion_orchestrator(
+            run_state_session=state, dedup_read_session=dedup, persistence_write_session=write,
+            providers=(FailProvider(),), extractor=FailExtractor(), semantic_judge=SemanticJudge(),
+        )
+        repeated = await retry.run(run.id)
+        assert repeated.status is CollectionStatus.SUCCEEDED
+        assert state.query(SourceDocument).count() == 1
+        assert state.query(JobPosting).count() == 1 and state.query(JobSource).count() == 1
