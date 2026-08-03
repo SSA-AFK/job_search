@@ -232,13 +232,16 @@ git commit -m "feat: integrate zhihu global search provider"
 
 **Files:**
 - Modify: `backend/app/ingestion/contracts.py`
+- Modify: `backend/app/ingestion/providers/http.py`
 - Create: `backend/app/ingestion/providers/company_site.py`
 - Create: `backend/app/ingestion/providers/robots.py`
+- Modify: `backend/tests/ingestion/providers/test_http.py`
 - Create: `backend/tests/ingestion/providers/test_company_site.py`
 
 **Interfaces:**
 - Produces: `CompanySiteProvider.search(query: ProviderQuery) -> ProviderResult`
 - Extends: immutable `ProviderQuery` with `website: HttpUrl | None`; immutable `ProviderResult` with `warnings: tuple[str, ...] = ()`
+- Extends: immutable `HttpDocument` with `title: str | None = None` and parsed `links: tuple[str, ...] = ()`; SafeHttpClient extracts these from bounded HTML without exposing raw HTML
 - Consumes: an already validated company website and an injected `RobotsPolicy`
 
 - [ ] **Step 1: Write compliance and bounded-crawl tests**
@@ -273,7 +276,7 @@ Expected: PASS without live network access.
 - [ ] **Step 5: Commit the company-site Provider**
 
 ```powershell
-git add backend/app/ingestion/contracts.py backend/app/ingestion/providers/company_site.py backend/app/ingestion/providers/robots.py backend/tests/ingestion/providers/test_company_site.py
+git add backend/app/ingestion/contracts.py backend/app/ingestion/providers/http.py backend/app/ingestion/providers/company_site.py backend/app/ingestion/providers/robots.py backend/tests/ingestion/providers/test_http.py backend/tests/ingestion/providers/test_company_site.py
 git commit -m "feat: add compliant company site provider"
 ```
 
