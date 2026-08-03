@@ -10,6 +10,16 @@ from app.ingestion.extraction.schemas import (
 )
 
 
+def test_job_source_evidence_must_be_listed_and_prompt_allowed() -> None:
+    with pytest.raises(ValidationError, match="one of evidence_ids"):
+        JobCandidate(title="Engineer", evidence_ids=("one",), source_evidence_id="two", confidence=1)
+    with pytest.raises(ValidationError, match="supplied in the prompt"):
+        JobCandidate.model_validate(
+            {"title": "Engineer", "evidence_ids": ["one", "two"], "source_evidence_id": "two", "confidence": 1},
+            context={"allowed_evidence_ids": {"one"}},
+        )
+
+
 def test_rejects_unknown_evidence_reference() -> None:
     with pytest.raises(ValidationError):
         CompanyCandidate.model_validate(

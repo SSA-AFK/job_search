@@ -83,3 +83,18 @@ async def test_builder_requires_explicit_source_for_multiple_job_evidence() -> N
             jobs=(JobCandidate(title="Engineer", evidence_ids=("job-1", "job-2"), confidence=1),),
             documents=(source("company"), source("job-1"), source("job-2")),
         )
+
+
+@pytest.mark.asyncio
+async def test_builder_uses_explicit_source_for_multiple_job_evidence() -> None:
+    batch = await NormalizedBatchBuilder().build(
+        company=CompanyRef(name="Acme"), discovered=CompanyCandidate(name="Acme", evidence_ids=("company",), confidence=1),
+        profile=CompanyProfileCandidate(name="Acme", evidence_ids=("company",), confidence=1),
+        jobs=(JobCandidate(title="Engineer", evidence_ids=("job-1", "job-2"), source_evidence_id="job-2", confidence=1),),
+        documents=(source("company"), source("job-1", provider="first"), source("job-2", provider="second")),
+    )
+
+    job = batch.jobs[0]
+    assert job.source_evidence_id == "job-2"
+    assert job.candidate.candidate.provider == "second"
+    assert job.candidate.candidate.source_raw_id == "job-2"

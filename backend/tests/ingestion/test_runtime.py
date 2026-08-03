@@ -51,14 +51,17 @@ class SemanticJudge:
         return DuplicateDecision(False)
 
 
-def test_runtime_rejects_reused_session() -> None:
+@pytest.mark.parametrize("reused", [("run", "dedup"), ("run", "write"), ("dedup", "write")])
+def test_runtime_rejects_each_reused_session_pair(reused: tuple[str, str]) -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
-    with Session(engine) as session, pytest.raises(ValueError, match="distinct sessions"):
+    with Session(engine) as first, Session(engine) as second, pytest.raises(ValueError, match="distinct sessions"):
+        sessions = {"run": first, "dedup": second, "write": Session(engine)}
+        sessions[reused[1]] = sessions[reused[0]]
         build_ingestion_orchestrator(
-            run_state_session=session,
-            dedup_read_session=session,
-            persistence_write_session=session,
+            run_state_session=sessions["run"],
+            dedup_read_session=sessions["dedup"],
+            persistence_write_session=sessions["write"],
             providers=(),
             extractor=None,  # type: ignore[arg-type]
             semantic_judge=None,  # type: ignore[arg-type]
