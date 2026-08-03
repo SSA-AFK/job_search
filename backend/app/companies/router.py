@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from app.cache.redis import configured_company_cache
 from app.companies.repository import CompanyRepository
 from app.companies.schemas import (
     CompanyDetail,
@@ -14,13 +15,16 @@ from app.companies.schemas import (
     Page,
 )
 from app.companies.service import CompanyService
+from app.core.config import settings
 from app.core.database import get_session
 
 router = APIRouter(prefix="/companies", tags=["companies"])
 
 
 def get_company_service(session: Annotated[Session, Depends(get_session)]) -> CompanyService:
-    return CompanyService(CompanyRepository(session))
+    return CompanyService(
+        CompanyRepository(session), cache=configured_company_cache(settings.cache_redis_url)
+    )
 
 
 @router.get("", response_model=Page[CompanyListItem])

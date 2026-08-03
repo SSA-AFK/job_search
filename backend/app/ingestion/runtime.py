@@ -5,7 +5,9 @@ from typing import cast
 
 from sqlalchemy.orm import Session
 
+from app.cache.redis import configured_company_cache
 from app.collection.repository import CollectionRepository
+from app.core.config import settings
 from app.ingestion.contracts import Provider
 from app.ingestion.deduplication.company import CompanyDeduplicator
 from app.ingestion.deduplication.job import JobDeduplicator
@@ -36,6 +38,9 @@ def build_ingestion_orchestrator(
     )
     return IngestionOrchestrator(
         providers=providers, extractor=extractor, batch_builder=builder,
-        persistence=PersistenceService(persistence_write_session),
+        persistence=PersistenceService(
+            persistence_write_session,
+            cache=configured_company_cache(settings.cache_redis_url),
+        ),
         runs=cast(CrawlRunRepository, CollectionRepository(run_state_session)),
     )

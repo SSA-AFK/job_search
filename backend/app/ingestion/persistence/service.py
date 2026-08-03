@@ -11,6 +11,7 @@ from sqlalchemy import Select, select
 from sqlalchemy.exc import DataError, IntegrityError, StatementError
 from sqlalchemy.orm import Session
 
+from app.cache.base import CompanyCache
 from app.core.normalization import normalize_url
 from app.ingestion.persistence.contracts import (
     NormalizedBatch,
@@ -93,8 +94,9 @@ def _plain_text_excerpt(value: str) -> str:
 
 
 class PersistenceService:
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: Session, *, cache: CompanyCache | None = None) -> None:
         self.session = session
+        self.cache = cache
 
     def persist(self, batch: NormalizedBatch, run_id: UUID) -> PersistenceResult:
         self._require_clean_entry(run_id)
@@ -107,12 +109,15 @@ class PersistenceService:
                 job_ids, warnings = self._upsert_jobs(company.id, batch.jobs, documents, run_id)
                 self._upsert_filings(company.id, batch.filings, documents, run_id)
                 company.last_collected_at = batch.collected_at
-                return PersistenceResult(
+                result = PersistenceResult(
                     company_id=company.id,
                     documents_written=len({document.id for document in documents.values()}),
                     jobs_written=len(job_ids),
                     warnings=warnings,
                 )
+            if self.cache is not None:
+                self.cache.invalidate_company(result.company_id)
+            return result
         except PersistenceError:
             raise
         except IntegrityError as exc:

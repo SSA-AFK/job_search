@@ -1,6 +1,9 @@
 from typing import Any
 from uuid import UUID
 
+from pydantic import ValidationError
+
+from app.cache.base import CompanyCache
 from app.companies.repository import CompanyRepository
 from app.companies.schemas import (
     CompanyDetail,
@@ -18,19 +21,36 @@ from app.models import Company, CompanySource, JobPosting, SourceDocument
 
 
 class CompanyService:
-    def __init__(self, repository: CompanyRepository) -> None:
+    def __init__(self, repository: CompanyRepository, *, cache: CompanyCache | None = None) -> None:
         self.repository = repository
+        self.cache = cache
 
     def search(self, query: CompanyQuery) -> Page[CompanyListItem]:
+        params = query.model_dump(mode="json")
+        cached = self._get_cached(
+            lambda: self.cache.get_list(params) if self.cache is not None else None,
+            Page[CompanyListItem],
+        )
+        if cached is not None:
+            return cached
         companies, total = self.repository.search(query)
-        return Page(
+        page = Page(
             items=[self._company_list_item(company) for company in companies],
             page=query.page,
             page_size=query.page_size,
             total=total,
         )
+        if self.cache is not None:
+            self.cache.set_list(params, page.model_dump_json())
+        return page
 
     def get_detail(self, company_id: UUID) -> CompanyDetail:
+        cached = self._get_cached(
+            lambda: self.cache.get_detail(company_id) if self.cache is not None else None,
+            CompanyDetail,
+        )
+        if cached is not None:
+            return cached
         company = self.repository.get_detail(company_id)
         if company is None:
             raise CompanyNotFoundError
@@ -39,7 +59,7 @@ class CompanyService:
             self._source_summary(company_source, document)
             for company_source, document in company._loaded_sources  # type: ignore[attr-defined]
         ]
-        return CompanyDetail(
+        detail = CompanyDetail(
             **self._company_fields(company),
             aliases=[
                 alias.alias
@@ -60,17 +80,38 @@ class CompanyService:
             sources=sources,
             job_count=company._loaded_job_count,  # type: ignore[attr-defined]
         )
+        if self.cache is not None:
+            self.cache.set_detail(company_id, detail.model_dump_json())
+        return detail
 
     def list_jobs(self, company_id: UUID, query: JobQuery) -> Page[JobListItem]:
         if not self.repository.company_exists(company_id):
             raise CompanyNotFoundError
+        params = query.model_dump(mode="json")
+        cached = self._get_cached(
+            lambda: self.cache.get_jobs(company_id, params) if self.cache is not None else None,
+            Page[JobListItem],
+        )
+        if cached is not None:
+            return cached
         jobs, total = self.repository.list_jobs(company_id, query)
-        return Page(
+        page = Page(
             items=[self._job_list_item(job) for job in jobs],
             page=query.page,
             page_size=query.page_size,
             total=total,
         )
+        if self.cache is not None:
+            self.cache.set_jobs(company_id, params, page.model_dump_json())
+        return page
+
+    @staticmethod
+    def _get_cached(getter: Any, response_type: type[Any]) -> Any | None:
+        try:
+            value = getter()
+            return response_type.model_validate_json(value) if value is not None else None
+        except (TypeError, ValidationError, ValueError):
+            return None
 
     @staticmethod
     def _company_fields(company: Company) -> dict[str, Any]:
