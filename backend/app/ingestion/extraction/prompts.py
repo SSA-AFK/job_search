@@ -3,6 +3,7 @@
 from collections.abc import Sequence
 
 from app.ingestion.contracts import RawDocument
+from app.ingestion.extraction.schemas import CompanyRef
 
 MAX_DOCUMENT_CHARS = 8_000
 MAX_PROMPT_CHARS = 24_000
@@ -14,24 +15,11 @@ _ROLE_INSTRUCTIONS = {
 }
 
 
-def build_prompt(role: str, documents: Sequence[RawDocument]) -> tuple[set[str], str]:
+def build_prompt(
+    role: str, documents: Sequence[RawDocument], company: CompanyRef | None = None
+) -> tuple[set[str], str]:
     if role not in _ROLE_INSTRUCTIONS:
         raise ValueError("unknown extraction role")
-
-    evidence_ids: set[str] = set()
-    excerpts: list[str] = []
-    used_chars = 0
-    for index, document in enumerate(documents, start=1):
-        evidence_id = document.external_id or f"document-{index}"
-        if evidence_id in evidence_ids:
-            evidence_id = f"{evidence_id}-{index}"
-        excerpt = document.text[:MAX_DOCUMENT_CHARS]
-        block = f"[evidence:{evidence_id}]\n{excerpt}"
-        if used_chars + len(block) > MAX_PROMPT_CHARS:
-            break
-        evidence_ids.add(evidence_id)
-        excerpts.append(block)
-        used_chars += len(block)
 
     instructions = (
         f"Role: {_ROLE_INSTRUCTIONS[role]}\n"
@@ -39,4 +27,23 @@ def build_prompt(role: str, documents: Sequence[RawDocument]) -> tuple[set[str],
         "Return JSON only. Every asserted field must include an evidence_ids entry from "
         "the supplied evidence IDs. Use null for unknown values.\n\n"
     )
-    return evidence_ids, instructions + "\n\n".join(excerpts)
+    if company is not None:
+        instructions += (
+            f"Target company: {company.name}\n"
+            "Extract only the target company; do not request unrelated companies.\n\n"
+        )
+
+    evidence_ids: set[str] = set()
+    prompt = instructions
+    for index, document in enumerate(documents, start=1):
+        evidence_id = document.external_id or f"document-{index}"
+        while evidence_id in evidence_ids:
+            evidence_id = f"{evidence_id}-{index}"
+        block = f"[evidence:{evidence_id}]\n{document.text[:MAX_DOCUMENT_CHARS]}"
+        separator = "" if prompt == instructions else "\n\n"
+        if len(prompt) + len(separator) + len(block) > MAX_PROMPT_CHARS:
+            break
+        evidence_ids.add(evidence_id)
+        prompt += separator + block
+
+    return evidence_ids, prompt

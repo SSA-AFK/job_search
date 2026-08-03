@@ -42,7 +42,7 @@ class CrewExtractor:
     async def extract_profile(
         self, company: CompanyRef, documents: Sequence[RawDocument]
     ) -> CompanyProfileCandidate:
-        batch = await self._extract_batch("profile", documents)
+        batch = await self._extract_batch("profile", documents, company)
         for profile in batch.profiles:
             if profile.name == company.name:
                 return profile
@@ -51,13 +51,16 @@ class CrewExtractor:
     async def extract_jobs(
         self, company: CompanyRef, documents: Sequence[RawDocument]
     ) -> list[JobCandidate]:
-        batch = await self._extract_batch("jobs", documents)
+        batch = await self._extract_batch("jobs", documents, company)
         return batch.jobs
 
     async def _extract_batch(
-        self, role: str, documents: Sequence[RawDocument]
+        self,
+        role: str,
+        documents: Sequence[RawDocument],
+        company: CompanyRef | None = None,
     ) -> ExtractionBatch:
-        evidence_ids, prompt = build_prompt(role, documents)
+        evidence_ids, prompt = build_prompt(role, documents, company)
         response = await self._llm.complete(prompt)
         try:
             payload = json.loads(response)
