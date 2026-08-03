@@ -3,7 +3,7 @@ from uuid import UUID
 
 from pydantic import ValidationError
 
-from app.cache.base import CompanyCache
+from app.cache.base import CompanyCache, ListCacheEntry
 from app.companies.repository import CompanyRepository
 from app.companies.schemas import (
     CompanyDetail,
@@ -27,10 +27,8 @@ class CompanyService:
 
     def search(self, query: CompanyQuery) -> Page[CompanyListItem]:
         params = query.model_dump(mode="json")
-        cached = self._get_cached(
-            lambda: self.cache.get_list(params) if self.cache is not None else None,
-            Page[CompanyListItem],
-        )
+        entry = self.cache.get_list(params) if self.cache is not None else ListCacheEntry(None, None)
+        cached = self._deserialize_cached(entry.value, Page[CompanyListItem])
         if cached is not None:
             return cached
         companies, total = self.repository.search(query)
@@ -41,7 +39,7 @@ class CompanyService:
             total=total,
         )
         if self.cache is not None:
-            self.cache.set_list(params, page.model_dump_json())
+            self.cache.set_list(params, page.model_dump_json(), version=entry.version)
         return page
 
     def get_detail(self, company_id: UUID) -> CompanyDetail:
@@ -107,8 +105,11 @@ class CompanyService:
 
     @staticmethod
     def _get_cached(getter: Any, response_type: type[Any]) -> Any | None:
+        return CompanyService._deserialize_cached(getter(), response_type)
+
+    @staticmethod
+    def _deserialize_cached(value: str | None, response_type: type[Any]) -> Any | None:
         try:
-            value = getter()
             return response_type.model_validate_json(value) if value is not None else None
         except (TypeError, ValidationError, ValueError):
             return None

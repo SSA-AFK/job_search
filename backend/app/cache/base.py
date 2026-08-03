@@ -1,14 +1,21 @@
 """Cache boundary for serialized company query responses."""
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import UUID
 
 
-class CompanyCache(Protocol):
-    def get_list(self, params: Mapping[str, Any]) -> str | None: ...
+@dataclass(frozen=True)
+class ListCacheEntry:
+    value: str | None
+    version: int | None
 
-    def set_list(self, params: Mapping[str, Any], value: str) -> None: ...
+
+class CompanyCache(Protocol):
+    def get_list(self, params: Mapping[str, Any]) -> ListCacheEntry: ...
+
+    def set_list(self, params: Mapping[str, Any], value: str, *, version: int | None) -> None: ...
 
     def get_detail(self, company_id: UUID) -> str | None: ...
 
