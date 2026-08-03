@@ -42,6 +42,7 @@ CompanyFieldName = Literal[
     "description",
 ]
 _MAX_SQL_INTEGER = 2_147_483_647
+_MAX_SQL_SMALLINT = 32_767
 
 
 class FrozenDTO(BaseModel):
@@ -90,6 +91,9 @@ class NormalizedJobRecord(FrozenDTO):
             for value in salary_bounds
         ):
             raise ValueError("normalized salary exceeds database integer domain")
+        salary_months = self.candidate.salary_months
+        if salary_months is not None and not 1 <= salary_months <= _MAX_SQL_SMALLINT:
+            raise ValueError("normalized salary months exceed database domain")
         return self
 
 

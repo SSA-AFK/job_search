@@ -3,12 +3,13 @@
 import re
 from dataclasses import dataclass
 
-_MONTHS_PATTERN = re.compile(r"(?:[\u00b7*\u00d7xX]\s*)?(\d{1,2})\s*(?:\u85aa|\u4e2a\u6708)")
+_MONTHS_PATTERN = re.compile(r"(?:[\u00b7*\u00d7xX]\s*)?(\d+)\s*(?:\u85aa|\u4e2a\u6708)")
 _MONTHLY_RANGE_PATTERN = re.compile(
     r"^\s*(\d+(?:\.\d+)?)\s*[kK]\s*[-~\u81f3\u5230]\s*"
-    r"(\d+(?:\.\d+)?)\s*[kK](?:\s*[\u00b7*\u00d7xX]?\s*\d{1,2}\s*(?:\u85aa|\u4e2a\u6708))?\s*$"
+    r"(\d+(?:\.\d+)?)\s*[kK](?:\s*[\u00b7*\u00d7xX]?\s*\d+\s*(?:\u85aa|\u4e2a\u6708))?\s*$"
 )
 _MAX_SQL_INTEGER = 2_147_483_647
+_MAX_SQL_SMALLINT = 32_767
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,8 @@ def normalize_salary(raw_salary: str | None) -> NormalizedSalary:
 
     months_match = _MONTHS_PATTERN.search(raw_salary)
     months = int(months_match.group(1)) if months_match is not None else None
+    if months is not None and not 1 <= months <= _MAX_SQL_SMALLINT:
+        return _invalid_salary()
     return NormalizedSalary(minimum, maximum, months)
 
 

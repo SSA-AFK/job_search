@@ -675,3 +675,29 @@ def test_integer_overflow_is_sanitized_and_leaves_session_usable(
     assert session.scalar(
         select(func.count()).select_from(Company).where(Company.normalized_name == "usable")
     ) == 1
+
+
+def test_bypassed_salary_months_outside_smallint_domain_rolls_back(
+    session: Session, persistence: PersistenceService
+) -> None:
+    valid_job = normalized_job("salary-months-overflow")
+    invalid_candidate = replace(valid_job.candidate, salary_months=32_768)
+    invalid_job = valid_job.model_copy(update={"candidate": invalid_candidate})
+    invalid_batch = NormalizedBatch.model_construct(
+        documents=(normalized_document("doc-1", external_id="source-months"),),
+        company=normalized_company(),
+        jobs=(invalid_job,),
+        filings=(),
+        collected_at=NOW,
+    )
+    run_id = uuid4()
+
+    with pytest.raises(PersistenceError) as raised:
+        persistence.persist(invalid_batch, run_id=run_id)
+
+    assert raised.value.run_id == run_id
+    assert raised.value.constraint == "salary_months"
+    assert raised.value.detail == "normalized salary months exceed database domain"
+    assert count_rows(session, SourceDocument) == 0
+    assert count_rows(session, Company) == 0
+    assert count_rows(session, JobPosting) == 0

@@ -242,3 +242,30 @@ def test_normalized_job_rejects_salary_outside_database_integer_domain() -> None
             posted_at=None,
             seen_at=NOW,
         )
+
+
+@pytest.mark.parametrize("salary_months", [0, -1, 32_768])
+def test_normalized_job_rejects_salary_months_outside_positive_smallint_domain(
+    salary_months: int,
+) -> None:
+    candidate = normalize_job(
+        JobCandidate(
+            title="Engineer",
+            location="Shanghai",
+            provider="official",
+            source_raw_id="job-1",
+            evidence_ids=["doc-1"],
+            confidence=0.9,
+        )
+    )
+    invalid = replace(candidate, salary_months=salary_months)
+
+    with pytest.raises(ValidationError, match="salary months"):
+        NormalizedJobRecord(
+            candidate=invalid,
+            job_posting_id=None,
+            source_evidence_id="doc-1",
+            apply_url="https://example.com/jobs/1",
+            posted_at=None,
+            seen_at=NOW,
+        )

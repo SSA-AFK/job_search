@@ -30,6 +30,7 @@ from app.models import (
 )
 
 _TEXT_EXCERPT_LIMIT = 4_000
+_MAX_SQL_SMALLINT = 32_767
 _KNOWN_CONSTRAINT_MARKERS = {
     "companies.normalized_name": "uq_company_normalized_name",
     "source_documents.provider, source_documents.external_id": (
@@ -305,6 +306,13 @@ class PersistenceService:
         job_ids: set[UUID] = set()
         warnings: list[str] = []
         for record in records:
+            salary_months = record.candidate.salary_months
+            if salary_months is not None and not 1 <= salary_months <= _MAX_SQL_SMALLINT:
+                raise PersistenceError(
+                    run_id=run_id,
+                    constraint="salary_months",
+                    detail="normalized salary months exceed database domain",
+                )
             source_candidate = record.candidate.candidate
             provider = source_candidate.provider
             source_raw_id = source_candidate.source_raw_id

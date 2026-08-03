@@ -88,3 +88,20 @@ def test_salary_bound_outside_signed_32_bit_domain_is_unknown_and_warned(
     assert salary.maximum_monthly is None
     assert salary.months is None
     assert salary.warnings == ("invalid_salary",)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "30k-50k·0薪",
+        "30k-50k·-1薪",
+        "30k-50k·32768薪",
+    ],
+)
+def test_salary_months_outside_positive_smallint_domain_is_invalid(raw: str) -> None:
+    salary = normalize_salary(raw)
+
+    assert salary.minimum_monthly is None
+    assert salary.maximum_monthly is None
+    assert salary.months is None
+    assert salary.warnings == ("invalid_salary",)
