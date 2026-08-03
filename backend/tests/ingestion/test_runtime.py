@@ -16,6 +16,8 @@ from app.models import (
     Base,
     CollectionRequest,
     CollectionStatus,
+    Company,
+    CompanySource,
     CrawlRun,
     JobPosting,
     JobSource,
@@ -84,14 +86,32 @@ async def test_runtime_runs_real_three_session_pipeline_and_terminal_retry(tmp_p
 
         result = await orchestrator.run(run.id)
 
+        persisted_run = state.get(CrawlRun, run.id)
+        persisted_request = state.get(CollectionRequest, request.id)
+        persisted_document = state.query(SourceDocument).one()
+        persisted_company = state.query(Company).one()
+        persisted_company_source = state.query(CompanySource).one()
         assert result.status is CollectionStatus.SUCCEEDED
-        assert result.documents_found == 1 and result.jobs_found == 1 and result.jobs_written == 1
-        assert state.get(CrawlRun, run.id).status is CollectionStatus.SUCCEEDED
-        assert state.get(CollectionRequest, request.id).status is CollectionStatus.SUCCEEDED
-        assert state.query(SourceDocument).count() == 1
+        assert result.company_id == persisted_company.id
+        assert result.documents_found == 1
+        assert result.jobs_found == 1
+        assert result.jobs_written == 1
+        assert persisted_run is not None
+        assert persisted_run.status is CollectionStatus.SUCCEEDED
+        assert persisted_run.company_id == persisted_company.id
+        assert persisted_run.documents_found == 1
+        assert persisted_run.jobs_found == 1
+        assert persisted_run.jobs_written == 1
+        assert persisted_request is not None
+        assert persisted_request.status is CollectionStatus.SUCCEEDED
+        assert persisted_request.company_id == persisted_company.id
+        assert persisted_document.external_id == "job-1"
+        assert persisted_company.canonical_name == "Acme"
+        assert persisted_company_source.company_id == persisted_company.id
+        assert persisted_company_source.source_document_id == persisted_document.id
+        assert persisted_company_source.covered_fields == ["canonical_name", "description"]
         assert state.query(JobPosting).count() == 1 and state.query(JobSource).count() == 1
-        assert state.query(SourceDocument).one().external_id == "job-1"
-        assert state.get(CrawlRun, run.id).providers_attempted == ["careers"]
+        assert persisted_run.providers_attempted == ["careers"]
         assert state.query(JobSource).one().source_raw_id == "job-1"
 
     class FailProvider:
@@ -115,7 +135,31 @@ async def test_runtime_runs_real_three_session_pipeline_and_terminal_retry(tmp_p
             run_state_session=state, dedup_read_session=dedup, persistence_write_session=write,
             providers=(FailProvider(),), extractor=FailExtractor(), semantic_judge=SemanticJudge(),
         )
+        counts_before_retry = {
+            "documents_written": state.query(SourceDocument).count(),
+            "companies": state.query(Company).count(),
+            "company_sources": state.query(CompanySource).count(),
+            "jobs": state.query(JobPosting).count(),
+            "job_sources": state.query(JobSource).count(),
+        }
         repeated = await retry.run(run.id)
+        counts_after_retry = {
+            "documents_written": state.query(SourceDocument).count(),
+            "companies": state.query(Company).count(),
+            "company_sources": state.query(CompanySource).count(),
+            "jobs": state.query(JobPosting).count(),
+            "job_sources": state.query(JobSource).count(),
+        }
         assert repeated.status is CollectionStatus.SUCCEEDED
-        assert state.query(SourceDocument).count() == 1
-        assert state.query(JobPosting).count() == 1 and state.query(JobSource).count() == 1
+        assert repeated.company_id == persisted_company.id
+        assert repeated.documents_found == 1
+        assert repeated.jobs_found == 1
+        assert repeated.jobs_written == 1
+        assert counts_before_retry == {
+            "documents_written": 1,
+            "companies": 1,
+            "company_sources": 1,
+            "jobs": 1,
+            "job_sources": 1,
+        }
+        assert counts_after_retry == counts_before_retry

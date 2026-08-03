@@ -389,8 +389,8 @@ def _warning_code(warning: str) -> str:
 def _plain_text(value: str | None) -> str | None:
     if value is None:
         return None
-    normalized = " ".join(value.split())
-    return normalized or None
+    stripped = value.strip()
+    return stripped or None
 
 
 def _select_company(

@@ -103,6 +103,28 @@ async def test_builder_rejects_conflicting_profile_data(profile: CompanyProfileC
 
 
 @pytest.mark.asyncio
+async def test_builder_rejects_description_conflict_hidden_by_internal_whitespace() -> None:
+    with pytest.raises(Exception, match="invalid_evidence"):
+        await NormalizedBatchBuilder().build(
+            company=CompanyRef(name="Acme"),
+            discovered=CompanyCandidate(
+                name="Acme",
+                description="A  B",
+                evidence_ids=("company",),
+                confidence=1,
+            ),
+            profile=CompanyProfileCandidate(
+                name="Acme",
+                description="A B",
+                evidence_ids=("profile",),
+                confidence=1,
+            ),
+            jobs=(),
+            documents=(source("company"), source("profile")),
+        )
+
+
+@pytest.mark.asyncio
 async def test_builder_requires_explicit_source_for_multiple_job_evidence() -> None:
     with pytest.raises(Exception, match="invalid_evidence"):
         await NormalizedBatchBuilder().build(
