@@ -56,7 +56,7 @@ class RobotsPolicy:
 
         normalized_host = host.lower().rstrip(".")
         default_port = 443 if scheme == "https" else 80
-        effective_port = explicit_port or default_port
+        effective_port = default_port if explicit_port is None else explicit_port
         display_host = f"[{normalized_host}]" if ":" in normalized_host else normalized_host
         netloc = (
             display_host

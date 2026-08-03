@@ -313,6 +313,29 @@ async def test_robots_policy_caches_rules_by_normalized_origin() -> None:
 
 
 @pytest.mark.anyio
+async def test_robots_policy_keeps_explicit_zero_port_as_distinct_origin() -> None:
+    safe_client = AsyncMock(spec=SafeHttpClient)
+
+    async def fetch_robots(url: str, *, allowed_hosts: set[str]) -> HttpDocument:
+        assert allowed_hosts == {"example.com"}
+        return HttpDocument(
+            url=url,
+            text="User-agent: *\nAllow: /",
+            content_type="text/plain",
+        )
+
+    safe_client.get_text.side_effect = fetch_robots
+    policy = RobotsPolicy(http_client=safe_client)
+
+    assert await policy.can_fetch("https://example.com/about") is True
+    assert await policy.can_fetch("https://example.com:0/jobs") is True
+    assert [args.args[0] for args in safe_client.get_text.await_args_list] == [
+        "https://example.com/robots.txt",
+        "https://example.com:0/robots.txt",
+    ]
+
+
+@pytest.mark.anyio
 async def test_canonicalizes_configured_origin_before_seed_deduplication(
     safe_client: AsyncMock, robots_policy: AsyncMock
 ) -> None:
