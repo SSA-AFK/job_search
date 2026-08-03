@@ -46,6 +46,8 @@ class ZhihuGlobalSearchProvider:
         clock: Callable[[], datetime] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         jitter: Callable[[], float] = lambda: random.uniform(0.0, 0.1),
+        total_timeout_seconds: float = 15.0,
+        timeout: Callable[[float | None], Any] = asyncio.timeout,
     ) -> None:
         if enabled and not access_secret:
             raise ProviderError(
@@ -58,23 +60,35 @@ class ZhihuGlobalSearchProvider:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._sleep = sleep
         self._jitter = jitter
+        self._total_timeout_seconds = total_timeout_seconds
+        self._timeout = timeout
 
     async def search(self, query: ProviderQuery) -> ProviderResult:
         if not self._enabled:
             return ProviderResult(documents=())
 
-        response = await self._request(query)
+        filter_expression = self._filter_expression(query.allowed_hosts)
+        if query.allowed_hosts and filter_expression is None:
+            return ProviderResult(documents=())
+        try:
+            async with self._timeout(self._total_timeout_seconds):
+                response = await self._request(query, filter_expression)
+        except TimeoutError as error:
+            raise ProviderError(
+                code="request_timeout", retryable=True, detail="request exceeded total timeout"
+            ) from error
         payload = self._parse_json(response)
         return self._parse_result(payload)
 
-    async def _request(self, query: ProviderQuery) -> httpx.Response:
-        timeout = httpx.Timeout(15.0, connect=5.0)
+    async def _request(
+        self, query: ProviderQuery, filter_expression: str | None
+    ) -> httpx.Response:
+        timeout = httpx.Timeout(self._total_timeout_seconds, connect=5.0)
         params: dict[str, str] = {
             "Query": query.query,
             "Count": str(min(query.max_results, 20)),
             "SearchDB": "all",
         }
-        filter_expression = self._filter_expression(query.allowed_hosts)
         if filter_expression:
             params["Filter"] = filter_expression
 
@@ -144,7 +158,10 @@ class ZhihuGlobalSearchProvider:
 
     @classmethod
     def _parse_result(cls, payload: Mapping[str, Any]) -> ProviderResult:
-        if payload.get("Code") != 0:
+        code = payload.get("Code")
+        if not isinstance(code, int) or isinstance(code, bool):
+            raise ProviderError(code="invalid_response", retryable=False, detail="Code is not an integer")
+        if code != 0:
             raise ProviderError(
                 code="api_error", retryable=False, detail=str(payload.get("Message", "unknown error"))
             )
@@ -157,7 +174,7 @@ class ZhihuGlobalSearchProvider:
             raise ProviderError(code="invalid_response", retryable=False, detail="Data fields are invalid")
         try:
             documents = tuple(cls._parse_document(item) for item in items)
-        except (KeyError, TypeError, ValueError, ValidationError) as error:
+        except (KeyError, TypeError, ValueError, OverflowError, OSError, ValidationError) as error:
             raise ProviderError(code="invalid_response", retryable=False, detail=str(error)) from error
         return ProviderResult(documents=documents, truncated=has_more)
 

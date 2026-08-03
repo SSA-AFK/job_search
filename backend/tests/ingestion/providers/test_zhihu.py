@@ -41,6 +41,25 @@ def zhihu_payload(
     }
 
 
+def first_payload_item(payload: dict[str, object]) -> dict[str, object]:
+    data = payload["Data"]
+    assert isinstance(data, dict)
+    items = data["Items"]
+    assert isinstance(items, list)
+    item = items[0]
+    assert isinstance(item, dict)
+    return item
+
+
+class ExpiredAfterRequest:
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *args: object) -> None:
+        del args
+        raise TimeoutError
+
+
 @pytest.fixture
 def frozen_time() -> datetime:
     return datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
@@ -123,6 +142,20 @@ async def test_excludes_zhihu_hosts_from_documented_filter(
 
 
 @pytest.mark.anyio
+async def test_does_not_search_when_all_allowed_hosts_are_forbidden(
+    provider: ZhihuGlobalSearchProvider, respx_mock: respx.MockRouter
+) -> None:
+    route = respx_mock.get(ENDPOINT).mock(return_value=httpx.Response(200, json=zhihu_payload()))
+
+    result = await provider.search(
+        ProviderQuery(query="Example Company", allowed_hosts=frozenset({"zhihu.com"}))
+    )
+
+    assert result.documents == ()
+    assert route.call_count == 0
+
+
+@pytest.mark.anyio
 async def test_parses_documents_and_removes_emphasis_markup(
     provider: ZhihuGlobalSearchProvider, respx_mock: respx.MockRouter
 ) -> None:
@@ -179,6 +212,31 @@ async def test_retries_retryable_statuses_three_times(
 
 
 @pytest.mark.anyio
+async def test_reports_total_deadline_expiry_without_waiting(
+    frozen_time: datetime, recorded_delays: list[float], respx_mock: respx.MockRouter
+) -> None:
+    async def record_sleep(delay: float) -> None:
+        recorded_delays.append(delay)
+
+    provider = ZhihuGlobalSearchProvider(
+        enabled=True,
+        access_secret="test-secret",
+        clock=lambda: frozen_time,
+        sleep=record_sleep,
+        jitter=lambda: 0.0,
+        timeout=lambda _seconds: ExpiredAfterRequest(),
+    )
+    route = respx_mock.get(ENDPOINT).mock(return_value=httpx.Response(503))
+
+    with pytest.raises(ProviderError, match="request_timeout") as caught:
+        await provider.search(ProviderQuery(query="Example Company"))
+
+    assert caught.value.retryable is True
+    assert route.call_count == 4
+    assert recorded_delays == [0.5, 1.0, 2.0]
+
+
+@pytest.mark.anyio
 async def test_does_not_retry_non_retryable_status(
     provider: ZhihuGlobalSearchProvider, respx_mock: respx.MockRouter
 ) -> None:
@@ -198,6 +256,55 @@ async def test_reports_invalid_json(
     respx_mock.get(ENDPOINT).mock(return_value=httpx.Response(200, text="not json"))
 
     with pytest.raises(ProviderError, match="invalid_json") as caught:
+        await provider.search(ProviderQuery(query="Example Company"))
+
+    assert caught.value.retryable is False
+
+
+@pytest.mark.anyio
+async def test_reports_out_of_range_timestamp_as_invalid_response(
+    provider: ZhihuGlobalSearchProvider, respx_mock: respx.MockRouter
+) -> None:
+    payload = zhihu_payload()
+    first_payload_item(payload)["EditTime"] = 10**1000
+    respx_mock.get(ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
+
+    with pytest.raises(ProviderError, match="invalid_response") as caught:
+        await provider.search(ProviderQuery(query="Example Company"))
+
+    assert caught.value.retryable is False
+
+
+@pytest.mark.anyio
+async def test_reports_overflowing_numeric_field_as_invalid_response(
+    provider: ZhihuGlobalSearchProvider, respx_mock: respx.MockRouter
+) -> None:
+    respx_mock.get(ENDPOINT).mock(
+        return_value=httpx.Response(
+            200,
+            content=(
+                b'{"Code":0,"Data":{"HasMore":false,"Items":[{"ContentID":"answer-123",'
+                b'"Url":"https://www.example.com/answer/123","Title":"Company",'
+                b'"ContentText":"matching","EditTime":1754000000,"AuthorityLevel":1e1000}]}}'
+            ),
+        )
+    )
+
+    with pytest.raises(ProviderError, match="invalid_response") as caught:
+        await provider.search(ProviderQuery(query="Example Company"))
+
+    assert caught.value.retryable is False
+
+
+@pytest.mark.anyio
+async def test_reports_malformed_response_schema_as_invalid_response(
+    provider: ZhihuGlobalSearchProvider, respx_mock: respx.MockRouter
+) -> None:
+    payload = zhihu_payload()
+    payload["Code"] = "0"
+    respx_mock.get(ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
+
+    with pytest.raises(ProviderError, match="invalid_response") as caught:
         await provider.search(ProviderQuery(query="Example Company"))
 
     assert caught.value.retryable is False
