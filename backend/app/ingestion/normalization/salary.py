@@ -2,7 +2,6 @@
 
 import re
 from dataclasses import dataclass
-from decimal import Decimal
 
 _MONTHS_PATTERN = re.compile(r"(?:[\u00b7*\u00d7xX]\s*)?(\d{1,2})\s*(?:\u85aa|\u4e2a\u6708)")
 _MONTHLY_RANGE_PATTERN = re.compile(
@@ -28,15 +27,10 @@ def normalize_salary(raw_salary: str | None) -> NormalizedSalary:
     if match is None:
         return _invalid_salary()
 
-    minimum_value = Decimal(match.group(1)) * 1_000
-    maximum_value = Decimal(match.group(2)) * 1_000
-    if (
-        minimum_value != minimum_value.to_integral_value()
-        or maximum_value != maximum_value.to_integral_value()
-    ):
+    minimum = _monthly_rmb_from_k(match.group(1))
+    maximum = _monthly_rmb_from_k(match.group(2))
+    if minimum is None or maximum is None:
         return _invalid_salary()
-    minimum = int(minimum_value)
-    maximum = int(maximum_value)
     if minimum > maximum:
         return _invalid_salary()
 
@@ -47,3 +41,14 @@ def normalize_salary(raw_salary: str | None) -> NormalizedSalary:
 
 def _invalid_salary() -> NormalizedSalary:
     return NormalizedSalary(None, None, None, ("invalid_salary",))
+
+
+def _monthly_rmb_from_k(value: str) -> int | None:
+    whole, separator, fractional = value.partition(".")
+    if not separator:
+        return int(whole) * 1_000
+
+    coefficient = int(f"{whole}{fractional}") * 1_000
+    divisor = 10 ** len(fractional)
+    monthly_rmb, remainder = divmod(coefficient, divisor)
+    return monthly_rmb if remainder == 0 else None

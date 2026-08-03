@@ -37,6 +37,14 @@ def test_fractional_rmb_salary_bound_is_unknown_and_warned() -> None:
     assert salary.warnings == ("invalid_salary",)
 
 
+def test_excessive_decimal_precision_is_unknown_and_warned() -> None:
+    salary = normalize_salary("1.0000000000000000000000000001k-2k")
+
+    assert salary.minimum_monthly is None
+    assert salary.maximum_monthly is None
+    assert salary.warnings == ("invalid_salary",)
+
+
 def test_missing_salary_remains_unknown_without_a_warning() -> None:
     salary = normalize_salary(None)
 
