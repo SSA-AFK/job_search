@@ -2,8 +2,53 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from app.collection.repository import CollectionRepository
+from app.ingestion.contracts import ProviderQuery, ProviderResult, RawDocument
+from app.ingestion.deduplication.semantic import DuplicateDecision
+from app.ingestion.extraction.schemas import (
+    CompanyCandidate,
+    CompanyProfileCandidate,
+    CompanyRef,
+    JobCandidate,
+)
 from app.ingestion.runtime import build_ingestion_orchestrator
-from app.models import Base
+from app.models import (
+    Base,
+    CollectionRequest,
+    CollectionStatus,
+    CrawlRun,
+    JobPosting,
+    JobSource,
+    SourceDocument,
+)
+
+
+class Provider:
+    name = "careers"
+    calls = 0
+
+    async def search(self, _query: ProviderQuery) -> ProviderResult:
+        self.calls += 1
+        return ProviderResult(documents=(RawDocument(provider="careers", external_id="job-1", url="https://acme.example/jobs/1", title="Engineer", text="Acme engineer", published_at=None),))
+
+
+class Extractor:
+    calls = 0
+
+    async def discover(self, _documents):
+        self.calls += 1
+        return (CompanyCandidate(name="Acme", evidence_ids=("job-1",), confidence=1),)
+
+    async def extract_profile(self, _company: CompanyRef, _documents):
+        return CompanyProfileCandidate(name="Acme", evidence_ids=("job-1",), confidence=1, description="Acme")
+
+    async def extract_jobs(self, _company: CompanyRef, _documents):
+        return (JobCandidate(title="Engineer", evidence_ids=("job-1",), confidence=1),)
+
+
+class SemanticJudge:
+    async def jobs_are_duplicates(self, _left, _right) -> DuplicateDecision:
+        return DuplicateDecision(False)
 
 
 def test_runtime_rejects_reused_session() -> None:
@@ -18,3 +63,29 @@ def test_runtime_rejects_reused_session() -> None:
             extractor=None,  # type: ignore[arg-type]
             semantic_judge=None,  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.asyncio
+async def test_runtime_runs_real_three_session_pipeline_and_terminal_retry() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as state, Session(engine, expire_on_commit=False) as dedup, Session(engine, expire_on_commit=False) as write:
+        request, run = CollectionRepository(state).create_request("Acme", "acme")
+        state.commit()
+        provider = Provider()
+        extractor = Extractor()
+        orchestrator = build_ingestion_orchestrator(
+            run_state_session=state, dedup_read_session=dedup, persistence_write_session=write,
+            providers=(provider,), extractor=extractor, semantic_judge=SemanticJudge(),
+        )
+
+        result = await orchestrator.run(run.id)
+
+        assert result.status is CollectionStatus.SUCCEEDED
+        assert result.documents_found == 1 and result.jobs_found == 1 and result.jobs_written == 1
+        assert state.get(CrawlRun, run.id).status is CollectionStatus.SUCCEEDED
+        assert state.get(CollectionRequest, request.id).status is CollectionStatus.SUCCEEDED
+        assert state.query(SourceDocument).count() == 1
+        assert state.query(JobPosting).count() == 1 and state.query(JobSource).count() == 1
+        await orchestrator.run(run.id)
+        assert provider.calls == 1 and extractor.calls == 1
