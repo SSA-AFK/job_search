@@ -8,7 +8,6 @@ from typing import Any, cast
 from uuid import UUID
 
 from celery import Task  # type: ignore[import-untyped]
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.collection.repository import CollectionRepository
@@ -16,6 +15,7 @@ from app.core.config import settings
 from app.core.database import SessionLocal
 from app.ingestion.contracts import Provider
 from app.ingestion.deduplication.semantic import SemanticDuplicateJudge
+from app.ingestion.errors import RetryableInfrastructureError
 from app.ingestion.extraction.crew import Extractor
 from app.ingestion.orchestrator import IngestionOrchestrator
 from app.ingestion.result import IngestionResult, RunResultSource
@@ -57,12 +57,13 @@ def load_runtime_components() -> RuntimeComponents:
 
 def build_runtime_orchestrator() -> tuple[IngestionOrchestrator, tuple[Session, Session, Session]]:
     """Create the caller-owned distinct sessions required by the ingestion runtime."""
-    sessions = (SessionLocal(), SessionLocal(), SessionLocal())
+    sessions: list[Session] = []
     try:
+        for _ in range(3):
+            sessions.append(SessionLocal())
         components = load_runtime_components()
         orchestrator = compose_orchestrator(
-            run_state_session=sessions[0],
-            dedup_read_session=sessions[1],
+            run_state_session=sessions[0], dedup_read_session=sessions[1],
             persistence_write_session=sessions[2],
             providers=components.providers,
             extractor=components.extractor,
@@ -72,7 +73,7 @@ def build_runtime_orchestrator() -> tuple[IngestionOrchestrator, tuple[Session, 
         for session in sessions:
             session.close()
         raise
-    return orchestrator, sessions
+    return orchestrator, (sessions[0], sessions[1], sessions[2])
 
 
 def _result_payload(result: IngestionResult) -> dict[str, Any]:
@@ -123,7 +124,10 @@ def run_ingestion(task: Task, run_id: str) -> dict[str, Any]:
 
     try:
         result = asyncio.run(orchestrator.run(parsed_run_id))
-    except (ConnectionError, OperationalError) as error:
+    except RetryableInfrastructureError as error:
+        if task.request.retries >= _MAX_INFRASTRUCTURE_RETRIES:
+            return _result_payload(orchestrator.fail_retry_exhausted(parsed_run_id))
+        orchestrator.requeue_for_retry(parsed_run_id)
         raise task.retry(exc=error, countdown=min(60, 2 ** task.request.retries)) from error
     finally:
         for session in sessions:

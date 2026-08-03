@@ -81,6 +81,62 @@ def test_refresh_skips_company_with_active_request(monkeypatch) -> None:
         assert session.query(CrawlRun).count() == 0
 
 
+def test_refresh_skips_on_demand_request_with_matching_normalized_query(monkeypatch) -> None:
+    from app.tasks.schedule import enqueue_stale_companies
+
+    now = datetime(2026, 8, 3, 2, 0, tzinfo=UTC)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        stale = company("Acme", now - timedelta(days=2))
+        session.add(stale)
+        session.add(
+            CollectionRequest(
+                query="Acme", normalized_query="acme", status=CollectionStatus.QUEUED
+            )
+        )
+        session.commit()
+
+    monkeypatch.setattr("app.tasks.schedule.SessionLocal", lambda: Session(engine, expire_on_commit=False))
+    monkeypatch.setattr("app.tasks.schedule.utc_now", lambda: now)
+
+    assert enqueue_stale_companies.apply().get() == {"enqueued": 0, "skipped_active": 1}
+
+
+def test_refresh_recovers_named_active_request_conflict_from_scheduler_race(tmp_path, monkeypatch) -> None:
+    from app.tasks.schedule import enqueue_stale_companies
+
+    now = datetime(2026, 8, 3, 2, 0, tzinfo=UTC)
+    engine = create_engine(f"sqlite:///{tmp_path / 'schedule-race.sqlite3'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(company("Acme", now - timedelta(days=2)))
+        session.commit()
+
+    primary = Session(engine, expire_on_commit=False)
+    original_commit = primary.commit
+    injected = False
+
+    def race_commit() -> None:
+        nonlocal injected
+        if not injected:
+            injected = True
+            with Session(engine) as racing_session:
+                racing_session.add(
+                    CollectionRequest(query="Acme", normalized_query="acme", status=CollectionStatus.QUEUED)
+                )
+                racing_session.commit()
+        original_commit()
+
+    monkeypatch.setattr(primary, "commit", race_commit)
+    monkeypatch.setattr("app.tasks.schedule.SessionLocal", lambda: primary)
+    monkeypatch.setattr("app.tasks.schedule.utc_now", lambda: now)
+
+    assert enqueue_stale_companies.apply().get() == {"enqueued": 0, "skipped_active": 1}
+    with Session(engine) as session:
+        assert session.query(CollectionRequest).count() == 1
+
+
 def test_celery_uses_json_and_runs_both_maintenance_tasks_at_shanghai_two_am() -> None:
     from app.tasks.celery_app import celery_app
 

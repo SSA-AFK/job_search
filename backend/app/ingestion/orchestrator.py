@@ -5,11 +5,13 @@ from collections.abc import Sequence
 from typing import Protocol
 from uuid import UUID
 
+from sqlalchemy.exc import OperationalError
+
 from app.core.normalization import normalize_name, normalize_url
 from app.ingestion.contracts import Provider, ProviderQuery, RawDocument
 from app.ingestion.deduplication.company import CompanyDeduplicator, CompanyMatch
 from app.ingestion.deduplication.job import JobDeduplicator
-from app.ingestion.errors import ProviderError
+from app.ingestion.errors import ProviderError, RetryableInfrastructureError
 from app.ingestion.extraction.crew import Extractor
 from app.ingestion.extraction.prompts import assign_evidence_ids
 from app.ingestion.extraction.schemas import (
@@ -67,6 +69,10 @@ class CrawlRunRepository(Protocol):
         error_code: str | None,
         error_detail: str | None,
     ) -> CrawlRunState: ...
+
+    def requeue_for_retry(self, run_id: UUID) -> CrawlRunState | None: ...
+
+    def fail_retry_exhausted(self, run_id: UUID) -> CrawlRunState | None: ...
 
 
 class NormalizedBatchBuilder:
@@ -243,6 +249,8 @@ class IngestionOrchestrator:
                 jobs_written=0,
                 error_code="invalid_run_state",
             )
+        except (ConnectionError, OperationalError) as error:
+            raise RetryableInfrastructureError() from error
         except Exception as exc:  # noqa: BLE001 - invalid repository state has no runnable pipeline.
             return IngestionResult(
                 run_id=run_id,
@@ -310,6 +318,8 @@ class IngestionOrchestrator:
                 persistence=persisted,
                 error_code=provider_error,
             )
+        except (ConnectionError, OperationalError) as error:
+            raise RetryableInfrastructureError() from error
         except Exception as exc:  # noqa: BLE001 - terminal failure is required for unknown pipeline errors.
             return self._finish(
                 run,
@@ -364,6 +374,13 @@ class IngestionOrchestrator:
             error_detail=error_code,
         )
         return IngestionResult.from_run(finished)
+
+    def requeue_for_retry(self, run_id: UUID) -> None:
+        self.runs.requeue_for_retry(run_id)
+
+    def fail_retry_exhausted(self, run_id: UUID) -> IngestionResult:
+        run = self.runs.fail_retry_exhausted(run_id)
+        return IngestionResult.unknown_run(run_id) if run is None else IngestionResult.from_run(run)
 
 
 class _PipelineError(Exception):

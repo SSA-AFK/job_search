@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import kombu.exceptions as kombu_exceptions  # type: ignore[import-untyped]
 from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
 
 from app.core.database import SessionLocal
 from app.models import CollectionRequest, CollectionStatus, Company, CrawlRun, RunType
@@ -13,6 +14,7 @@ from app.tasks.celery_app import celery_app
 from app.tasks.collection import run_ingestion
 
 _ACTIVE_STATUSES = (CollectionStatus.QUEUED, CollectionStatus.RUNNING)
+_ACTIVE_REQUEST_INDEX = "uq_collection_requests_active_query"
 KombuOperationalError = kombu_exceptions.OperationalError
 
 
@@ -32,7 +34,7 @@ def enqueue_stale_companies() -> dict[str, int]:
         for company in stale_companies:
             active_request = session.scalar(
                 select(CollectionRequest.id).where(
-                    CollectionRequest.company_id == company.id,
+                    CollectionRequest.normalized_query == company.normalized_name,
                     CollectionRequest.status.in_(_ACTIVE_STATUSES),
                 )
             )
@@ -61,7 +63,22 @@ def enqueue_stale_companies() -> dict[str, int]:
                 status=CollectionStatus.QUEUED,
             )
             session.add_all((request, run))
-            session.commit()
+            try:
+                session.commit()
+            except IntegrityError as error:
+                session.rollback()
+                if not _is_active_request_conflict(error):
+                    raise
+                active_request = session.scalar(
+                    select(CollectionRequest.id).where(
+                        CollectionRequest.normalized_query == company.normalized_name,
+                        CollectionRequest.status.in_(_ACTIVE_STATUSES),
+                    )
+                )
+                if active_request is None:
+                    raise
+                skipped_active += 1
+                continue
             try:
                 task_result = run_ingestion.delay(str(run.id))
             except (ConnectionError, OSError, KombuOperationalError):
@@ -77,3 +94,10 @@ def enqueue_stale_companies() -> dict[str, int]:
         return {"enqueued": enqueued, "skipped_active": skipped_active}
     finally:
         session.close()
+
+
+def _is_active_request_conflict(error: IntegrityError) -> bool:
+    diagnostic = getattr(error.orig, "diag", None)
+    if getattr(diagnostic, "constraint_name", None) == _ACTIVE_REQUEST_INDEX:
+        return True
+    return "collection_requests.normalized_query" in str(error.orig).lower()

@@ -14,3 +14,7 @@ class ExtractionError(Exception):
         self.code = code
         self.detail = detail
         super().__init__(code)
+
+
+class RetryableInfrastructureError(Exception):
+    """Sanitized signal for failures that require Celery redelivery."""

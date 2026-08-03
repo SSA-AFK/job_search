@@ -88,6 +88,40 @@ class CollectionRepository:
         self.session.commit()
         return run
 
+    def requeue_for_retry(self, run_id: UUID) -> CrawlRun | None:
+        run = self.get_run(run_id)
+        if run is None or run.status in _TERMINAL_STATUSES:
+            return run
+        request = self.get_request_for_run(run)
+        if request is None:
+            return self._finish_invalid(run, request)
+        if run.status is CollectionStatus.QUEUED and request.status is CollectionStatus.QUEUED:
+            return run
+        if run.status is not CollectionStatus.RUNNING or request.status is not CollectionStatus.RUNNING:
+            return self._finish_invalid(run, request)
+        run.status = CollectionStatus.QUEUED
+        run.started_at = None
+        request.status = CollectionStatus.QUEUED
+        self.session.commit()
+        return run
+
+    def fail_retry_exhausted(self, run_id: UUID) -> CrawlRun | None:
+        run = self.get_run(run_id)
+        if run is None or run.status in _TERMINAL_STATUSES:
+            return run
+        request = self.get_request_for_run(run)
+        now = utc_now()
+        run.status = CollectionStatus.FAILED
+        run.error_code = "collection_unavailable"
+        run.error_detail = "collection_unavailable"
+        run.completed_at = now
+        if request is not None:
+            request.status = CollectionStatus.FAILED
+            request.error_code = "collection_unavailable"
+            request.completed_at = now
+        self.session.commit()
+        return run
+
     def finish(
         self,
         run: CrawlRun,
