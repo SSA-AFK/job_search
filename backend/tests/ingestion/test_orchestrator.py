@@ -266,6 +266,38 @@ async def test_zero_discovered_companies_fails_without_persistence() -> None:
 
 
 @pytest.mark.asyncio
+async def test_discovery_prefers_exact_match_among_multiple_candidates() -> None:
+    run = FakeRun(uuid4())
+    provider = FakeProvider("site", ProviderResult(documents=(document(),)))
+    exact = CompanyCandidate(name="Acme", evidence_ids=("acme-home",), confidence=1)
+    other = CompanyCandidate(name="Else", evidence_ids=("acme-home",), confidence=1)
+    orchestrator, _runs, persistence = orchestrator_for(
+        run, providers=[provider], discovered=(other, exact)
+    )
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.SUCCEEDED
+    assert persistence.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_discovery_fails_without_persistence() -> None:
+    run = FakeRun(uuid4())
+    provider = FakeProvider("site", ProviderResult(documents=(document(),)))
+    candidates = (
+        CompanyCandidate(name="Else", evidence_ids=("acme-home",), confidence=1),
+        CompanyCandidate(name="Other", evidence_ids=("acme-home",), confidence=1),
+    )
+    orchestrator, _runs, persistence = orchestrator_for(run, providers=[provider], discovered=candidates)
+
+    result = await orchestrator.run(run.id)
+
+    assert result.error_code == "ambiguous_company"
+    assert persistence.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_extraction_failure_without_data_is_failed_without_persistence() -> None:
     run = FakeRun(uuid4())
     provider = FakeProvider("site", ProviderResult(documents=(document(),)))
