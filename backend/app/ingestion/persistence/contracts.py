@@ -41,6 +41,7 @@ CompanyFieldName = Literal[
     "website",
     "description",
 ]
+_MAX_SQL_INTEGER = 2_147_483_647
 
 
 class FrozenDTO(BaseModel):
@@ -80,6 +81,15 @@ class NormalizedJobRecord(FrozenDTO):
             raise ValueError("normalized job title exceeds 255 characters")
         if len(self.candidate.normalized_city) > 50:
             raise ValueError("normalized job city exceeds 50 characters")
+        salary_bounds = (
+            self.candidate.salary_minimum_monthly,
+            self.candidate.salary_maximum_monthly,
+        )
+        if any(
+            value is not None and not 0 <= value <= _MAX_SQL_INTEGER
+            for value in salary_bounds
+        ):
+            raise ValueError("normalized salary exceeds database integer domain")
         return self
 
 

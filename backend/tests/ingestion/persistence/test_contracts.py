@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, date, datetime
 
 import pytest
@@ -213,3 +214,31 @@ def test_raw_document_rejects_values_too_long_for_database(
 
     with pytest.raises(ValidationError):
         RawDocument.model_validate(payload)
+
+
+def test_normalized_job_rejects_salary_outside_database_integer_domain() -> None:
+    candidate = normalize_job(
+        JobCandidate(
+            title="Engineer",
+            location="Shanghai",
+            provider="official",
+            source_raw_id="job-1",
+            evidence_ids=["doc-1"],
+            confidence=0.9,
+        )
+    )
+    oversized = replace(
+        candidate,
+        salary_minimum_monthly=2_147_483_648,
+        salary_maximum_monthly=2_147_483_648,
+    )
+
+    with pytest.raises(ValidationError, match="salary"):
+        NormalizedJobRecord(
+            candidate=oversized,
+            job_posting_id=None,
+            source_evidence_id="doc-1",
+            apply_url="https://example.com/jobs/1",
+            posted_at=None,
+            seen_at=NOW,
+        )

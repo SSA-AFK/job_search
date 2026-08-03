@@ -8,6 +8,7 @@ _MONTHLY_RANGE_PATTERN = re.compile(
     r"^\s*(\d+(?:\.\d+)?)\s*[kK]\s*[-~\u81f3\u5230]\s*"
     r"(\d+(?:\.\d+)?)\s*[kK](?:\s*[\u00b7*\u00d7xX]?\s*\d{1,2}\s*(?:\u85aa|\u4e2a\u6708))?\s*$"
 )
+_MAX_SQL_INTEGER = 2_147_483_647
 
 
 @dataclass(frozen=True)
@@ -46,9 +47,12 @@ def _invalid_salary() -> NormalizedSalary:
 def _monthly_rmb_from_k(value: str) -> int | None:
     whole, separator, fractional = value.partition(".")
     if not separator:
-        return int(whole) * 1_000
+        monthly_rmb = int(whole) * 1_000
+        return monthly_rmb if monthly_rmb <= _MAX_SQL_INTEGER else None
 
     coefficient = int(f"{whole}{fractional}") * 1_000
     divisor = 10 ** len(fractional)
     monthly_rmb, remainder = divmod(coefficient, divisor)
-    return monthly_rmb if remainder == 0 else None
+    if remainder != 0 or monthly_rmb > _MAX_SQL_INTEGER:
+        return None
+    return monthly_rmb

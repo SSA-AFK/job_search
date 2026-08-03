@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -639,3 +640,38 @@ def test_statement_error_is_sanitized_with_run_context_and_full_rollback(
     assert raised.value.detail == "database statement failed"
     assert count_rows(session, SourceDocument) == 0
     assert count_rows(session, Company) == 0
+
+
+def test_integer_overflow_is_sanitized_and_leaves_session_usable(
+    session: Session, persistence: PersistenceService
+) -> None:
+    valid_job = normalized_job("salary-overflow")
+    oversized_candidate = replace(
+        valid_job.candidate,
+        salary_minimum_monthly=10**48,
+        salary_maximum_monthly=10**48,
+    )
+    invalid_job = valid_job.model_copy(update={"candidate": oversized_candidate})
+    invalid_batch = NormalizedBatch.model_construct(
+        documents=(normalized_document("doc-1", external_id="source-overflow"),),
+        company=normalized_company(),
+        jobs=(invalid_job,),
+        filings=(),
+        collected_at=NOW,
+    )
+    run_id = uuid4()
+
+    with pytest.raises(PersistenceError) as raised:
+        persistence.persist(invalid_batch, run_id=run_id)
+
+    assert raised.value.run_id == run_id
+    assert raised.value.detail == "database integer overflow"
+    assert count_rows(session, SourceDocument) == 0
+    assert count_rows(session, Company) == 0
+    assert count_rows(session, JobPosting) == 0
+    session.rollback()
+    session.add(Company(canonical_name="Usable", normalized_name="usable"))
+    session.commit()
+    assert session.scalar(
+        select(func.count()).select_from(Company).where(Company.normalized_name == "usable")
+    ) == 1

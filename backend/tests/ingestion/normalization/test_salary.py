@@ -62,3 +62,29 @@ def test_uncertain_or_reversed_salary_range_is_unknown_and_warned(raw: str) -> N
     assert salary.maximum_monthly is None
     assert salary.months is None
     assert salary.warnings == ("invalid_salary",)
+
+
+def test_signed_32_bit_maximum_salary_bound_remains_exact() -> None:
+    salary = normalize_salary("2147483.647k-2147483.647k")
+
+    assert salary.minimum_monthly == 2_147_483_647
+    assert salary.maximum_monthly == 2_147_483_647
+    assert salary.warnings == ()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "2147483.648k-2147483.648k",
+        "1k-999999999999999999999999999999999999999999999999k",
+    ],
+)
+def test_salary_bound_outside_signed_32_bit_domain_is_unknown_and_warned(
+    raw: str,
+) -> None:
+    salary = normalize_salary(raw)
+
+    assert salary.minimum_monthly is None
+    assert salary.maximum_monthly is None
+    assert salary.months is None
+    assert salary.warnings == ("invalid_salary",)

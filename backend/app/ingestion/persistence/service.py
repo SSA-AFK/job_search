@@ -126,6 +126,12 @@ class PersistenceService:
                 constraint=None,
                 detail="database statement failed",
             ) from exc
+        except OverflowError as exc:
+            raise PersistenceError(
+                run_id=run_id,
+                constraint=None,
+                detail="database integer overflow",
+            ) from exc
 
     def _materialize_outer_transaction(self) -> None:
         connection = self.session.connection()
