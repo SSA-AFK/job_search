@@ -16,7 +16,7 @@ This is the living delivery document for the AI Company Search project. It is th
 |----------|---------|--------|
 | [`specs/2026-07-31-ai-company-search-agent-design.md`](specs/2026-07-31-ai-company-search-agent-design.md) | Product, architecture, contracts, data model, and acceptance criteria | Approved |
 | [`plans/2026-07-31-company-search-web-foundation.md`](plans/2026-07-31-company-search-web-foundation.md) | Stage one implementation plan | Executed and integrated locally into `main` |
-| [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31-company-search-ingestion-pipeline.md) | Stage two implementation plan | Tasks 1-6 complete; Task 7 starting |
+| [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31-company-search-ingestion-pipeline.md) | Stage two implementation plan | Tasks 1-7 complete; Task 8 starting |
 | [`../zhihu.md`](../../zhihu.md) | Supplied Zhihu Global Search API contract | Reference |
 
 ## Current Snapshot
@@ -25,13 +25,13 @@ This is the living delivery document for the AI Company Search project. It is th
 |-------|-------|
 | Overall status | Stage one complete; stage two in progress |
 | Current stage | Stage two - Asynchronous ingestion pipeline |
-| Current task | Task 7 - Transactional and idempotent persistence |
+| Current task | Task 8 - Orchestrator and terminal-state classification |
 | Execution method | Subagent-Driven Development |
 | Active branch/worktree | `codex/company-search-ingestion-pipeline` at `.worktrees/codex-company-search-ingestion-pipeline` |
 | Stage one progress | 8/8 tasks complete; completion gate passed |
-| Stage two progress | 6/12 tasks complete |
-| Last verified artifact state | Stage two Task 6 implementation and two precision/compatibility fix reviews through `567e4f5` |
-| Next action | Implement and independently review stage two Task 7 |
+| Stage two progress | 7/12 tasks complete |
+| Last verified artifact state | Stage two Task 7 implementation and four transactional fix reviews through `b9da944` |
+| Next action | Implement and independently review stage two Task 8 |
 
 ## Delivery Sequence
 
@@ -85,8 +85,8 @@ Plan: [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31
 | 4 | Allowlisted company website Provider | Complete | `ea3d3b2`, `7db5c10`, `2f09d4f` | Approved after security fix rounds 1-2; two deferred Minors | focused company-site 16 passed; provider tests 63 passed; full pytest 150 passed/2 deselected; mypy and Ruff passed |
 | 5 | Structured CrewAI extraction adapters | Complete | `cf22a3a`, `a70706e` | Approved after fix round 1; two deferred Minors | extraction tests 11 passed; full pytest 161 passed/2 deselected; mypy and Ruff passed |
 | 6 | Deterministic normalization and deduplication | Complete | `e0252bd`, `816d969`, `567e4f5` | Approved after fix rounds 1-2; one deferred Minor | focused normalization/deduplication 23 passed; full pytest 188 passed/2 deselected; mypy and Ruff passed |
-| 7 | Transactional idempotent persistence | Ready | - | - | - |
-| 8 | Orchestrator and terminal-state classification | Pending Task 7 | - | - | - |
+| 7 | Transactional idempotent persistence | Complete | `6a404ca`, `18726ab`, `fdadd26`, `90132b4`, `b9da944` | Approved after fix rounds 1-4 | Task 6/7 focused 125 passed; full pytest 247 passed/2 deselected; mypy and Ruff passed |
+| 8 | Orchestrator and terminal-state classification | Ready | - | - | - |
 | 9 | Celery tasks, daily refresh, and job expiration | Pending Task 8 | - | - | - |
 | 10 | Optional Redis caching and invalidation | Pending Task 9 | - | - | - |
 | 11 | Frontend collection polling | Pending Task 10 | - | - | - |
@@ -170,6 +170,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-08-03 | Stage two Task 4 | Allowlisted company website Provider and two scoped security re-reviews | PASS: focused company-site 16 passed; provider tests 63 passed; full pytest 150 passed/2 deselected; mypy/Ruff clean; redirect policy, origin cache, seed canonicalization, and explicit port-zero findings addressed; two Minors deferred |
 | 2026-08-03 | Stage two Task 5 | Structured extraction adapters and scoped fix re-review | PASS: extraction tests 11 passed; full pytest 161 passed/2 deselected; mypy/Ruff clean; company scoping, complete prompt cap, and collision-free evidence IDs verified; two Minors deferred |
 | 2026-08-03 | Stage two Task 6 | Deterministic normalization/deduplication and two scoped fix re-reviews | PASS: focused 23 passed; full pytest 188 passed/2 deselected; mypy/Ruff clean; cross-company source isolation, exact salary precision, and explicit employment compatibility verified; one Minor deferred |
+| 2026-08-03 | Stage two Task 7 | Transactional/idempotent persistence and four scoped fix re-reviews | PASS: Task 6/7 focused 125 passed; full pytest 247 passed/2 deselected; mypy/Ruff clean; race-safe savepoints, fallback identity index, stale ordering, deep immutability, DB bounds, and audited rollback verified |
 
 ## Iteration History
 
@@ -197,6 +198,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-08-03 | Stage two Task 4 | Added bounded same-origin website crawling with robots enforcement, eligible-path filtering, canonicalized breadth-first discovery, partial-result warnings, and challenge detection; two review rounds closed redirect-policy, per-origin cache, seed canonicalization, and explicit port-zero defects | Implement structured CrewAI extraction adapters |
 | 2026-08-03 | Stage two Task 5 | Added strict candidate schemas, evidence-reference validation, fixed extraction roles behind an application protocol, bounded untrusted-text prompts, and invalid-output classification; review round 1 added target-company scoping, complete prompt budgeting, and collision-free evidence IDs | Implement deterministic normalization and deduplication |
 | 2026-08-03 | Stage two Task 6 | Added exact-first company/job deduplication, bounded fuzzy and semantic matching, company isolation, candidate source contracts, and deterministic salary normalization; two review rounds corrected cross-company source matches, employment compatibility, and precision-safe RMB conversion | Implement transactional idempotent persistence |
+| 2026-08-03 | Stage two Task 7 | Added persistence-ready immutable batch contracts and one-transaction upserts for documents, evidence, companies, jobs, sources, and filings; four review rounds added race-safe savepoint recovery, null-external document uniqueness, stale-write protection, deep bounds, and audited numeric overflow handling | Build the orchestrator and terminal-state classification |
 
 ## Update Template
 
