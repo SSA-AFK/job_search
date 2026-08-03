@@ -37,14 +37,29 @@ def normalize_salary(raw_salary: str | None) -> NormalizedSalary:
         return _invalid_salary()
 
     months_match = _MONTHS_PATTERN.search(raw_salary)
-    months = int(months_match.group(1)) if months_match is not None else None
-    if months is not None and not 1 <= months <= _MAX_SQL_SMALLINT:
+    months = (
+        _salary_months_from_digits(months_match.group(1))
+        if months_match is not None
+        else None
+    )
+    if months_match is not None and months is None:
         return _invalid_salary()
     return NormalizedSalary(minimum, maximum, months)
 
 
 def _invalid_salary() -> NormalizedSalary:
     return NormalizedSalary(None, None, None, ("invalid_salary",))
+
+
+def _salary_months_from_digits(value: str) -> int | None:
+    normalized = value.lstrip("0") or "0"
+    maximum = str(_MAX_SQL_SMALLINT)
+    if len(normalized) > len(maximum) or (
+        len(normalized) == len(maximum) and normalized > maximum
+    ):
+        return None
+    months = int(normalized)
+    return months if months >= 1 else None
 
 
 def _monthly_rmb_from_k(value: str) -> int | None:

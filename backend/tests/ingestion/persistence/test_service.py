@@ -701,3 +701,32 @@ def test_bypassed_salary_months_outside_smallint_domain_rolls_back(
     assert count_rows(session, SourceDocument) == 0
     assert count_rows(session, Company) == 0
     assert count_rows(session, JobPosting) == 0
+
+
+@pytest.mark.parametrize("salary_months", [True, 1.5])
+def test_bypassed_non_integer_salary_months_roll_back(
+    salary_months: bool | float,
+    session: Session,
+    persistence: PersistenceService,
+) -> None:
+    valid_job = normalized_job("non-integer-salary-months")
+    invalid_candidate = replace(valid_job.candidate, salary_months=salary_months)
+    invalid_job = valid_job.model_copy(update={"candidate": invalid_candidate})
+    invalid_batch = NormalizedBatch.model_construct(
+        documents=(normalized_document("doc-1", external_id="source-months"),),
+        company=normalized_company(),
+        jobs=(invalid_job,),
+        filings=(),
+        collected_at=NOW,
+    )
+    run_id = uuid4()
+
+    with pytest.raises(PersistenceError) as raised:
+        persistence.persist(invalid_batch, run_id=run_id)
+
+    assert raised.value.run_id == run_id
+    assert raised.value.constraint == "salary_months"
+    assert raised.value.detail == "normalized salary months exceed database domain"
+    assert count_rows(session, SourceDocument) == 0
+    assert count_rows(session, Company) == 0
+    assert count_rows(session, JobPosting) == 0

@@ -307,7 +307,10 @@ class PersistenceService:
         warnings: list[str] = []
         for record in records:
             salary_months = record.candidate.salary_months
-            if salary_months is not None and not 1 <= salary_months <= _MAX_SQL_SMALLINT:
+            if salary_months is not None and (
+                type(salary_months) is not int
+                or not 1 <= salary_months <= _MAX_SQL_SMALLINT
+            ):
                 raise PersistenceError(
                     run_id=run_id,
                     constraint="salary_months",

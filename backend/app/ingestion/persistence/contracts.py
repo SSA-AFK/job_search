@@ -11,6 +11,7 @@ from pydantic import (
     ConfigDict,
     Field,
     HttpUrl,
+    field_validator,
     model_validator,
 )
 
@@ -76,6 +77,19 @@ class NormalizedJobRecord(FrozenDTO):
     seen_at: AwareDatetime
     is_active: bool = True
 
+    @field_validator("candidate", mode="before")
+    @classmethod
+    def validate_salary_months_type(cls, value: object) -> object:
+        if isinstance(value, NormalizedJobCandidate):
+            salary_months = value.salary_months
+        elif isinstance(value, dict):
+            salary_months = value.get("salary_months")
+        else:
+            return value
+        if salary_months is not None and type(salary_months) is not int:
+            raise ValueError("normalized salary months must be an integer")
+        return value
+
     @model_validator(mode="after")
     def validate_database_lengths(self) -> "NormalizedJobRecord":
         if len(self.candidate.normalized_title) > 255:
@@ -92,7 +106,10 @@ class NormalizedJobRecord(FrozenDTO):
         ):
             raise ValueError("normalized salary exceeds database integer domain")
         salary_months = self.candidate.salary_months
-        if salary_months is not None and not 1 <= salary_months <= _MAX_SQL_SMALLINT:
+        if salary_months is not None and (
+            type(salary_months) is not int
+            or not 1 <= salary_months <= _MAX_SQL_SMALLINT
+        ):
             raise ValueError("normalized salary months exceed database domain")
         return self
 

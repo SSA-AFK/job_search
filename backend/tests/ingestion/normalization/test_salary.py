@@ -105,3 +105,14 @@ def test_salary_months_outside_positive_smallint_domain_is_invalid(raw: str) -> 
     assert salary.maximum_monthly is None
     assert salary.months is None
     assert salary.warnings == ("invalid_salary",)
+
+
+def test_unbounded_salary_month_text_is_invalid_instead_of_raising() -> None:
+    raw = "30k-50k\u00b7" + "9" * 4_301 + "\u85aa"
+
+    salary = normalize_salary(raw)
+
+    assert salary.minimum_monthly is None
+    assert salary.maximum_monthly is None
+    assert salary.months is None
+    assert salary.warnings == ("invalid_salary",)
