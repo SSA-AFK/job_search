@@ -10,7 +10,8 @@ class ProviderQuery(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     query: str = Field(min_length=1, max_length=200)
-    limit: int = Field(default=10, ge=1, le=50)
+    allowed_hosts: frozenset[str] = frozenset()
+    max_results: int = Field(default=10, ge=1, le=20)
 
 
 class RawDocument(BaseModel):
@@ -29,6 +30,7 @@ class ProviderResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     documents: tuple[RawDocument, ...]
+    truncated: bool = False
 
 
 class Provider(Protocol):

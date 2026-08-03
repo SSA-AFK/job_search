@@ -75,7 +75,11 @@ def test_provider_error_exposes_stable_metadata() -> None:
 
 
 def test_contracts_are_immutable_and_bound_raw_text() -> None:
-    query = ProviderQuery(query="Example Technologies", limit=5)
+    query = ProviderQuery(
+        query="Example Technologies",
+        allowed_hosts=frozenset({"example.com"}),
+        max_results=5,
+    )
     document = RawDocument(
         provider="example",
         external_id="external-1",
@@ -85,10 +89,12 @@ def test_contracts_are_immutable_and_bound_raw_text() -> None:
         published_at=datetime(2026, 7, 31, tzinfo=UTC),
         authority_level=2,
     )
-    result = ProviderResult(documents=(document,))
+    result = ProviderResult(documents=(document,), truncated=True)
 
     with pytest.raises(ValidationError):
         document.text = "changed"
 
-    assert query.limit == 5
+    assert query.allowed_hosts == frozenset({"example.com"})
+    assert query.max_results == 5
     assert result.documents == (document,)
+    assert result.truncated is True
