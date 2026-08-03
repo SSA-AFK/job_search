@@ -247,8 +247,8 @@ git commit -m "feat: integrate zhihu global search provider"
 async def test_does_not_fetch_when_robots_disallows(provider, robots_policy, safe_client) -> None:
     robots_policy.can_fetch.return_value = False
     result = await provider.search(company_query("https://example.com"))
-    assert result.documents == []
-    assert result.warnings == ["robots_disallowed"]
+    assert result.documents == ()
+    assert result.warnings == ("robots_disallowed",)
     safe_client.get_text.assert_not_awaited()
 ```
 
@@ -273,7 +273,7 @@ Expected: PASS without live network access.
 - [ ] **Step 5: Commit the company-site Provider**
 
 ```powershell
-git add backend/app/ingestion/providers/company_site.py backend/app/ingestion/providers/robots.py backend/tests/ingestion/providers/test_company_site.py
+git add backend/app/ingestion/contracts.py backend/app/ingestion/providers/company_site.py backend/app/ingestion/providers/robots.py backend/tests/ingestion/providers/test_company_site.py
 git commit -m "feat: add compliant company site provider"
 ```
 
