@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from typing import Protocol
 from uuid import UUID
 
-from app.core.normalization import normalize_name
+from app.core.normalization import normalize_name, normalize_url
 from app.ingestion.contracts import Provider, ProviderQuery, RawDocument
 from app.ingestion.deduplication.company import CompanyDeduplicator, CompanyMatch
 from app.ingestion.deduplication.job import JobDeduplicator
@@ -102,6 +102,20 @@ class NormalizedBatchBuilder:
             confidence=profile.confidence,
         )
         self._require_known_evidence(discovery.evidence_ids, document_by_evidence)
+        if normalize_name(profile.name) != normalize_name(discovery.name):
+            raise _PipelineError("invalid_evidence")
+        if (
+            profile.website is not None
+            and discovery.website is not None
+            and normalize_url(str(profile.website)) != normalize_url(str(discovery.website))
+        ):
+            raise _PipelineError("invalid_evidence")
+        if (
+            profile.description is not None
+            and discovery.description is not None
+            and profile.description != discovery.description
+        ):
+            raise _PipelineError("invalid_evidence")
         company_candidate = CompanyCandidate(
             name=profile.name,
             website=profile.website or discovery.website,
@@ -118,7 +132,9 @@ class NormalizedBatchBuilder:
         normalized_jobs: list[NormalizedJobRecord] = []
         for job in jobs:
             self._require_known_evidence(job.evidence_ids, document_by_evidence)
-            source_evidence_id = job.evidence_ids[0]
+            if len(job.evidence_ids) > 1 and job.source_evidence_id is None:
+                raise _PipelineError("invalid_evidence")
+            source_evidence_id = job.source_evidence_id or job.evidence_ids[0]
             source_document = document_by_evidence[source_evidence_id]
             if source_document.external_id is None:
                 raise _PipelineError("invalid_evidence")

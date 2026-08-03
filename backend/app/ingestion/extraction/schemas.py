@@ -98,6 +98,7 @@ class JobCandidate(EvidenceCandidate):
     location: str | None = Field(default=None, max_length=50)
     provider: str | None = Field(default=None, min_length=1, max_length=50)
     source_raw_id: str | None = Field(default=None, min_length=1, max_length=255)
+    source_evidence_id: str | None = Field(default=None, min_length=1, max_length=255)
     apply_url: ExternalUrl | None = None
     posted_at: date | None = None
     salary: str | None = Field(default=None, min_length=1, max_length=100)
@@ -107,6 +108,21 @@ class JobCandidate(EvidenceCandidate):
     @classmethod
     def description_must_not_contain_html(cls, description: str | None) -> str | None:
         return CompanyCandidate.description_must_not_contain_html(description)
+
+    @field_validator("source_evidence_id")
+    @classmethod
+    def source_evidence_must_be_cited(
+        cls, source_evidence_id: str | None, info: ValidationInfo
+    ) -> str | None:
+        if source_evidence_id is None:
+            return None
+        evidence_ids = info.data.get("evidence_ids", ())
+        if source_evidence_id not in evidence_ids:
+            raise ValueError("source_evidence_id must be one of evidence_ids")
+        allowed = (info.context or {}).get("allowed_evidence_ids")
+        if allowed is not None and source_evidence_id not in allowed:
+            raise ValueError("source_evidence_id must be supplied in the prompt")
+        return source_evidence_id
 
 
 class FilingCandidate(EvidenceCandidate):

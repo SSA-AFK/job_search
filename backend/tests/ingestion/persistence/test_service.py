@@ -149,13 +149,14 @@ def normalized_batch(
     )
 
 
-def test_persist_closes_clean_autobegin_before_owning_transaction(session: Session) -> None:
+def test_persist_rejects_clean_autobegin_without_ending_caller_transaction(session: Session) -> None:
     assert session.scalar(select(Company).where(Company.canonical_name == "missing")) is None
     assert session.in_transaction()
 
-    result = PersistenceService(session).persist(normalized_batch(filings=()), run_id=uuid4())
+    with pytest.raises(PersistenceError, match="active_session_transaction"):
+        PersistenceService(session).persist(normalized_batch(filings=()), run_id=uuid4())
 
-    assert result.documents_written == 1
+    assert session.in_transaction()
 
 
 def test_persist_rejects_pending_writes_without_rolling_them_back(session: Session) -> None:
@@ -163,7 +164,7 @@ def test_persist_rejects_pending_writes_without_rolling_them_back(session: Sessi
     session.add(pending)
     run_id = uuid4()
 
-    with pytest.raises(PersistenceError, match="pending_session_changes") as error:
+    with pytest.raises(PersistenceError, match="active_session_transaction") as error:
         PersistenceService(session).persist(normalized_batch(filings=()), run_id=run_id)
 
     assert error.value.run_id == run_id
