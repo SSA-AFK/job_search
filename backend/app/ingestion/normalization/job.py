@@ -21,6 +21,7 @@ class NormalizedJobCandidate:
     normalized_title: str
     normalized_city: str
     job_type: JobType
+    employment_type: EmploymentType | None
     salary_minimum_monthly: int | None
     salary_maximum_monthly: int | None
     salary_months: int | None
@@ -39,6 +40,7 @@ def normalize_job(candidate: JobCandidate) -> NormalizedJobCandidate:
         normalized_title=normalize_name(candidate.title),
         normalized_city=normalize_name(candidate.location) if candidate.location else "",
         job_type=job_type,
+        employment_type=candidate.employment_type,
         salary_minimum_monthly=salary.minimum_monthly,
         salary_maximum_monthly=salary.maximum_monthly,
         salary_months=salary.months,

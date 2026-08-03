@@ -12,6 +12,31 @@ def test_normalizes_monthly_k_range_and_salary_months() -> None:
     assert salary.warnings == ()
 
 
+@pytest.mark.parametrize(
+    ("raw", "minimum", "maximum"),
+    [
+        ("1.001k-2.001k", 1_001, 2_001),
+        ("0.001k-0.001k", 1, 1),
+    ],
+)
+def test_decimal_k_ranges_preserve_exact_rmb_yuan_bounds(
+    raw: str, minimum: int, maximum: int
+) -> None:
+    salary = normalize_salary(raw)
+
+    assert salary.minimum_monthly == minimum
+    assert salary.maximum_monthly == maximum
+    assert salary.warnings == ()
+
+
+def test_fractional_rmb_salary_bound_is_unknown_and_warned() -> None:
+    salary = normalize_salary("1.0001k-2.001k")
+
+    assert salary.minimum_monthly is None
+    assert salary.maximum_monthly is None
+    assert salary.warnings == ("invalid_salary",)
+
+
 def test_missing_salary_remains_unknown_without_a_warning() -> None:
     salary = normalize_salary(None)
 

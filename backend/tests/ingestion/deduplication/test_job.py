@@ -149,6 +149,41 @@ def test_incompatible_job_type_is_not_merged(
     assert semantic_judge.calls == []
 
 
+@pytest.mark.parametrize(
+    ("candidate_type", "existing_type", "expected_kind"),
+    [
+        (EmploymentType.PART_TIME, EmploymentType.FULL_TIME, "new"),
+        (EmploymentType.TEMPORARY, EmploymentType.INTERNSHIP, "new"),
+        (EmploymentType.PART_TIME, EmploymentType.PART_TIME, "existing"),
+        (EmploymentType.TEMPORARY, EmploymentType.TEMPORARY, "existing"),
+    ],
+)
+def test_explicit_employment_types_merge_only_when_they_match(
+    candidate_type: EmploymentType,
+    existing_type: EmploymentType,
+    expected_kind: str,
+    repository: "FakeJobRepository",
+    semantic_judge: "FakeSemanticJudge",
+) -> None:
+    repository.jobs[COMPANY_ID] = (
+        JobForComparison(
+            job_posting_id=EXISTING_JOB_ID,
+            normalized_title="softwareengineer",
+            city="shanghai",
+            job_type=JobType.UNKNOWN,
+            employment_type=existing_type,
+        ),
+    )
+    deduplicator = JobDeduplicator(repository, semantic_judge)
+
+    match = asyncio.run(
+        deduplicator.resolve(COMPANY_ID, job_candidate(employment_type=candidate_type))
+    )
+
+    assert match.kind == expected_kind
+    assert semantic_judge.calls == []
+
+
 def test_jobs_are_only_compared_within_the_requested_company(
     job_deduplicator: JobDeduplicator, semantic_judge: "FakeSemanticJudge"
 ) -> None:

@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import dataclass
+from decimal import Decimal
 
 _MONTHS_PATTERN = re.compile(r"(?:[\u00b7*\u00d7xX]\s*)?(\d{1,2})\s*(?:\u85aa|\u4e2a\u6708)")
 _MONTHLY_RANGE_PATTERN = re.compile(
@@ -27,8 +28,15 @@ def normalize_salary(raw_salary: str | None) -> NormalizedSalary:
     if match is None:
         return _invalid_salary()
 
-    minimum = int(float(match.group(1)) * 1_000)
-    maximum = int(float(match.group(2)) * 1_000)
+    minimum_value = Decimal(match.group(1)) * 1_000
+    maximum_value = Decimal(match.group(2)) * 1_000
+    if (
+        minimum_value != minimum_value.to_integral_value()
+        or maximum_value != maximum_value.to_integral_value()
+    ):
+        return _invalid_salary()
+    minimum = int(minimum_value)
+    maximum = int(maximum_value)
     if minimum > maximum:
         return _invalid_salary()
 
