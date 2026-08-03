@@ -298,6 +298,63 @@ async def test_ambiguous_discovery_fails_without_persistence() -> None:
 
 
 @pytest.mark.asyncio
+async def test_singular_non_exact_discovery_candidate_is_selected() -> None:
+    run = FakeRun(uuid4())
+    provider = FakeProvider("site", ProviderResult(documents=(document(),)))
+    candidate = CompanyCandidate(name="Acme Incorporated", evidence_ids=("acme-home",), confidence=1)
+    orchestrator, _runs, persistence = orchestrator_for(run, providers=[provider], discovered=(candidate,))
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.SUCCEEDED
+    assert persistence.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("providers", "expected_code", "has_data"),
+    [
+        (
+            [
+                FakeProvider("first", ProviderError(code="provider_timeout", retryable=True)),
+                FakeProvider("second", ProviderResult(documents=(document(),), warnings=("provider_degraded",))),
+            ],
+            "provider_timeout",
+            True,
+        ),
+        (
+            [
+                FakeProvider("first", ProviderResult(documents=(document(),), warnings=("provider_degraded",))),
+                FakeProvider("second", ProviderError(code="provider_timeout", retryable=True)),
+            ],
+            "provider_degraded",
+            True,
+        ),
+        (
+            [
+                FakeProvider("first", ProviderResult(documents=(), warnings=("provider_degraded",))),
+                FakeProvider("second", ProviderResult(documents=(), warnings=("provider_limited",))),
+            ],
+            "provider_degraded",
+            False,
+        ),
+    ],
+)
+async def test_provider_issue_precedence_is_provider_order(
+    providers: list[FakeProvider], expected_code: str, has_data: bool
+) -> None:
+    run = FakeRun(uuid4())
+    orchestrator, _runs, persistence = orchestrator_for(run, providers=providers)
+
+    result = await orchestrator.run(run.id)
+
+    assert result.error_code == expected_code
+    assert result.status is (CollectionStatus.PARTIAL if has_data else CollectionStatus.FAILED)
+    assert result.providers_attempted == ("first", "second")
+    assert persistence.calls == int(has_data)
+
+
+@pytest.mark.asyncio
 async def test_extraction_failure_without_data_is_failed_without_persistence() -> None:
     run = FakeRun(uuid4())
     provider = FakeProvider("site", ProviderResult(documents=(document(),)))

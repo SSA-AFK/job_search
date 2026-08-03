@@ -191,8 +191,12 @@ class NormalizedBatchBuilder:
         ]
         if profile.website is not None:
             fields.append(("website", profile.evidence_ids, profile.confidence))
+        elif discovered.website is not None:
+            fields.append(("website", discovered.evidence_ids, discovered.confidence))
         if profile.description is not None:
             fields.append(("description", profile.evidence_ids, profile.confidence))
+        elif discovered.description is not None:
+            fields.append(("description", discovered.evidence_ids, discovered.confidence))
         return tuple(
             CompanyFieldEvidence(
                 field_name=field,
