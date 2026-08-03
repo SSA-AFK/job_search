@@ -187,3 +187,29 @@ def test_normalized_filing_maps_extraction_vocabulary_and_fields() -> None:
     assert record.filing_name == "Example filing"
     assert record.detail_url == candidate.url
     assert record.source_evidence_id == "doc-1"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("provider", "x" * 51),
+        ("external_id", "x" * 256),
+        ("url", "https://example.com/" + "x" * 2_000),
+        ("title", "x" * 501),
+    ],
+)
+def test_raw_document_rejects_values_too_long_for_database(
+    field: str, value: str
+) -> None:
+    payload: dict[str, object] = {
+        "provider": "official",
+        "external_id": "doc-1",
+        "url": "https://example.com/source",
+        "title": "Source",
+        "text": "Evidence",
+        "published_at": None,
+        field: value,
+    }
+
+    with pytest.raises(ValidationError):
+        RawDocument.model_validate(payload)

@@ -7,6 +7,7 @@ from typing import Annotated
 from pydantic import (
     AfterValidator,
     BaseModel,
+    ConfigDict,
     Field,
     HttpUrl,
     ValidationInfo,
@@ -23,6 +24,19 @@ def _bounded_external_url(value: HttpUrl) -> HttpUrl:
 ExternalUrl = Annotated[HttpUrl, AfterValidator(_bounded_external_url)]
 
 
+def _bounded_company_url(value: HttpUrl) -> HttpUrl:
+    if len(str(value)) > 1_000:
+        raise ValueError("URL must not exceed 1000 characters")
+    return value
+
+
+CompanyUrl = Annotated[HttpUrl, AfterValidator(_bounded_company_url)]
+
+
+class FrozenExtractionModel(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+
 class EmploymentType(StrEnum):
     FULL_TIME = "full_time"
     PART_TIME = "part_time"
@@ -36,24 +50,24 @@ class FilingType(StrEnum):
     BUSINESS_LICENSE = "business_license"
 
 
-class EvidenceCandidate(BaseModel):
-    evidence_ids: list[str] = Field(min_length=1, max_length=20)
+class EvidenceCandidate(FrozenExtractionModel):
+    evidence_ids: tuple[str, ...] = Field(min_length=1, max_length=20)
     confidence: float = Field(ge=0, le=1)
 
     @field_validator("evidence_ids")
     @classmethod
     def evidence_ids_must_be_provided(
-        cls, evidence_ids: list[str], info: ValidationInfo
-    ) -> list[str]:
+        cls, evidence_ids: tuple[str, ...], info: ValidationInfo
+    ) -> tuple[str, ...]:
         allowed = (info.context or {}).get("allowed_evidence_ids")
         if allowed is not None and not set(evidence_ids).issubset(allowed):
             raise ValueError("evidence_ids must be supplied in the prompt")
         return evidence_ids
 
 
-class CompanyRef(BaseModel):
+class CompanyRef(FrozenExtractionModel):
     name: str = Field(min_length=1, max_length=200)
-    website: HttpUrl | None = None
+    website: CompanyUrl | None = None
 
 
 class CompanyCandidate(CompanyRef, EvidenceCandidate):
@@ -79,9 +93,9 @@ class CompanyProfileCandidate(CompanyRef, EvidenceCandidate):
 
 
 class JobCandidate(EvidenceCandidate):
-    title: str = Field(min_length=1, max_length=300)
+    title: str = Field(min_length=1, max_length=255)
     employment_type: EmploymentType | None = None
-    location: str | None = Field(default=None, max_length=300)
+    location: str | None = Field(default=None, max_length=50)
     provider: str | None = Field(default=None, min_length=1, max_length=50)
     source_raw_id: str | None = Field(default=None, min_length=1, max_length=255)
     apply_url: ExternalUrl | None = None
@@ -111,8 +125,8 @@ class FilingCandidate(EvidenceCandidate):
         return CompanyCandidate.description_must_not_contain_html(description)
 
 
-class ExtractionBatch(BaseModel):
-    companies: list[CompanyCandidate] = Field(default_factory=list, max_length=50)
-    profiles: list[CompanyProfileCandidate] = Field(default_factory=list, max_length=10)
-    jobs: list[JobCandidate] = Field(default_factory=list, max_length=200)
-    filings: list[FilingCandidate] = Field(default_factory=list, max_length=100)
+class ExtractionBatch(FrozenExtractionModel):
+    companies: tuple[CompanyCandidate, ...] = Field(default_factory=tuple, max_length=50)
+    profiles: tuple[CompanyProfileCandidate, ...] = Field(default_factory=tuple, max_length=10)
+    jobs: tuple[JobCandidate, ...] = Field(default_factory=tuple, max_length=200)
+    filings: tuple[FilingCandidate, ...] = Field(default_factory=tuple, max_length=100)

@@ -238,3 +238,37 @@ def test_sqlite_datetime_round_trip_normalizes_aware_values_to_utc(session: Sess
 
     assert source.published_at == datetime(2026, 7, 31, 4, 30, tzinfo=UTC)
     assert source.fetched_at == datetime(2026, 7, 31, 5, 45, tzinfo=UTC)
+
+
+def test_source_document_without_external_id_has_database_identity(
+    session: Session,
+) -> None:
+    now = datetime.now(UTC)
+    values = {
+        "provider": "official",
+        "external_id": None,
+        "url": "https://example.com/source",
+        "text_excerpt": "Evidence",
+        "content_hash": "c" * 64,
+        "fetched_at": now,
+    }
+    session.add(SourceDocument(**values))
+    session.commit()
+    session.add(SourceDocument(**values))
+
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+
+def test_source_document_null_external_identity_index_matches_model() -> None:
+    indexes = {index.name: index for index in SourceDocument.__table__.indexes}
+
+    index = indexes["uq_source_document_provider_url_hash_without_external_id"]
+    assert index.unique is True
+    assert [column.name for column in index.columns] == [
+        "provider",
+        "url",
+        "content_hash",
+    ]
+    assert str(index.dialect_options["sqlite"]["where"]) == "external_id IS NULL"
+    assert str(index.dialect_options["postgresql"]["where"]) == "external_id IS NULL"

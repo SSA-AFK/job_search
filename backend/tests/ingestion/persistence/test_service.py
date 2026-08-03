@@ -1,9 +1,10 @@
 from datetime import UTC, date, datetime
 from hashlib import sha256
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.orm import Session
 
 from app.ingestion.contracts import RawDocument
@@ -20,6 +21,7 @@ from app.ingestion.persistence.contracts import (
 )
 from app.ingestion.persistence.service import PersistenceError, PersistenceService
 from app.models import (
+    Base,
     Company,
     CompanySource,
     FilingType,
@@ -36,34 +38,39 @@ LATER = datetime(2026, 8, 1, 12, tzinfo=UTC)
 def normalized_document(
     evidence_id: str,
     *,
+    provider: str = "official",
     external_id: str | None = None,
     url: str = "https://example.com/source",
+    title: str = "Source",
     text: str = "Evidence text",
+    authority_level: int | None = 1,
+    fetched_at: datetime = NOW,
 ) -> NormalizedDocument:
     return NormalizedDocument(
         evidence_id=evidence_id,
         document=RawDocument(
-            provider="official",
+            provider=provider,
             external_id=external_id,
             url=url,
-            title="Source",
+            title=title,
             text=text,
             published_at=None,
-            authority_level=1,
+            authority_level=authority_level,
         ),
-        fetched_at=NOW,
+        fetched_at=fetched_at,
     )
 
 
 def normalized_company(
     *,
+    name: str = "Example",
     company_id: UUID | None = None,
     field_evidence: tuple[CompanyFieldEvidence, ...] = (),
 ) -> NormalizedCompanyRecord:
     return NormalizedCompanyRecord(
         candidate=normalize_company(
             CompanyCandidate(
-                name="Example",
+                name=name,
                 website="https://example.com",
                 description="Company description",
                 evidence_ids=["doc-1"],
@@ -350,3 +357,285 @@ def test_canonical_job_becomes_inactive_when_all_sources_are_inactive(
     persistence.persist(inactive, run_id=uuid4())
 
     assert session.scalar(select(JobPosting.is_active)) is False
+
+
+def test_older_document_delivery_does_not_overwrite_newer_payload(
+    session: Session, persistence: PersistenceService
+) -> None:
+    newer_text = "New authoritative evidence"
+    newer = normalized_document(
+        "doc-1",
+        external_id="source-1",
+        url="https://example.com/new",
+        title="New title",
+        text=newer_text,
+        authority_level=1,
+        fetched_at=LATER,
+    )
+    older = normalized_document(
+        "doc-1",
+        external_id="source-1",
+        url="https://example.com/old",
+        title="Old title",
+        text="Old evidence",
+        authority_level=4,
+        fetched_at=NOW,
+    )
+    persistence.persist(
+        normalized_batch(documents=(newer,), jobs=(), filings=(), collected_at=LATER),
+        run_id=uuid4(),
+    )
+    persistence.persist(
+        normalized_batch(documents=(older,), jobs=(), filings=()), run_id=uuid4()
+    )
+
+    stored = session.scalar(select(SourceDocument))
+    assert stored is not None
+    assert stored.fetched_at == LATER
+    assert stored.url == "https://example.com/new"
+    assert stored.title == "New title"
+    assert stored.text_excerpt == newer_text
+    assert stored.content_hash == sha256(newer_text.encode()).hexdigest()
+    assert stored.authority_level == 1
+
+
+def test_cross_company_job_source_conflict_rolls_back_and_session_remains_usable(
+    session: Session, persistence: PersistenceService
+) -> None:
+    persistence.persist(normalized_batch(filings=()), run_id=uuid4())
+    conflicting = normalized_batch(
+        company=normalized_company(name="Other"),
+        jobs=(normalized_job("job-1"),),
+        filings=(),
+    )
+
+    with pytest.raises(PersistenceError) as raised:
+        persistence.persist(conflicting, run_id=uuid4())
+
+    assert raised.value.constraint == "uq_job_source_provider_raw_id"
+    assert session.scalar(
+        select(func.count()).select_from(Company).where(Company.normalized_name == "other")
+    ) == 0
+    session.rollback()
+    session.add(Company(canonical_name="Usable", normalized_name="usable"))
+    session.commit()
+    assert session.scalar(
+        select(func.count()).select_from(Company).where(Company.normalized_name == "usable")
+    ) == 1
+
+
+def test_invalid_bypassed_job_state_becomes_audited_persistence_error(
+    session: Session, persistence: PersistenceService
+) -> None:
+    candidate = JobCandidate.model_construct(
+        title="Engineer",
+        employment_type=None,
+        location="Shanghai",
+        provider=None,
+        source_raw_id=None,
+        apply_url=None,
+        posted_at=None,
+        salary=None,
+        description="Build systems",
+        evidence_ids=("doc-1",),
+        confidence=0.9,
+    )
+    invalid_job = normalized_job("placeholder").model_copy(
+        update={"candidate": normalize_job(candidate)}
+    )
+    invalid_batch = NormalizedBatch.model_construct(
+        documents=(normalized_document("doc-1", external_id="source-1"),),
+        company=normalized_company(),
+        jobs=(invalid_job,),
+        filings=(),
+        collected_at=NOW,
+    )
+    run_id = uuid4()
+
+    with pytest.raises(PersistenceError) as raised:
+        persistence.persist(invalid_batch, run_id=run_id)
+
+    assert raised.value.run_id == run_id
+    assert raised.value.constraint == "uq_job_source_provider_raw_id"
+    assert count_rows(session, SourceDocument) == 0
+
+
+def test_duplicate_delivery_converges_across_independently_committed_sessions(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite:///{(tmp_path / 'persistence.sqlite3').as_posix()}"
+    engine = create_engine(database_url)
+
+    @event.listens_for(engine, "connect")
+    def enable_foreign_keys(dbapi_connection: object, _connection_record: object) -> None:
+        cursor = dbapi_connection.cursor()  # type: ignore[union-attr]
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    Base.metadata.create_all(engine)
+    batch = normalized_batch(filings=())
+    with Session(engine, expire_on_commit=False) as first_session:
+        first = PersistenceService(first_session).persist(batch, run_id=uuid4())
+    with Session(engine, expire_on_commit=False) as second_session:
+        second = PersistenceService(second_session).persist(
+            batch.with_fetched_at(LATER), run_id=uuid4()
+        )
+    with Session(engine) as verification_session:
+        assert first.company_id == second.company_id
+        assert count_rows(verification_session, SourceDocument) == 1
+        assert count_rows(verification_session, Company) == 1
+        assert count_rows(verification_session, JobPosting) == 1
+        assert count_rows(verification_session, JobSource) == 1
+
+
+def test_company_unique_race_reselects_winner_without_poisoning_outer_transaction(
+    non_autoflush_session: Session,
+) -> None:
+    run_id = uuid4()
+    winner = Company(canonical_name="Winner", normalized_name="example")
+    service = PersistenceService(non_autoflush_session)
+
+    with non_autoflush_session.begin():
+        non_autoflush_session.add(winner)
+        resolved = service._upsert_company(normalized_company(), run_id)
+        non_autoflush_session.add(
+            Company(canonical_name="After recovery", normalized_name="afterrecovery")
+        )
+
+    assert resolved.id == winner.id
+    assert count_rows(non_autoflush_session, Company) == 2
+
+
+def test_document_unique_race_reselects_winner_inside_savepoint(
+    non_autoflush_session: Session,
+) -> None:
+    evidence_text = "Shared evidence"
+    winner = SourceDocument(
+        provider="official",
+        external_id=None,
+        url="https://example.com/source",
+        title="Winner",
+        text_excerpt=evidence_text,
+        content_hash=sha256(evidence_text.encode()).hexdigest(),
+        fetched_at=NOW,
+    )
+    record = normalized_document(
+        "doc-1",
+        external_id=None,
+        url="https://example.com/source",
+        text=evidence_text,
+    )
+    service = PersistenceService(non_autoflush_session)
+
+    with non_autoflush_session.begin():
+        non_autoflush_session.add(winner)
+        resolved = service._upsert_documents((record,), uuid4())
+
+    assert resolved["doc-1"].id == winner.id
+    assert count_rows(non_autoflush_session, SourceDocument) == 1
+
+
+def test_filing_unique_race_reselects_same_company_winner(
+    non_autoflush_session: Session,
+) -> None:
+    company = Company(canonical_name="Example", normalized_name="example")
+    non_autoflush_session.add(company)
+    non_autoflush_session.commit()
+    winner = RegulatoryFiling(
+        company_id=company.id,
+        filing_type=FilingType.ICP,
+        filing_number="ICP-RACE",
+        filing_name="Winner filing",
+    )
+    candidate = normalized_filing("ICP-RACE").model_copy(
+        update={"source_evidence_id": None}
+    )
+    service = PersistenceService(non_autoflush_session)
+
+    with non_autoflush_session.begin():
+        non_autoflush_session.add(winner)
+        service._upsert_filings(company.id, (candidate,), {}, uuid4())
+        non_autoflush_session.add(
+            RegulatoryFiling(
+                company_id=company.id,
+                filing_type=FilingType.ALGORITHM,
+                filing_number="ALG-AFTER",
+                filing_name="After recovery",
+            )
+        )
+
+    assert count_rows(non_autoflush_session, RegulatoryFiling) == 2
+    stored = non_autoflush_session.scalar(
+        select(RegulatoryFiling).where(
+            RegulatoryFiling.filing_type == FilingType.ICP,
+            RegulatoryFiling.filing_number == "ICP-RACE",
+        )
+    )
+    assert stored is not None
+    assert stored.filing_name == "Example ICP filing"
+
+
+def test_job_source_unique_race_converges_and_removes_orphan_posting(
+    non_autoflush_session: Session,
+) -> None:
+    company = Company(canonical_name="Example", normalized_name="example")
+    non_autoflush_session.add(company)
+    non_autoflush_session.flush()
+    winner_job = JobPosting(
+        company_id=company.id,
+        title="Winner",
+        normalized_title="winner",
+        city="beijing",
+        description="Winner description",
+    )
+    non_autoflush_session.add(winner_job)
+    non_autoflush_session.commit()
+    winner_source = JobSource(
+        job_posting_id=winner_job.id,
+        provider="official",
+        source_raw_id="job-race",
+        apply_url="https://example.com/winner",
+        first_seen_at=NOW,
+        last_seen_at=NOW,
+        is_active=True,
+    )
+    candidate = normalized_job("job-race").model_copy(
+        update={"source_evidence_id": None}
+    )
+    service = PersistenceService(non_autoflush_session)
+
+    with non_autoflush_session.begin():
+        non_autoflush_session.add(winner_source)
+        job_ids, _warnings = service._upsert_jobs(
+            company.id, (candidate,), {}, uuid4()
+        )
+
+    assert job_ids == {winner_job.id}
+    assert count_rows(non_autoflush_session, JobPosting) == 1
+    assert count_rows(non_autoflush_session, JobSource) == 1
+
+
+def test_statement_error_is_sanitized_with_run_context_and_full_rollback(
+    session: Session, persistence: PersistenceService
+) -> None:
+    invalid_document = NormalizedDocument.model_construct(
+        evidence_id="doc-1",
+        document=normalized_document("doc-1", external_id="bad-time").document,
+        fetched_at=NOW.replace(tzinfo=None),
+    )
+    invalid_batch = NormalizedBatch.model_construct(
+        documents=(invalid_document,),
+        company=normalized_company(),
+        jobs=(),
+        filings=(),
+        collected_at=NOW,
+    )
+    run_id = uuid4()
+
+    with pytest.raises(PersistenceError) as raised:
+        persistence.persist(invalid_batch, run_id=run_id)
+
+    assert raised.value.run_id == run_id
+    assert raised.value.detail == "database statement failed"
+    assert count_rows(session, SourceDocument) == 0
+    assert count_rows(session, Company) == 0

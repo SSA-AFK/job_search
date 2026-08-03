@@ -5,11 +5,13 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     JSON,
     ForeignKey,
+    Index,
     Numeric,
     SmallInteger,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -21,6 +23,15 @@ class SourceDocument(Base):
     __table_args__ = (
         UniqueConstraint(
             "provider", "external_id", name="uq_source_document_provider_external_id"
+        ),
+        Index(
+            "uq_source_document_provider_url_hash_without_external_id",
+            "provider",
+            "url",
+            "content_hash",
+            unique=True,
+            sqlite_where=text("external_id IS NULL"),
+            postgresql_where=text("external_id IS NULL"),
         ),
     )
 

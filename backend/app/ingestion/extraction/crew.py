@@ -20,7 +20,9 @@ from app.ingestion.extraction.schemas import (
 
 
 class Extractor(Protocol):
-    async def discover(self, documents: Sequence[RawDocument]) -> list[CompanyCandidate]: ...
+    async def discover(
+        self, documents: Sequence[RawDocument]
+    ) -> tuple[CompanyCandidate, ...]: ...
 
     async def extract_profile(
         self, company: CompanyRef, documents: Sequence[RawDocument]
@@ -28,14 +30,16 @@ class Extractor(Protocol):
 
     async def extract_jobs(
         self, company: CompanyRef, documents: Sequence[RawDocument]
-    ) -> list[JobCandidate]: ...
+    ) -> tuple[JobCandidate, ...]: ...
 
 
 class CrewExtractor:
     def __init__(self, llm: LlmClient) -> None:
         self._llm = llm
 
-    async def discover(self, documents: Sequence[RawDocument]) -> list[CompanyCandidate]:
+    async def discover(
+        self, documents: Sequence[RawDocument]
+    ) -> tuple[CompanyCandidate, ...]:
         batch = await self._extract_batch("discover", documents)
         return batch.companies
 
@@ -50,7 +54,7 @@ class CrewExtractor:
 
     async def extract_jobs(
         self, company: CompanyRef, documents: Sequence[RawDocument]
-    ) -> list[JobCandidate]:
+    ) -> tuple[JobCandidate, ...]:
         batch = await self._extract_batch("jobs", documents, company)
         return batch.jobs
 

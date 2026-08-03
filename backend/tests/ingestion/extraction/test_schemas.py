@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from app.ingestion.extraction.schemas import (
     CompanyCandidate,
+    ExtractionBatch,
     FilingCandidate,
     FilingType,
     JobCandidate,
@@ -166,6 +167,64 @@ def test_filing_candidate_rejects_name_too_long_for_persistence() -> None:
                 "filing_number": "ICP-42",
                 "evidence_ids": ["doc-1"],
                 "confidence": 0.9,
+            }
+        )
+
+
+def test_extraction_models_are_deeply_immutable_and_json_arrays_become_tuples() -> None:
+    batch = ExtractionBatch.model_validate_json(
+        '{"companies":[{"name":"Example","evidence_ids":["doc-1"],'
+        '"confidence":0.9}],"jobs":[],"profiles":[],"filings":[]}'
+    )
+    candidate = batch.companies[0]
+
+    assert isinstance(batch.companies, tuple)
+    assert isinstance(candidate.evidence_ids, tuple)
+    with pytest.raises(ValidationError):
+        candidate.name = "Changed"
+    with pytest.raises(AttributeError):
+        candidate.evidence_ids.append("doc-2")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("website", "https://example.com/" + "x" * 1_000),
+    ],
+)
+def test_company_candidate_rejects_values_too_long_for_database(
+    field: str, value: str
+) -> None:
+    with pytest.raises(ValidationError):
+        CompanyCandidate.model_validate(
+            {
+                "name": "Example",
+                "evidence_ids": ["doc-1"],
+                "confidence": 0.9,
+                field: value,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("title", "x" * 256),
+        ("location", "x" * 51),
+    ],
+)
+def test_job_candidate_rejects_values_too_long_for_database(
+    field: str, value: str
+) -> None:
+    with pytest.raises(ValidationError):
+        JobCandidate.model_validate(
+            {
+                "title": "Engineer",
+                "provider": "official",
+                "source_raw_id": "job-1",
+                "evidence_ids": ["doc-1"],
+                "confidence": 0.9,
+                field: value,
             }
         )
 

@@ -46,6 +46,9 @@ def test_initial_migration_round_trip(tmp_path: Path) -> None:
         "ix_collection_requests_status_query",
         "uq_collection_requests_active_query",
     }
+    assert {index["name"] for index in inspector.get_indexes("source_documents")} == {
+        "uq_source_document_provider_url_hash_without_external_id"
+    }
     with engine.connect() as connection:
         index_sql = connection.scalar(
             text(
@@ -55,6 +58,15 @@ def test_initial_migration_round_trip(tmp_path: Path) -> None:
         )
     assert index_sql is not None
     assert "WHERE status IN ('queued', 'running')" in index_sql
+    with engine.connect() as connection:
+        source_index_sql = connection.scalar(
+            text(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' "
+                "AND name = 'uq_source_document_provider_url_hash_without_external_id'"
+            )
+        )
+    assert source_index_sql is not None
+    assert "WHERE external_id IS NULL" in source_index_sql
 
     with engine.begin() as connection:
         connection.execute(

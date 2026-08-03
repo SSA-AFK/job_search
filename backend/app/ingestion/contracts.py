@@ -1,9 +1,18 @@
 """Provider-facing immutable data contracts."""
 
 from datetime import datetime
-from typing import Protocol
+from typing import Annotated, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, HttpUrl
+
+
+def _bounded_document_url(value: HttpUrl) -> HttpUrl:
+    if len(str(value)) > 2_000:
+        raise ValueError("URL must not exceed 2000 characters")
+    return value
+
+
+DocumentUrl = Annotated[HttpUrl, AfterValidator(_bounded_document_url)]
 
 
 class ProviderQuery(BaseModel):
@@ -18,10 +27,10 @@ class ProviderQuery(BaseModel):
 class RawDocument(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    provider: str
-    external_id: str | None
-    url: HttpUrl
-    title: str | None
+    provider: str = Field(min_length=1, max_length=50)
+    external_id: str | None = Field(max_length=255)
+    url: DocumentUrl
+    title: str | None = Field(max_length=500)
     text: str = Field(max_length=200_000)
     published_at: datetime | None
     authority_level: int | None = Field(default=None, ge=1, le=4)

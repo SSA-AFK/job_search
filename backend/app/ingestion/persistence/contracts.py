@@ -74,6 +74,14 @@ class NormalizedJobRecord(FrozenDTO):
     seen_at: AwareDatetime
     is_active: bool = True
 
+    @model_validator(mode="after")
+    def validate_database_lengths(self) -> "NormalizedJobRecord":
+        if len(self.candidate.normalized_title) > 255:
+            raise ValueError("normalized job title exceeds 255 characters")
+        if len(self.candidate.normalized_city) > 50:
+            raise ValueError("normalized job city exceeds 50 characters")
+        return self
+
 
 class NormalizedFilingRecord(FrozenDTO):
     filing_type: FilingType
