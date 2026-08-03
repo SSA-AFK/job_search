@@ -113,6 +113,24 @@ def _mark_collection_unavailable(run_id: UUID) -> IngestionResult:
         session.close()
 
 
+def _recover_retry_state(run_id: UUID, *, exhausted: bool) -> IngestionResult:
+    """Use a fresh, clean session after an ingestion state-write failure."""
+    session = SessionLocal()
+    try:
+        session.rollback()
+        repository = CollectionRepository(session)
+        run = (
+            repository.fail_retry_exhausted(run_id)
+            if exhausted
+            else repository.requeue_for_retry(run_id)
+        )
+        return IngestionResult.unknown_run(run_id) if run is None else IngestionResult.from_run(
+            cast(RunResultSource, run)
+        )
+    finally:
+        session.close()
+
+
 @celery_app.task(bind=True, name="app.tasks.collection.run_ingestion", max_retries=_MAX_INFRASTRUCTURE_RETRIES)
 def run_ingestion(task: Task, run_id: str) -> dict[str, Any]:
     """Run an existing crawl run; repeated delivery is terminally idempotent."""
@@ -126,8 +144,8 @@ def run_ingestion(task: Task, run_id: str) -> dict[str, Any]:
         result = asyncio.run(orchestrator.run(parsed_run_id))
     except RetryableInfrastructureError as error:
         if task.request.retries >= _MAX_INFRASTRUCTURE_RETRIES:
-            return _result_payload(orchestrator.fail_retry_exhausted(parsed_run_id))
-        orchestrator.requeue_for_retry(parsed_run_id)
+            return _result_payload(_recover_retry_state(parsed_run_id, exhausted=True))
+        _recover_retry_state(parsed_run_id, exhausted=False)
         raise task.retry(exc=error, countdown=min(60, 2 ** task.request.retries)) from error
     finally:
         for session in sessions:

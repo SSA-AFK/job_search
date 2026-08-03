@@ -89,6 +89,7 @@ class CollectionRepository:
         return run
 
     def requeue_for_retry(self, run_id: UUID) -> CrawlRun | None:
+        self.session.rollback()
         run = self.get_run(run_id)
         if run is None or run.status in _TERMINAL_STATUSES:
             return run
@@ -106,6 +107,7 @@ class CollectionRepository:
         return run
 
     def fail_retry_exhausted(self, run_id: UUID) -> CrawlRun | None:
+        self.session.rollback()
         run = self.get_run(run_id)
         if run is None or run.status in _TERMINAL_STATUSES:
             return run

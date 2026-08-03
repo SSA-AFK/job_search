@@ -129,6 +129,7 @@ def test_collection_task_marks_unconfigured_runtime_unavailable(tmp_path, monkey
 
 def test_collection_task_retries_infrastructure_error_with_same_run_id(monkeypatch) -> None:
     from app.ingestion.errors import RetryableInfrastructureError
+    from app.ingestion.result import IngestionResult
     from app.tasks.collection import run_ingestion
 
     run_id = uuid4()
@@ -145,6 +146,10 @@ def test_collection_task_retries_infrastructure_error_with_same_run_id(monkeypat
     monkeypatch.setattr(
         "app.tasks.collection.build_runtime_orchestrator",
         lambda: (FailingOrchestrator(), (Session(), Session(), Session())),
+    )
+    monkeypatch.setattr(
+        "app.tasks.collection._recover_retry_state",
+        lambda received_run_id, *, exhausted: IngestionResult.unknown_run(received_run_id),
     )
 
     retries = []
@@ -283,3 +288,104 @@ def test_collection_task_closes_sessions_created_before_factory_failure(monkeypa
 
     assert calls == 2
     assert first.closed is True
+
+
+def test_collection_task_retries_real_terminal_write_infrastructure_failure(tmp_path, monkeypatch) -> None:
+    from app.tasks.collection import run_ingestion
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'terminal-write.sqlite3'}")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as session:
+        request, run = CollectionRepository(session).create_request("Acme", "acme")
+        session.commit()
+
+    class FailingExtractor(Extractor):
+        async def discover(self, _documents):
+            raise ValueError("deterministic extraction failure")
+
+    def runtime_factory():
+        sessions = tuple(Session(engine, expire_on_commit=False) for _ in range(3))
+        orchestrator = build_ingestion_orchestrator(
+            run_state_session=sessions[0],
+            dedup_read_session=sessions[1],
+            persistence_write_session=sessions[2],
+            providers=(DocumentProvider(),),
+            extractor=FailingExtractor(),
+            semantic_judge=SemanticJudge(),
+        )
+
+        def fail_terminal_write(*_args, **_kwargs):
+            raise OperationalError("update crawl_runs", {}, RuntimeError("state database unavailable"))
+
+        orchestrator.runs.finish = fail_terminal_write
+        return orchestrator, sessions
+
+    retries = []
+
+    def retry(*, exc, countdown):
+        retries.append((exc, countdown))
+        raise Retry()
+
+    monkeypatch.setattr("app.tasks.collection.SessionLocal", lambda: Session(engine, expire_on_commit=False))
+    monkeypatch.setattr("app.tasks.collection.build_runtime_orchestrator", runtime_factory)
+    monkeypatch.setattr(run_ingestion, "retry", retry)
+
+    with pytest.raises(Retry):
+        run_ingestion.run(str(run.id))
+
+    assert retries and retries[0][1] == 1
+    with Session(engine) as session:
+        persisted_run = session.get(CrawlRun, run.id)
+        persisted_request = session.get(type(request), request.id)
+        assert persisted_run is not None and persisted_run.status is CollectionStatus.QUEUED
+        assert persisted_request is not None and persisted_request.status is CollectionStatus.QUEUED
+
+
+def test_collection_task_recovers_real_running_state_with_a_fresh_session(tmp_path, monkeypatch) -> None:
+    from app.tasks.collection import run_ingestion
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'run-state.sqlite3'}")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as session:
+        request, run = CollectionRepository(session).create_request("Acme", "acme")
+        session.commit()
+
+    def runtime_factory():
+        sessions = tuple(Session(engine, expire_on_commit=False) for _ in range(3))
+        orchestrator = build_ingestion_orchestrator(
+            run_state_session=sessions[0],
+            dedup_read_session=sessions[1],
+            persistence_write_session=sessions[2],
+            providers=(DocumentProvider(),),
+            extractor=Extractor(),
+            semantic_judge=SemanticJudge(),
+        )
+        start = orchestrator.runs.start_or_get_terminal
+
+        def fail_run_state(run_id):
+            start(run_id)
+            raise OperationalError("update crawl_runs", {}, RuntimeError("state database unavailable"))
+
+        orchestrator.runs.start_or_get_terminal = fail_run_state
+        orchestrator.runs.requeue_for_retry = lambda _run_id: pytest.fail("reused failed state session")
+        return orchestrator, sessions
+
+    retries = []
+
+    def retry(*, exc, countdown):
+        retries.append((exc, countdown))
+        raise Retry()
+
+    monkeypatch.setattr("app.tasks.collection.SessionLocal", lambda: Session(engine, expire_on_commit=False))
+    monkeypatch.setattr("app.tasks.collection.build_runtime_orchestrator", runtime_factory)
+    monkeypatch.setattr(run_ingestion, "retry", retry)
+
+    with pytest.raises(Retry):
+        run_ingestion.run(str(run.id))
+
+    assert retries and retries[0][1] == 1
+    with Session(engine) as session:
+        persisted_run = session.get(CrawlRun, run.id)
+        persisted_request = session.get(type(request), request.id)
+        assert persisted_run is not None and persisted_run.status is CollectionStatus.QUEUED
+        assert persisted_request is not None and persisted_request.status is CollectionStatus.QUEUED

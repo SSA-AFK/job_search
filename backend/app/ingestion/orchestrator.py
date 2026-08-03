@@ -363,16 +363,19 @@ class IngestionOrchestrator:
         persistence: PersistenceResult | None,
         error_code: str | None,
     ) -> IngestionResult:
-        finished = self.runs.finish(
-            run,
-            status=status,
-            providers_attempted=providers_attempted,
-            documents_found=documents_found,
-            jobs_found=jobs_found,
-            persistence=persistence,
-            error_code=error_code,
-            error_detail=error_code,
-        )
+        try:
+            finished = self.runs.finish(
+                run,
+                status=status,
+                providers_attempted=providers_attempted,
+                documents_found=documents_found,
+                jobs_found=jobs_found,
+                persistence=persistence,
+                error_code=error_code,
+                error_detail=error_code,
+            )
+        except (ConnectionError, OperationalError) as error:
+            raise RetryableInfrastructureError() from error
         return IngestionResult.from_run(finished)
 
     def requeue_for_retry(self, run_id: UUID) -> None:
