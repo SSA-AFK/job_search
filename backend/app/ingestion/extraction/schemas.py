@@ -1,8 +1,26 @@
 """Validated data returned from untrusted model output."""
 
+from datetime import date
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import BaseModel, Field, HttpUrl, ValidationInfo, field_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    Field,
+    HttpUrl,
+    ValidationInfo,
+    field_validator,
+)
+
+
+def _bounded_external_url(value: HttpUrl) -> HttpUrl:
+    if len(str(value)) > 2_000:
+        raise ValueError("URL must not exceed 2000 characters")
+    return value
+
+
+ExternalUrl = Annotated[HttpUrl, AfterValidator(_bounded_external_url)]
 
 
 class EmploymentType(StrEnum):
@@ -13,9 +31,9 @@ class EmploymentType(StrEnum):
 
 
 class FilingType(StrEnum):
-    ANNUAL_REPORT = "annual_report"
-    REGULATORY_FILING = "regulatory_filing"
-    PRESS_RELEASE = "press_release"
+    ICP = "icp"
+    ALGORITHM = "algorithm"
+    BUSINESS_LICENSE = "business_license"
 
 
 class EvidenceCandidate(BaseModel):
@@ -66,6 +84,8 @@ class JobCandidate(EvidenceCandidate):
     location: str | None = Field(default=None, max_length=300)
     provider: str | None = Field(default=None, min_length=1, max_length=50)
     source_raw_id: str | None = Field(default=None, min_length=1, max_length=255)
+    apply_url: ExternalUrl | None = None
+    posted_at: date | None = None
     salary: str | None = Field(default=None, min_length=1, max_length=100)
     description: str | None = Field(default=None, max_length=4_000)
 
@@ -76,9 +96,13 @@ class JobCandidate(EvidenceCandidate):
 
 
 class FilingCandidate(EvidenceCandidate):
-    title: str = Field(min_length=1, max_length=300)
+    title: str = Field(min_length=1, max_length=255)
     filing_type: FilingType
-    url: HttpUrl | None = None
+    filing_number: str = Field(min_length=1, max_length=255)
+    filing_authority: str | None = Field(default=None, max_length=255)
+    filing_date: date | None = None
+    filing_status: str | None = Field(default=None, max_length=50)
+    url: ExternalUrl | None = None
     description: str | None = Field(default=None, max_length=4_000)
 
     @field_validator("description")

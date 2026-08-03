@@ -1,7 +1,12 @@
 import pytest
 from pydantic import ValidationError
 
-from app.ingestion.extraction.schemas import CompanyCandidate, JobCandidate
+from app.ingestion.extraction.schemas import (
+    CompanyCandidate,
+    FilingCandidate,
+    FilingType,
+    JobCandidate,
+)
 
 
 def test_rejects_unknown_evidence_reference() -> None:
@@ -64,6 +69,105 @@ def test_job_candidate_preserves_optional_source_and_salary_fields() -> None:
     assert candidate.provider == "zhihu"
     assert candidate.source_raw_id == "42"
     assert candidate.salary == "30k-50k\u00b714\u85aa"
+
+
+def test_job_candidate_preserves_apply_url_and_posted_date() -> None:
+    candidate = JobCandidate.model_validate(
+        {
+            "title": "Software Engineer",
+            "apply_url": "https://example.com/jobs/42",
+            "posted_at": "2026-07-20",
+            "evidence_ids": ["doc-1"],
+            "confidence": 0.9,
+        }
+    )
+
+    assert str(candidate.apply_url) == "https://example.com/jobs/42"
+    assert candidate.posted_at.isoformat() == "2026-07-20"
+
+
+def test_job_candidate_rejects_oversized_apply_url() -> None:
+    with pytest.raises(ValidationError):
+        JobCandidate.model_validate(
+            {
+                "title": "Software Engineer",
+                "apply_url": "https://example.com/" + "x" * 2_000,
+                "evidence_ids": ["doc-1"],
+                "confidence": 0.9,
+            }
+        )
+
+
+def test_filing_candidate_matches_persisted_filing_vocabulary_and_fields() -> None:
+    candidate = FilingCandidate.model_validate(
+        {
+            "title": "Example ICP filing",
+            "filing_type": "icp",
+            "filing_number": "ICP-42",
+            "filing_authority": "MIIT",
+            "filing_date": "2026-07-20",
+            "filing_status": "active",
+            "url": "https://example.com/filings/42",
+            "evidence_ids": ["doc-1"],
+            "confidence": 0.9,
+        }
+    )
+
+    assert candidate.filing_type is FilingType.ICP
+    assert candidate.filing_number == "ICP-42"
+    assert candidate.filing_authority == "MIIT"
+    assert candidate.filing_date.isoformat() == "2026-07-20"
+    assert candidate.filing_status == "active"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("filing_number", "x" * 256),
+        ("filing_authority", "x" * 256),
+        ("filing_status", "x" * 51),
+    ],
+)
+def test_filing_candidate_rejects_oversized_persistence_fields(
+    field: str, value: str
+) -> None:
+    payload: dict[str, object] = {
+        "title": "Example filing",
+        "filing_type": "icp",
+        "filing_number": "ICP-42",
+        "evidence_ids": ["doc-1"],
+        "confidence": 0.9,
+        field: value,
+    }
+
+    with pytest.raises(ValidationError):
+        FilingCandidate.model_validate(payload)
+
+
+def test_filing_candidate_rejects_non_persisted_filing_type() -> None:
+    with pytest.raises(ValidationError):
+        FilingCandidate.model_validate(
+            {
+                "title": "Press release",
+                "filing_type": "press_release",
+                "filing_number": "PRESS-42",
+                "evidence_ids": ["doc-1"],
+                "confidence": 0.9,
+            }
+        )
+
+
+def test_filing_candidate_rejects_name_too_long_for_persistence() -> None:
+    with pytest.raises(ValidationError):
+        FilingCandidate.model_validate(
+            {
+                "title": "x" * 256,
+                "filing_type": "icp",
+                "filing_number": "ICP-42",
+                "evidence_ids": ["doc-1"],
+                "confidence": 0.9,
+            }
+        )
 
 
 @pytest.mark.parametrize(
