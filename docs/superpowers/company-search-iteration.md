@@ -16,7 +16,7 @@ This is the living delivery document for the AI Company Search project. It is th
 |----------|---------|--------|
 | [`specs/2026-07-31-ai-company-search-agent-design.md`](specs/2026-07-31-ai-company-search-agent-design.md) | Product, architecture, contracts, data model, and acceptance criteria | Approved |
 | [`plans/2026-07-31-company-search-web-foundation.md`](plans/2026-07-31-company-search-web-foundation.md) | Stage one implementation plan | Executed and integrated locally into `main` |
-| [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31-company-search-ingestion-pipeline.md) | Stage two implementation plan | Tasks 1-2 complete; Task 3 starting |
+| [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31-company-search-ingestion-pipeline.md) | Stage two implementation plan | Tasks 1-3 complete; Task 4 starting |
 | [`../zhihu.md`](../../zhihu.md) | Supplied Zhihu Global Search API contract | Reference |
 
 ## Current Snapshot
@@ -25,13 +25,13 @@ This is the living delivery document for the AI Company Search project. It is th
 |-------|-------|
 | Overall status | Stage one complete; stage two in progress |
 | Current stage | Stage two - Asynchronous ingestion pipeline |
-| Current task | Task 3 - Zhihu Global Search Provider |
+| Current task | Task 4 - Allowlisted company website Provider |
 | Execution method | Subagent-Driven Development |
 | Active branch/worktree | `codex/company-search-ingestion-pipeline` at `.worktrees/codex-company-search-ingestion-pipeline` |
 | Stage one progress | 8/8 tasks complete; completion gate passed |
-| Stage two progress | 2/12 tasks complete |
-| Last verified artifact state | Stage two Task 2 implementation and security fix review through `f3452ad` |
-| Next action | Implement and independently review stage two Task 3 |
+| Stage two progress | 3/12 tasks complete |
+| Last verified artifact state | Stage two Task 3 implementation and boundary fix review through `fab12c2` |
+| Next action | Implement and independently review stage two Task 4 |
 
 ## Delivery Sequence
 
@@ -81,8 +81,8 @@ Plan: [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31
 |------|-------------|--------|-----------|--------|--------------|
 | 1 | Ingestion configuration and collection requests | Complete | `0395040` | Approved; no Critical/Important; one deferred Minor | focused collection/API/migration 15 passed; full pytest 87 passed/2 deselected; Ruff passed |
 | 2 | Provider contracts and safe HTTP infrastructure | Complete | `584a0e1`, `f3452ad` | Approved after security fix round 1 | provider tests 28 passed; full pytest 115 passed/2 deselected; Ruff passed |
-| 3 | Zhihu Global Search Provider | Ready | - | - | - |
-| 4 | Allowlisted company website Provider | Pending Task 3 | - | - | - |
+| 3 | Zhihu Global Search Provider | Complete | `8f13e83`, `fab12c2` | Approved after boundary fix round 1 | focused 16 passed; provider tests 44 passed; full pytest 131 passed/2 deselected; mypy and Ruff passed |
+| 4 | Allowlisted company website Provider | Ready | - | - | - |
 | 5 | Structured CrewAI extraction adapters | Pending Task 4 | - | - | - |
 | 6 | Deterministic normalization and deduplication | Pending Task 5 | - | - | - |
 | 7 | Transactional idempotent persistence | Pending Task 6 | - | - | - |
@@ -166,6 +166,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-08-01 | Stage two baseline | Isolated worktree at `ed7755f`; backend and frontend baseline commands | PASS: Ruff clean; pytest 75 passed/2 deselected; Vitest 28 passed; build passed |
 | 2026-08-01 | Stage two Task 1 | Database-backed collection request implementation and independent task review | PASS: focused 15 passed; full pytest 87 passed/2 deselected; Ruff clean; review approved with one deferred concurrency-test Minor |
 | 2026-08-01 | Stage two Task 2 | Provider contracts, SSRF-safe HTTP boundary, and scoped security re-review | PASS: provider tests 28 passed; full pytest 115 passed/2 deselected; Ruff clean; DNS pinning, compressed-body bound, and media-type findings addressed |
+| 2026-08-03 | Stage two Task 3 | Zhihu Global Search Provider and scoped boundary re-review | PASS: focused 16 passed; provider tests 44 passed; full pytest 131 passed/2 deselected; mypy/Ruff clean; timeout, allowlist, and malformed-response findings addressed |
 
 ## Iteration History
 
@@ -189,6 +190,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-08-01 | Stage two execution start | Created the isolated ingestion-pipeline worktree, verified the Stage 1 baseline, and resolved preflight state-machine and async-interface conflicts with user approval | Implement stage two Task 1 with TDD and independent review |
 | 2026-08-01 | Stage two Task 1 | Activated POST/GET collection requests, normalized active-request reuse, atomic request/run creation, post-commit dispatch tracking, discoverable dispatch failure, and the cross-dialect partial unique index; independent review approved | Implement provider contracts and safe HTTP infrastructure |
 | 2026-08-01 | Stage two Task 2 | Added immutable Provider contracts and defensive HTTP fetching; security review found DNS rebinding and decompression-bound gaps, fixed by validated-address connection pinning, proxy bypass prevention, and identity-only content encoding; scoped re-review approved | Implement the Zhihu Global Search Provider |
+| 2026-08-03 | Stage two Task 3 | Added exact single-page Zhihu Global Search requests, authentication, supported host filters, bounded retries, structured response mapping, and disabled-by-default configuration; fixed wall-clock timeout, forbidden-only allowlist broadening, and malformed response handling in review round 1 | Implement the allowlisted company website Provider |
 
 ## Update Template
 
