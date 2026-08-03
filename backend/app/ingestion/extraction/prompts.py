@@ -15,6 +15,19 @@ _ROLE_INSTRUCTIONS = {
 }
 
 
+def assign_evidence_ids(documents: Sequence[RawDocument]) -> tuple[str, ...]:
+    """Return the stable evidence identifiers used by prompts and persistence."""
+    evidence_ids: list[str] = []
+    assigned: set[str] = set()
+    for index, document in enumerate(documents, start=1):
+        evidence_id = document.external_id or f"document-{index}"
+        while evidence_id in assigned:
+            evidence_id = f"{evidence_id}-{index}"
+        assigned.add(evidence_id)
+        evidence_ids.append(evidence_id)
+    return tuple(evidence_ids)
+
+
 def build_prompt(
     role: str, documents: Sequence[RawDocument], company: CompanyRef | None = None
 ) -> tuple[set[str], str]:
@@ -35,10 +48,7 @@ def build_prompt(
 
     evidence_ids: set[str] = set()
     prompt = instructions
-    for index, document in enumerate(documents, start=1):
-        evidence_id = document.external_id or f"document-{index}"
-        while evidence_id in evidence_ids:
-            evidence_id = f"{evidence_id}-{index}"
+    for evidence_id, document in zip(assign_evidence_ids(documents), documents, strict=True):
         block = f"[evidence:{evidence_id}]\n{document.text[:MAX_DOCUMENT_CHARS]}"
         separator = "" if prompt == instructions else "\n\n"
         if len(prompt) + len(separator) + len(block) > MAX_PROMPT_CHARS:
