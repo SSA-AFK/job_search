@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from typing import Protocol
 from uuid import UUID
 
+from app.core.normalization import normalize_name
 from app.ingestion.contracts import Provider, ProviderQuery, RawDocument
 from app.ingestion.deduplication.company import CompanyDeduplicator, CompanyMatch
 from app.ingestion.deduplication.job import JobDeduplicator
@@ -87,36 +88,63 @@ class NormalizedBatchBuilder:
         profile: CompanyProfileCandidate,
         jobs: Sequence[JobCandidate],
         documents: Sequence[RawDocument],
+        discovered: CompanyCandidate | None = None,
     ) -> NormalizedBatch:
         collected_at = utc_now()
         evidence_ids = assign_evidence_ids(documents)
-        company_candidate = CompanyCandidate(
+        document_by_evidence = dict(zip(evidence_ids, documents, strict=True))
+        self._require_known_evidence(profile.evidence_ids, document_by_evidence)
+        discovery = discovered or CompanyCandidate(
             name=profile.name,
             website=profile.website,
             description=profile.description,
             evidence_ids=profile.evidence_ids,
             confidence=profile.confidence,
         )
+        self._require_known_evidence(discovery.evidence_ids, document_by_evidence)
+        company_candidate = CompanyCandidate(
+            name=profile.name,
+            website=profile.website or discovery.website,
+            description=profile.description or discovery.description,
+            evidence_ids=discovery.evidence_ids,
+            confidence=discovery.confidence,
+        )
         company_match = (
             await self.company_deduplicator.resolve(company_candidate)
             if self.company_deduplicator is not None
             else CompanyMatch("new", None)
         )
-        field_evidence = self._field_evidence(company_candidate)
+        field_evidence = self._field_evidence(discovery, profile)
         normalized_jobs: list[NormalizedJobRecord] = []
         for job in jobs:
-            if job.provider is None or job.source_raw_id is None or job.apply_url is None:
-                continue
+            self._require_known_evidence(job.evidence_ids, document_by_evidence)
+            source_evidence_id = job.evidence_ids[0]
+            source_document = document_by_evidence[source_evidence_id]
+            if source_document.external_id is None:
+                raise _PipelineError("invalid_evidence")
+            if job.provider is not None and job.provider != source_document.provider:
+                raise _PipelineError("invalid_evidence")
+            if job.source_raw_id is not None and job.source_raw_id != source_document.external_id:
+                raise _PipelineError("invalid_evidence")
+            resolved_job = job.model_copy(
+                update={
+                    "provider": source_document.provider,
+                    "source_raw_id": source_document.external_id,
+                    "apply_url": job.apply_url or source_document.url,
+                }
+            )
+            if resolved_job.apply_url is None:
+                raise _PipelineError("invalid_evidence")
             job_id = None
             if company_match.company_id is not None and self.job_deduplicator is not None:
-                job_id = (await self.job_deduplicator.resolve(company_match.company_id, job)).job_posting_id
+                job_id = (await self.job_deduplicator.resolve(company_match.company_id, resolved_job)).job_posting_id
             normalized_jobs.append(
                 NormalizedJobRecord(
-                    candidate=normalize_job(job),
+                    candidate=normalize_job(resolved_job),
                     job_posting_id=job_id,
-                    source_evidence_id=job.evidence_ids[0],
-                    apply_url=job.apply_url,
-                    posted_at=job.posted_at,
+                    source_evidence_id=source_evidence_id,
+                    apply_url=resolved_job.apply_url,
+                    posted_at=resolved_job.posted_at,
                     seen_at=collected_at,
                 )
             )
@@ -139,21 +167,32 @@ class NormalizedBatchBuilder:
         )
 
     @staticmethod
-    def _field_evidence(candidate: CompanyCandidate) -> tuple[CompanyFieldEvidence, ...]:
-        evidence_id = candidate.evidence_ids[0]
-        fields: list[CompanyFieldName] = ["canonical_name"]
-        if candidate.website is not None:
-            fields.append("website")
-        if candidate.description is not None:
-            fields.append("description")
+    def _field_evidence(
+        discovered: CompanyCandidate, profile: CompanyProfileCandidate
+    ) -> tuple[CompanyFieldEvidence, ...]:
+        fields: list[tuple[CompanyFieldName, tuple[str, ...], float]] = [
+            ("canonical_name", discovered.evidence_ids, discovered.confidence)
+        ]
+        if profile.website is not None:
+            fields.append(("website", profile.evidence_ids, profile.confidence))
+        if profile.description is not None:
+            fields.append(("description", profile.evidence_ids, profile.confidence))
         return tuple(
             CompanyFieldEvidence(
                 field_name=field,
                 evidence_id=evidence_id,
-                confidence=candidate.confidence,
+                confidence=confidence,
             )
-            for field in fields
+            for field, evidence_ids, confidence in fields
+            for evidence_id in evidence_ids
         )
+
+    @staticmethod
+    def _require_known_evidence(
+        evidence_ids: Sequence[str], documents: dict[str, RawDocument]
+    ) -> None:
+        if not evidence_ids or any(evidence_id not in documents for evidence_id in evidence_ids):
+            raise _PipelineError("invalid_evidence")
 
 
 class IngestionOrchestrator:
@@ -220,7 +259,19 @@ class IngestionOrchestrator:
                     persistence=None,
                     error_code=provider_error or "no_documents",
                 )
-            company = CompanyRef(name=request.query)
+            discovered = await self.extractor.discover(documents)
+            selected, discovery_error = _select_company(request.query, discovered)
+            if selected is None:
+                return self._finish(
+                    run,
+                    status=CollectionStatus.FAILED,
+                    providers_attempted=providers_attempted,
+                    documents_found=len(documents),
+                    jobs_found=0,
+                    persistence=None,
+                    error_code=discovery_error,
+                )
+            company = CompanyRef(name=selected.name, website=selected.website)
             profile = await self.extractor.extract_profile(company, documents)
             jobs = await self.extractor.extract_jobs(company, documents)
             jobs_found = len(jobs)
@@ -229,6 +280,7 @@ class IngestionOrchestrator:
                 profile=profile,
                 jobs=jobs,
                 documents=documents,
+                discovered=selected,
             )
             persisted = self.persistence.persist(batch, run.id)
             return self._finish(
@@ -268,6 +320,8 @@ class IngestionOrchestrator:
                 first_error = first_error or "provider_unavailable"
             else:
                 documents.extend(result.documents)
+                for warning in result.warnings:
+                    first_error = first_error or _warning_code(warning)
         return tuple(attempted), tuple(documents), first_error
 
     def _finish(
@@ -308,3 +362,22 @@ def _provider_name(provider: Provider) -> str:
 def _public_code(error: Exception, fallback: str) -> str:
     code = getattr(error, "code", None)
     return code if isinstance(code, str) and _PUBLIC_CODE.fullmatch(code) else fallback
+
+
+def _warning_code(warning: str) -> str:
+    return warning if _PUBLIC_CODE.fullmatch(warning) else "provider_warning"
+
+
+def _select_company(
+    query: str, candidates: Sequence[CompanyCandidate]
+) -> tuple[CompanyCandidate | None, str | None]:
+    exact = [candidate for candidate in candidates if normalize_name(candidate.name) == normalize_name(query)]
+    if len(exact) == 1:
+        candidate = exact[0]
+    elif len(candidates) == 1:
+        candidate = candidates[0]
+    elif not candidates:
+        return None, "no_valid_data"
+    else:
+        return None, "ambiguous_company"
+    return candidate, None

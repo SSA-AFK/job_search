@@ -59,15 +59,32 @@ class CollectionRepository:
         run = self.get_run(run_id)
         if run is None or run.status in _TERMINAL_STATUSES:
             return run
-        if run.status is not CollectionStatus.QUEUED:
-            raise ValueError("invalid_run_state")
         request = self.get_request_for_run(run)
-        if request is None or request.status is not CollectionStatus.QUEUED:
-            raise ValueError("invalid_run_state")
+        if (
+            run.status is not CollectionStatus.QUEUED
+            or request is None
+            or request.status is not CollectionStatus.QUEUED
+        ):
+            return self._finish_invalid(run, request)
         now = utc_now()
         run.status = CollectionStatus.RUNNING
         run.started_at = now
         request.status = CollectionStatus.RUNNING
+        self.session.commit()
+        return run
+
+    def _finish_invalid(
+        self, run: CrawlRun, request: CollectionRequest | None
+    ) -> CrawlRun:
+        now = utc_now()
+        run.status = CollectionStatus.FAILED
+        run.error_code = "invalid_run_state"
+        run.error_detail = "invalid_run_state"
+        run.completed_at = now
+        if request is not None:
+            request.status = CollectionStatus.FAILED
+            request.error_code = "invalid_run_state"
+            request.completed_at = now
         self.session.commit()
         return run
 

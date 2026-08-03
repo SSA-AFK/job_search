@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
+from app.collection.repository import CollectionRepository
 from app.collection.service import CollectionService
 from app.models import Base, CollectionRequest, CollectionStatus, CrawlRun
 
@@ -121,3 +122,21 @@ def test_get_returns_persisted_request(service: CollectionService) -> None:
     found = service.get(submitted.id)
 
     assert found == submitted
+
+
+def test_invalid_run_start_terminalizes_run_and_linked_request(session: Session) -> None:
+    repository = CollectionRepository(session)
+    request, run = repository.create_request("Acme", "acme")
+    session.commit()
+    run.status = CollectionStatus.RUNNING
+    session.commit()
+
+    terminal = repository.start_or_get_terminal(run.id)
+
+    assert terminal is not None
+    assert terminal.status is CollectionStatus.FAILED
+    assert terminal.error_code == "invalid_run_state"
+    persisted_request = session.get(CollectionRequest, request.id)
+    assert persisted_request is not None
+    assert persisted_request.status is CollectionStatus.FAILED
+    assert persisted_request.error_code == "invalid_run_state"

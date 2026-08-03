@@ -6,6 +6,7 @@ import pytest
 
 from app.ingestion.contracts import ProviderQuery, ProviderResult, RawDocument
 from app.ingestion.errors import ExtractionError, ProviderError
+from app.ingestion.extraction.schemas import CompanyCandidate
 from app.ingestion.orchestrator import IngestionOrchestrator
 from app.ingestion.persistence.result import PersistenceResult
 from app.models import CollectionStatus
@@ -80,12 +81,23 @@ class FakeProvider:
 
 
 class FakeExtractor:
-    def __init__(self, *, profile: object | Exception, jobs: tuple[object, ...] = ()) -> None:
+    def __init__(
+        self,
+        *,
+        profile: object | Exception,
+        jobs: tuple[object, ...] = (),
+        discovered: tuple[CompanyCandidate, ...] | None = None,
+    ) -> None:
         self.profile = profile
         self.jobs = jobs
+        self.discovered = (
+            (CompanyCandidate(name="Acme", evidence_ids=("acme-home",), confidence=1),)
+            if discovered is None
+            else discovered
+        )
 
-    async def discover(self, _documents: tuple[RawDocument, ...]) -> tuple[object, ...]:
-        return ()
+    async def discover(self, _documents: tuple[RawDocument, ...]) -> tuple[CompanyCandidate, ...]:
+        return self.discovered
 
     async def extract_profile(self, _company: object, _documents: tuple[RawDocument, ...]) -> object:
         if isinstance(self.profile, Exception):
@@ -128,13 +140,16 @@ def orchestrator_for(
     providers: list[FakeProvider],
     profile: object | Exception | None = None,
     jobs: tuple[object, ...] = (),
+    discovered: tuple[CompanyCandidate, ...] | None = None,
 ) -> tuple[IngestionOrchestrator, FakeRuns, FakePersistence]:
     runs = FakeRuns({run.id: run})
     persistence = FakePersistence()
     return (
         IngestionOrchestrator(
             providers=providers,
-            extractor=FakeExtractor(profile=profile or SimpleNamespace(name="Acme"), jobs=jobs),
+            extractor=FakeExtractor(
+                profile=profile or SimpleNamespace(name="Acme"), jobs=jobs, discovered=discovered
+            ),
             batch_builder=FakeBatchBuilder(),
             persistence=persistence,
             runs=runs,
@@ -218,6 +233,36 @@ async def test_provider_failure_with_persisted_data_is_partial() -> None:
     assert result.providers_attempted == ("site", "jobs")
     assert runs.runs[run.id].status is CollectionStatus.PARTIAL
     assert persistence.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_warning_with_persisted_data_is_partial() -> None:
+    run = FakeRun(uuid4())
+    provider = FakeProvider(
+        "site", ProviderResult(documents=(document(),), warnings=("provider_degraded",))
+    )
+    orchestrator, _runs, persistence = orchestrator_for(run, providers=[provider])
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.PARTIAL
+    assert result.error_code == "provider_degraded"
+    assert persistence.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_zero_discovered_companies_fails_without_persistence() -> None:
+    run = FakeRun(uuid4())
+    provider = FakeProvider("site", ProviderResult(documents=(document(),)))
+    orchestrator, _runs, persistence = orchestrator_for(
+        run, providers=[provider], discovered=()
+    )
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.FAILED
+    assert result.error_code == "no_valid_data"
+    assert persistence.calls == 0
 
 
 @pytest.mark.asyncio

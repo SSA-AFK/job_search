@@ -97,6 +97,7 @@ class PersistenceService:
         self.session = session
 
     def persist(self, batch: NormalizedBatch, run_id: UUID) -> PersistenceResult:
+        self._own_write_transaction(run_id)
         try:
             with self.session.begin():
                 self._materialize_outer_transaction()
@@ -133,6 +134,24 @@ class PersistenceService:
                 constraint=None,
                 detail="database integer overflow",
             ) from exc
+
+    def _own_write_transaction(self, run_id: UUID) -> None:
+        transaction = self.session.get_transaction()
+        if transaction is None:
+            return
+        if self.session.new or self.session.dirty or self.session.deleted:
+            raise PersistenceError(
+                run_id=run_id,
+                constraint="session_state",
+                detail="pending_session_changes",
+            )
+        if transaction.origin.name != "AUTOBEGIN":
+            raise PersistenceError(
+                run_id=run_id,
+                constraint="session_state",
+                detail="active_session_transaction",
+            )
+        self.session.rollback()
 
     def _materialize_outer_transaction(self) -> None:
         connection = self.session.connection()
