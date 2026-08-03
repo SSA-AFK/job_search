@@ -27,12 +27,10 @@ class CompanySiteProvider:
             return ProviderResult(documents=())
 
         website = str(query.website)
-        parsed_website = urlsplit(website)
-        host = parsed_website.hostname
-        if host is None:
+        canonical_origin = self._canonical_origin(website)
+        if canonical_origin is None:
             return ProviderResult(documents=())
-        normalized_host = host.lower().rstrip(".")
-        origin = urlunsplit((parsed_website.scheme, parsed_website.netloc, "/", "", ""))
+        origin, normalized_host = canonical_origin
         seeds = tuple(urljoin(origin, path) for path in _SEED_PATHS)
 
         for seed in seeds:
@@ -46,12 +44,18 @@ class CompanySiteProvider:
         fetch_count = 0
         page_limit = min(_MAX_PAGES, query.max_results)
 
+        async def redirect_allowed(target: str) -> bool:
+            candidate = self._normalize_link(origin, target, normalized_host)
+            return candidate is not None and await self._robots_policy.can_fetch(candidate)
+
         while queue and fetch_count < page_limit:
             url, depth = queue.popleft()
             fetch_count += 1
             try:
                 fetched = await self._http_client.get_text(
-                    url, allowed_hosts={normalized_host}
+                    url,
+                    allowed_hosts={normalized_host},
+                    redirect_validator=redirect_allowed,
                 )
             except ProviderError as error:
                 self._warn_once(warnings, f"page_failed:{error.code}")
@@ -106,6 +110,24 @@ class CompanySiteProvider:
             and parsed.username is None
         )
 
+    @staticmethod
+    def _canonical_origin(url: str) -> tuple[str, str] | None:
+        try:
+            parsed = urlsplit(url)
+            port = parsed.port
+        except ValueError:
+            return None
+        host = parsed.hostname
+        scheme = parsed.scheme.lower()
+        if scheme not in {"http", "https"} or host is None or parsed.username is not None:
+            return None
+
+        normalized_host = host.lower().rstrip(".")
+        default_port = 443 if scheme == "https" else 80
+        display_host = f"[{normalized_host}]" if ":" in normalized_host else normalized_host
+        netloc = display_host if port is None or port == default_port else f"{display_host}:{port}"
+        return urlunsplit((scheme, netloc, "/", "", "")), normalized_host
+
     @classmethod
     def _normalize_link(cls, base_url: str, link: str, host: str) -> str | None:
         try:
@@ -123,12 +145,12 @@ class CompanySiteProvider:
             return None
 
         normalized_host = parsed.hostname.lower().rstrip(".")
-        default_port = (parsed.scheme == "http" and port == 80) or (
-            parsed.scheme == "https" and port == 443
-        )
-        netloc = normalized_host if port is None or default_port else f"{normalized_host}:{port}"
+        scheme = parsed.scheme.lower()
+        default_port = (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
+        display_host = f"[{normalized_host}]" if ":" in normalized_host else normalized_host
+        netloc = display_host if port is None or default_port else f"{display_host}:{port}"
         path = parsed.path.rstrip("/") or "/"
-        return urlunsplit((parsed.scheme.lower(), netloc, path, parsed.query, ""))
+        return urlunsplit((scheme, netloc, path, parsed.query, ""))
 
     @staticmethod
     def _eligible_path(path: str) -> bool:

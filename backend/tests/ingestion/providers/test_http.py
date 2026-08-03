@@ -1,6 +1,7 @@
 import asyncio
 import gzip
 from dataclasses import FrozenInstanceError
+from unittest.mock import AsyncMock
 
 import httpcore
 import httpx
@@ -60,6 +61,32 @@ async def test_rejects_redirect_outside_allowlist(safe_client: SafeHttpClient) -
 
     with pytest.raises(ProviderError, match="unsafe_redirect"):
         await safe_client.get_text("https://example.com/a", allowed_hosts={"example.com"})
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_rejects_redirect_before_request_when_provider_policy_disallows(
+    safe_client: SafeHttpClient,
+) -> None:
+    respx.get("https://example.com/about").mock(
+        return_value=httpx.Response(302, headers={"location": "/private"})
+    )
+    forbidden = respx.get("https://example.com/private").mock(
+        return_value=httpx.Response(
+            200, headers={"content-type": "text/plain"}, text="private"
+        )
+    )
+    redirect_validator = AsyncMock(return_value=False)
+
+    with pytest.raises(ProviderError, match="unsafe_redirect"):
+        await safe_client.get_text(
+            "https://example.com/about",
+            allowed_hosts={"example.com"},
+            redirect_validator=redirect_validator,
+        )
+
+    redirect_validator.assert_awaited_once_with("https://example.com/private")
+    assert forbidden.call_count == 0
 
 
 @pytest.mark.anyio

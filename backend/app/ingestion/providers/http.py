@@ -1,7 +1,7 @@
 """Defensive HTTP fetching for ingestion providers."""
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from ipaddress import ip_address
@@ -16,6 +16,7 @@ MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_TEXT_LENGTH = 200_000
 MAX_REDIRECTS = 5
 SUPPORTED_CONTENT_TYPES = frozenset({"text/html", "text/plain", "application/xhtml+xml"})
+RedirectValidator = Callable[[str], Awaitable[bool]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,12 +175,18 @@ class SafeHttpClient:
         self._total_timeout_seconds = total_timeout_seconds
         self._network_backend = network_backend
 
-    async def get_text(self, url: str, *, allowed_hosts: set[str]) -> HttpDocument:
+    async def get_text(
+        self,
+        url: str,
+        *,
+        allowed_hosts: set[str],
+        redirect_validator: RedirectValidator | None = None,
+    ) -> HttpDocument:
         """Fetch an allowlisted public URL, following only validated redirects."""
         normalized_hosts = frozenset(host.lower().rstrip(".") for host in allowed_hosts)
         try:
             async with asyncio.timeout(self._total_timeout_seconds):
-                return await self._get_text(url, normalized_hosts)
+                return await self._get_text(url, normalized_hosts, redirect_validator)
         except TimeoutError as error:
             raise ProviderError(
                 code="total_timeout", retryable=True, detail="request exceeded total timeout"
@@ -191,7 +198,12 @@ class SafeHttpClient:
         except httpx.HTTPError as error:
             raise ProviderError(code="http_error", retryable=True, detail=str(error)) from error
 
-    async def _get_text(self, url: str, allowed_hosts: frozenset[str]) -> HttpDocument:
+    async def _get_text(
+        self,
+        url: str,
+        allowed_hosts: frozenset[str],
+        redirect_validator: RedirectValidator | None,
+    ) -> HttpDocument:
         current_url = await self._validate_url(url, allowed_hosts, error_code="unsafe_url")
         timeout = httpx.Timeout(self._connect_timeout_seconds)
         transport = _PinnedAsyncHTTPTransport(self._network_backend)
@@ -212,11 +224,20 @@ class SafeHttpClient:
                                 retryable=False,
                                 detail="redirect response did not include a Location header",
                             )
-                        current_url = await self._validate_url(
+                        redirected_url = await self._validate_url(
                             str(current_url.url.join(location)),
                             allowed_hosts,
                             error_code="unsafe_redirect",
                         )
+                        if redirect_validator is not None and not await redirect_validator(
+                            str(redirected_url.url)
+                        ):
+                            raise ProviderError(
+                                code="unsafe_redirect",
+                                retryable=False,
+                                detail="redirect target rejected by provider policy",
+                            )
+                        current_url = redirected_url
                         continue
 
                     if response.is_error:

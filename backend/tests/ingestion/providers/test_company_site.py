@@ -1,7 +1,9 @@
 import asyncio
 from unittest.mock import AsyncMock, call
 
+import httpx
 import pytest
+import respx
 from pydantic import ValidationError
 
 from app.ingestion.contracts import ProviderQuery
@@ -90,8 +92,11 @@ async def test_crawls_only_documented_and_discovered_eligible_same_host_pages(
         "https://example.com/careers/openings": page("https://example.com/careers/openings"),
     }
 
-    async def fetch(url: str, *, allowed_hosts: set[str]) -> HttpDocument:
+    async def fetch(
+        url: str, *, allowed_hosts: set[str], redirect_validator: object
+    ) -> HttpDocument:
         assert allowed_hosts == {"example.com"}
+        assert callable(redirect_validator)
         return responses[url]
 
     safe_client.get_text.side_effect = fetch
@@ -122,8 +127,10 @@ async def test_caps_crawl_at_ten_pages(
 ) -> None:
     links = tuple(f"/jobs/{index}" for index in range(20))
 
-    async def fetch(url: str, *, allowed_hosts: set[str]) -> HttpDocument:
-        del allowed_hosts
+    async def fetch(
+        url: str, *, allowed_hosts: set[str], redirect_validator: object
+    ) -> HttpDocument:
+        del allowed_hosts, redirect_validator
         return page(url, links=links if url.endswith("/about") else ())
 
     safe_client.get_text.side_effect = fetch
@@ -140,7 +147,7 @@ async def test_preserves_redirect_result_and_reports_safe_http_redirect_failure(
     provider: CompanySiteProvider, safe_client: AsyncMock
 ) -> None:
     safe_client.get_text.side_effect = [
-        page("https://example.com/about-us", title="About us"),
+        page("https://example.com/about/company", title="About us"),
         ProviderError(code="unsafe_redirect", retryable=False),
         page("https://example.com/careers"),
     ]
@@ -148,7 +155,7 @@ async def test_preserves_redirect_result_and_reports_safe_http_redirect_failure(
     result = await provider.search(company_query())
 
     assert [str(document.url) for document in result.documents] == [
-        "https://example.com/about-us",
+        "https://example.com/about/company",
         "https://example.com/careers",
     ]
     assert result.warnings == ("page_failed:unsafe_redirect",)
@@ -277,3 +284,138 @@ async def test_robots_policy_fetches_once_for_concurrent_same_host_checks() -> N
 
     assert await asyncio.gather(first, second) == [True, True]
     assert safe_client.get_text.await_count == 1
+
+
+@pytest.mark.anyio
+async def test_robots_policy_caches_rules_by_normalized_origin() -> None:
+    safe_client = AsyncMock(spec=SafeHttpClient)
+
+    async def fetch_robots(url: str, *, allowed_hosts: set[str]) -> HttpDocument:
+        assert allowed_hosts == {"example.com"}
+        return HttpDocument(
+            url=url,
+            text="User-agent: *\nAllow: /",
+            content_type="text/plain",
+        )
+
+    safe_client.get_text.side_effect = fetch_robots
+    policy = RobotsPolicy(http_client=safe_client)
+
+    assert await policy.can_fetch("https://example.com/about") is True
+    assert await policy.can_fetch("https://example.com.:443/jobs") is True
+    assert await policy.can_fetch("https://example.com:8443/careers") is True
+    assert await policy.can_fetch("http://example.com/about") is True
+    assert [args.args[0] for args in safe_client.get_text.await_args_list] == [
+        "https://example.com/robots.txt",
+        "https://example.com:8443/robots.txt",
+        "http://example.com/robots.txt",
+    ]
+
+
+@pytest.mark.anyio
+async def test_canonicalizes_configured_origin_before_seed_deduplication(
+    safe_client: AsyncMock, robots_policy: AsyncMock
+) -> None:
+    provider = CompanySiteProvider(http_client=safe_client, robots_policy=robots_policy)
+
+    async def fetch(
+        url: str, *, allowed_hosts: set[str], redirect_validator: object
+    ) -> HttpDocument:
+        assert allowed_hosts == {"example.com"}
+        assert callable(redirect_validator)
+        links = ("https://example.com/about",) if url.endswith("/about") else ()
+        return page(url, links=links)
+
+    safe_client.get_text.side_effect = fetch
+
+    result = await provider.search(company_query("https://example.com.:443/company"))
+
+    assert len(result.documents) == 3
+    assert [args.args[0] for args in safe_client.get_text.await_args_list] == [
+        "https://example.com/about",
+        "https://example.com/jobs",
+        "https://example.com/careers",
+    ]
+
+
+async def public_dns(_host: str) -> list[str]:
+    return ["93.184.216.34"]
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_rejects_robots_disallowed_redirect_before_fetching_target() -> None:
+    client = SafeHttpClient(dns_resolver=public_dns)
+    robots = RobotsPolicy(http_client=client)
+    provider = CompanySiteProvider(http_client=client, robots_policy=robots)
+    respx.get("https://example.com/robots.txt").mock(
+        return_value=httpx.Response(
+            200,
+            headers={"content-type": "text/plain"},
+            text="User-agent: *\nDisallow: /private",
+        )
+    )
+    respx.get("https://example.com/about").mock(
+        return_value=httpx.Response(302, headers={"location": "/private"})
+    )
+    forbidden = respx.get("https://example.com/private").mock(
+        return_value=httpx.Response(
+            200, headers={"content-type": "text/plain"}, text="private"
+        )
+    )
+    respx.get("https://example.com/jobs").mock(
+        return_value=httpx.Response(
+            200, headers={"content-type": "text/plain"}, text="Jobs"
+        )
+    )
+    respx.get("https://example.com/careers").mock(
+        return_value=httpx.Response(
+            200, headers={"content-type": "text/plain"}, text="Careers"
+        )
+    )
+
+    result = await provider.search(company_query())
+
+    assert [str(document.url) for document in result.documents] == [
+        "https://example.com/jobs",
+        "https://example.com/careers",
+    ]
+    assert result.warnings == ("page_failed:unsafe_redirect",)
+    assert forbidden.call_count == 0
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_rejects_ineligible_redirect_before_fetching_target() -> None:
+    client = SafeHttpClient(dns_resolver=public_dns)
+    robots = RobotsPolicy(http_client=client)
+    provider = CompanySiteProvider(http_client=client, robots_policy=robots)
+    respx.get("https://example.com/robots.txt").mock(
+        return_value=httpx.Response(
+            200, headers={"content-type": "text/plain"}, text="User-agent: *\nAllow: /"
+        )
+    )
+    respx.get("https://example.com/about").mock(
+        return_value=httpx.Response(302, headers={"location": "/contact"})
+    )
+    forbidden = respx.get("https://example.com/contact").mock(
+        return_value=httpx.Response(
+            200, headers={"content-type": "text/plain"}, text="Contact"
+        )
+    )
+    respx.get("https://example.com/jobs").mock(
+        return_value=httpx.Response(
+            200, headers={"content-type": "text/plain"}, text="Jobs"
+        )
+    )
+    respx.get("https://example.com/careers").mock(
+        return_value=httpx.Response(
+            200, headers={"content-type": "text/plain"}, text="Careers"
+        )
+    )
+
+    result = await provider.search(company_query())
+
+    assert len(result.documents) == 2
+    assert result.warnings == ("page_failed:unsafe_redirect",)
+    assert forbidden.call_count == 0
