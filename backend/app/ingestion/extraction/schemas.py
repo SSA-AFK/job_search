@@ -64,6 +64,9 @@ class JobCandidate(EvidenceCandidate):
     title: str = Field(min_length=1, max_length=300)
     employment_type: EmploymentType | None = None
     location: str | None = Field(default=None, max_length=300)
+    provider: str | None = Field(default=None, min_length=1, max_length=50)
+    source_raw_id: str | None = Field(default=None, min_length=1, max_length=255)
+    salary: str | None = Field(default=None, min_length=1, max_length=100)
     description: str | None = Field(default=None, max_length=4_000)
 
     @field_validator("description")

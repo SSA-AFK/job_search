@@ -1,0 +1,1 @@
+"""Candidate normalization for ingestion."""
