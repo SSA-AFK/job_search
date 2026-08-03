@@ -9,6 +9,7 @@ description = "AI Company Search API"
 requires-python = ">=3.12"
 dependencies = [
     "alembic",
+    "celery",
     "fastapi",
     "pydantic-settings",
     "python-multipart",
