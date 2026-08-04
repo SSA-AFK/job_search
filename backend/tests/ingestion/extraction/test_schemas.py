@@ -117,6 +117,12 @@ def test_job_candidate_rejects_oversized_apply_url() -> None:
         "http://[::1]/private",
         "https://user:password@example.com/jobs/42",
         "https://localhost/jobs/42",
+        "https://localhost.localdomain/jobs/42",
+        "https://service.internal/jobs/42",
+        "https://service.lan/jobs/42",
+        "https://service.home/jobs/42",
+        "https://home.arpa/jobs/42",
+        "https://service.home.arpa/jobs/42",
     ],
 )
 def test_job_candidate_rejects_statically_unsafe_apply_url(apply_url: str) -> None:
@@ -129,6 +135,26 @@ def test_job_candidate_rejects_statically_unsafe_apply_url(apply_url: str) -> No
                 "confidence": 0.9,
             }
         )
+
+
+@pytest.mark.parametrize(
+    "apply_url",
+    [
+        "https://example.com/jobs/42",
+        "https://8.8.8.8/jobs/42",
+    ],
+)
+def test_job_candidate_accepts_statically_public_apply_url(apply_url: str) -> None:
+    candidate = JobCandidate.model_validate(
+        {
+            "title": "Software Engineer",
+            "apply_url": apply_url,
+            "evidence_ids": ["doc-1"],
+            "confidence": 0.9,
+        }
+    )
+
+    assert str(candidate.apply_url) == apply_url
 
 
 def test_filing_candidate_matches_persisted_filing_vocabulary_and_fields() -> None:

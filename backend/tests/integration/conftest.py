@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import get_session
 from app.ingestion.contracts import Provider
 from app.ingestion.deduplication.semantic import DuplicateDecision
@@ -130,6 +131,7 @@ def zhihu_payload() -> dict[str, object]:
 
 @pytest.fixture
 def integration_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[IntegrationHarness]:
+    monkeypatch.setattr(settings, "collection_enabled", True)
     engine = create_engine(
         f"sqlite:///{tmp_path / 'acceptance.sqlite3'}",
         connect_args={"check_same_thread": False},

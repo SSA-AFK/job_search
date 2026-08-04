@@ -17,6 +17,7 @@ _MAX_DEPTH = 1
 
 class CompanySiteProvider:
     name = "company_site"
+    requires_website = True
 
     def __init__(self, *, http_client: SafeHttpClient, robots_policy: RobotsPolicy) -> None:
         self._http_client = http_client

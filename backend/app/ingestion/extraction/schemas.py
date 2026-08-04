@@ -26,7 +26,17 @@ def _require_statically_public_url(value: HttpUrl) -> HttpUrl:
     host = (value.host or "").lower().rstrip(".")
     if value.username is not None or value.password is not None:
         raise ValueError("URL must be a public URL without credentials")
-    if not host or host == "localhost" or host.endswith((".localhost", ".local")):
+    if not host or host in {"localhost", "home.arpa"} or host.endswith(
+        (
+            ".localhost",
+            ".local",
+            ".localdomain",
+            ".internal",
+            ".lan",
+            ".home",
+            ".home.arpa",
+        )
+    ):
         raise ValueError("URL must be a public URL")
     literal_host = host.removeprefix("[").removesuffix("]")
     try:

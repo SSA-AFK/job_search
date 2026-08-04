@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
+from threading import Barrier, Event, Lock
 
 import httpx
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
+from app.collection.repository import CollectionRepository
 from app.collection.router import get_collection_service
 from app.collection.service import CollectionService
 from app.ingestion.providers.zhihu import ZhihuGlobalSearchProvider
@@ -102,18 +104,80 @@ def test_collection_request_runs_worker_and_persists_searchable_evidence(
 
 def test_concurrent_duplicate_submission_returns_one_active_request(
     integration_harness: IntegrationHarness,
+    monkeypatch,
 ) -> None:
-    release_first_dispatch = Event()
+    first_reads = Barrier(2)
+    winner_committed = Event()
     duplicate_returned = Event()
+    conflicts_recovered = 0
+    dispatched: list[str] = []
+    role_lock = Lock()
+    roles = iter(("winner", "loser"))
+    original_classifier = CollectionService._is_active_request_conflict
+    original_get_active = CollectionRepository.get_active_request
 
-    def dispatch(_run_id) -> str:
-        release_first_dispatch.wait(timeout=5)
+    def record_conflict(error) -> bool:
+        nonlocal conflicts_recovered
+        result = original_classifier(error)
+        conflicts_recovered += int(result)
+        return result
+
+    monkeypatch.setattr(
+        CollectionService,
+        "_is_active_request_conflict",
+        staticmethod(record_conflict),
+    )
+
+    def synchronize_empty_read(
+        repository: CollectionRepository, normalized_query: str
+    ):
+        result = original_get_active(repository, normalized_query)
+        if result is None and not repository.session.info.get("first_read_synchronized"):
+            repository.session.info["first_read_synchronized"] = True
+            # End both read transactions before writes so SQLite produces the
+            # uniqueness conflict instead of a snapshot-upgrade lock error.
+            repository.session.rollback()
+            first_reads.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(
+        CollectionRepository,
+        "get_active_request",
+        synchronize_empty_read,
+    )
+
+    class CoordinatedSession(Session):
+        def __init__(self, role: str) -> None:
+            super().__init__(bind=integration_harness.engine, expire_on_commit=False)
+            self.info["submission_role"] = role
+
+        def commit(self) -> None:
+            creates_request = any(
+                isinstance(record, CollectionRequest) for record in self.new
+            )
+            if creates_request and self.info["submission_role"] == "loser":
+                assert winner_committed.wait(timeout=5)
+            super().commit()
+            if creates_request and self.info["submission_role"] == "winner":
+                winner_committed.set()
+
+    class ObservedCollectionService(CollectionService):
+        def submit(self, query: str):
+            result = super().submit(query)
+            if self.session.info["submission_role"] == "loser":
+                duplicate_returned.set()
+            return result
+
+    def dispatch(run_id) -> str:
+        dispatched.append(str(run_id))
         return "task-duplicate"
 
     def service_dependency():
-        session = integration_harness.session()
+        with role_lock:
+            role = next(roles)
+        session = CoordinatedSession(role)
         try:
-            yield CollectionService(session, dispatch)
+            yield ObservedCollectionService(session, dispatch)
         finally:
             session.close()
 
@@ -123,8 +187,6 @@ def test_concurrent_duplicate_submission_returns_one_active_request(
         response = integration_harness.client.post(
             "/api/v1/collection-requests", json={"query": "Example Technologies"}
         )
-        duplicate_returned.set()
-        release_first_dispatch.set()
         assert response.status_code == 202
         return response.json()
 
@@ -134,7 +196,9 @@ def test_concurrent_duplicate_submission_returns_one_active_request(
         results = (first.result(timeout=10), second.result(timeout=10))
 
     assert duplicate_returned.is_set()
+    assert conflicts_recovered == 1
     assert results[0]["id"] == results[1]["id"]
+    assert len(dispatched) == 1
     assert row_count(integration_harness, CollectionRequest) == 1
     assert row_count(integration_harness, CrawlRun) == 1
 

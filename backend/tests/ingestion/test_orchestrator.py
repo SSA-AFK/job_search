@@ -68,13 +68,22 @@ class FakeRuns:
 
 
 class FakeProvider:
-    def __init__(self, name: str, result: ProviderResult | Exception) -> None:
+    def __init__(
+        self,
+        name: str,
+        result: ProviderResult | Exception,
+        *,
+        requires_website: bool = False,
+    ) -> None:
         self.name = name
         self.result = result
+        self.requires_website = requires_website
         self.calls = 0
+        self.queries: list[ProviderQuery] = []
 
-    async def search(self, _query: ProviderQuery) -> ProviderResult:
+    async def search(self, query: ProviderQuery) -> ProviderResult:
         self.calls += 1
+        self.queries.append(query)
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
@@ -95,16 +104,20 @@ class FakeExtractor:
             if discovered is None
             else discovered
         )
+        self.profile_documents: tuple[RawDocument, ...] = ()
+        self.job_documents: tuple[RawDocument, ...] = ()
 
     async def discover(self, _documents: tuple[RawDocument, ...]) -> tuple[CompanyCandidate, ...]:
         return self.discovered
 
     async def extract_profile(self, _company: object, _documents: tuple[RawDocument, ...]) -> object:
+        self.profile_documents = _documents
         if isinstance(self.profile, Exception):
             raise self.profile
         return self.profile
 
     async def extract_jobs(self, _company: object, _documents: tuple[RawDocument, ...]) -> tuple[object, ...]:
+        self.job_documents = _documents
         return self.jobs
 
 
@@ -130,6 +143,17 @@ def document() -> RawDocument:
         url="https://acme.example/careers",
         title="Careers",
         text="Acme is hiring.",
+        published_at=None,
+    )
+
+
+def website_document() -> RawDocument:
+    return RawDocument(
+        provider="company_site",
+        external_id=None,
+        url="https://acme.example/about",
+        title="About Acme",
+        text="Acme builds reliable systems.",
         published_at=None,
     )
 
@@ -247,6 +271,110 @@ async def test_provider_warning_with_persisted_data_is_partial() -> None:
 
     assert result.status is CollectionStatus.PARTIAL
     assert result.error_code == "provider_degraded"
+    assert persistence.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_website_provider_runs_after_discovery_and_enriches_extraction_documents() -> None:
+    run = FakeRun(uuid4())
+    discovery = FakeProvider("discovery", ProviderResult(documents=(document(),)))
+    company_site = FakeProvider(
+        "company_site",
+        ProviderResult(documents=(website_document(),)),
+        requires_website=True,
+    )
+    selected = CompanyCandidate(
+        name="Acme",
+        website="https://acme.example",
+        evidence_ids=("acme-home",),
+        confidence=1,
+    )
+    orchestrator, _runs, persistence = orchestrator_for(
+        run,
+        providers=[discovery, company_site],
+        discovered=(selected,),
+    )
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.SUCCEEDED
+    assert result.providers_attempted == ("discovery", "company_site")
+    assert result.documents_found == 2
+    assert discovery.calls == 1
+    assert company_site.calls == 1
+    assert str(company_site.queries[0].website) == "https://acme.example/"
+    assert [item.provider for item in orchestrator.extractor.profile_documents] == [  # type: ignore[attr-defined]
+        "site",
+        "company_site",
+    ]
+    assert [item.provider for item in orchestrator.extractor.job_documents] == [  # type: ignore[attr-defined]
+        "site",
+        "company_site",
+    ]
+    assert persistence.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_website_provider_failure_is_partial_with_original_provider_precedence() -> None:
+    run = FakeRun(uuid4())
+    company_site = FakeProvider(
+        "company_site",
+        ProviderError(code="site_timeout", retryable=True),
+        requires_website=True,
+    )
+    discovery = FakeProvider(
+        "discovery",
+        ProviderResult(documents=(document(),), warnings=("discovery_warning",)),
+    )
+    selected = CompanyCandidate(
+        name="Acme",
+        website="https://acme.example",
+        evidence_ids=("acme-home",),
+        confidence=1,
+    )
+    orchestrator, _runs, persistence = orchestrator_for(
+        run,
+        providers=[company_site, discovery],
+        discovered=(selected,),
+    )
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.PARTIAL
+    assert result.error_code == "site_timeout"
+    assert result.providers_attempted == ("company_site", "discovery")
+    assert company_site.calls == 1
+    assert str(company_site.queries[0].website) == "https://acme.example/"
+    assert discovery.calls == 1
+    assert persistence.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_website_provider_is_not_attempted_without_discovered_website() -> None:
+    run = FakeRun(uuid4())
+    discovery = FakeProvider("discovery", ProviderResult(documents=(document(),)))
+    company_site = FakeProvider(
+        "company_site",
+        ProviderResult(documents=(website_document(),)),
+        requires_website=True,
+    )
+    selected = CompanyCandidate(
+        name="Acme",
+        evidence_ids=("acme-home",),
+        confidence=1,
+    )
+    orchestrator, _runs, persistence = orchestrator_for(
+        run,
+        providers=[discovery, company_site],
+        discovered=(selected,),
+    )
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.SUCCEEDED
+    assert result.providers_attempted == ("discovery",)
+    assert discovery.calls == 1
+    assert company_site.calls == 0
     assert persistence.calls == 1
 
 

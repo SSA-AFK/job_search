@@ -1,8 +1,14 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from app.collection.router import get_collection_service
 from app.core.config import settings
 from app.main import create_app
+
+
+@pytest.fixture(autouse=True)
+def enable_collection_for_validation_tests(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "collection_enabled", True)
 
 
 def test_collection_request_query_is_validated_before_service_creation() -> None:
@@ -47,13 +53,16 @@ def test_collection_request_status_rejects_malformed_uuid() -> None:
 
 
 def test_collection_disabled_rejects_valid_submission_without_dispatch(monkeypatch) -> None:
-    class DisabledService:
-        def submit(self, _query: str) -> None:
-            raise AssertionError("disabled collection dispatched work")
-
     monkeypatch.setattr(settings, "collection_enabled", False)
     app = create_app()
-    app.dependency_overrides[get_collection_service] = DisabledService
+    dependency_calls = 0
+
+    def fail_if_service_is_resolved() -> None:
+        nonlocal dependency_calls
+        dependency_calls += 1
+        raise AssertionError("disabled collection constructed its service")
+
+    app.dependency_overrides[get_collection_service] = fail_if_service_is_resolved
 
     with TestClient(app) as client:
         response = client.post(
@@ -61,6 +70,7 @@ def test_collection_disabled_rejects_valid_submission_without_dispatch(monkeypat
         )
 
     assert response.status_code == 503
+    assert dependency_calls == 0
     assert response.json() == {
         "error": {
             "code": "collection_unavailable",

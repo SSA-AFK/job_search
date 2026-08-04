@@ -25,17 +25,25 @@ def get_collection_service(
     return CollectionService(session, dispatch_collection)
 
 
-@router.post("", response_model=CollectionRequestRead, status_code=status.HTTP_202_ACCEPTED)
-def create_collection_request(
-    payload: CollectionRequestCreate,
-    service: Annotated[CollectionService, Depends(get_collection_service)],
-) -> CollectionRequestRead:
+def require_collection_enabled() -> None:
     if not settings.collection_enabled:
         raise DomainError(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             code="collection_unavailable",
             message="Collection service is unavailable.",
         )
+
+
+@router.post(
+    "",
+    response_model=CollectionRequestRead,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_collection_enabled)],
+)
+def create_collection_request(
+    payload: CollectionRequestCreate,
+    service: Annotated[CollectionService, Depends(get_collection_service)],
+) -> CollectionRequestRead:
     return service.submit(payload.query)
 
 

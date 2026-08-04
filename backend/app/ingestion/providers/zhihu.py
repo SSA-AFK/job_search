@@ -1,6 +1,7 @@
 """Zhihu Global Search API provider."""
 
 import asyncio
+import json
 import random
 import re
 from collections.abc import Awaitable, Callable, Mapping
@@ -15,6 +16,8 @@ from app.ingestion.contracts import ProviderQuery, ProviderResult, RawDocument
 from app.ingestion.errors import ProviderError
 
 _RETRY_DELAYS = (0.5, 1.0, 2.0)
+_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+_MAX_RESPONSE_ITEMS = 20
 _HOST_PATTERN = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$",
     re.IGNORECASE,
@@ -72,17 +75,17 @@ class ZhihuGlobalSearchProvider:
             return ProviderResult(documents=())
         try:
             async with self._timeout(self._total_timeout_seconds):
-                response = await self._request(query, filter_expression)
+                content = await self._request(query, filter_expression)
         except TimeoutError as error:
             raise ProviderError(
                 code="request_timeout", retryable=True, detail="request exceeded total timeout"
             ) from error
-        payload = self._parse_json(response)
+        payload = self._parse_json(content)
         return self._parse_result(payload)
 
     async def _request(
         self, query: ProviderQuery, filter_expression: str | None
-    ) -> httpx.Response:
+    ) -> bytes:
         timeout = httpx.Timeout(self._total_timeout_seconds, connect=5.0)
         params: dict[str, str] = {
             "Query": query.query,
@@ -94,15 +97,27 @@ class ZhihuGlobalSearchProvider:
 
         for attempt in range(len(_RETRY_DELAYS) + 1):
             try:
-                async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-                    response = await client.get(
+                async with (
+                    httpx.AsyncClient(timeout=timeout, trust_env=False) as client,
+                    client.stream(
+                        "GET",
                         self.endpoint,
                         params=params,
                         headers={
                             "Authorization": f"Bearer {self._access_secret}",
+                            "Accept-Encoding": "identity",
                             "X-Request-Timestamp": str(int(self._clock().timestamp())),
                             "Content-Type": "application/json",
                         },
+                    ) as response,
+                ):
+                    if response.status_code < 400:
+                        return await self._read_bounded_body(response)
+                    provider_error = ProviderError(
+                        code="http_status",
+                        retryable=response.status_code == 429
+                        or response.status_code >= 500,
+                        detail=f"received HTTP {response.status_code}",
                     )
             except httpx.ConnectTimeout as error:
                 provider_error = ProviderError(
@@ -114,20 +129,48 @@ class ZhihuGlobalSearchProvider:
                 )
             except httpx.HTTPError as error:
                 provider_error = ProviderError(code="http_error", retryable=True, detail=str(error))
-            else:
-                if response.status_code < 400:
-                    return response
-                provider_error = ProviderError(
-                    code="http_status",
-                    retryable=response.status_code == 429 or response.status_code >= 500,
-                    detail=f"received HTTP {response.status_code}",
-                )
 
             if not provider_error.retryable or attempt == len(_RETRY_DELAYS):
                 raise provider_error
             await self._sleep(_RETRY_DELAYS[attempt] + self._jitter())
 
         raise AssertionError("unreachable")
+
+    @staticmethod
+    async def _read_bounded_body(response: httpx.Response) -> bytes:
+        content_encoding = response.headers.get("content-encoding", "identity")
+        if content_encoding.lower().strip() != "identity":
+            raise ProviderError(
+                code="unsupported_content_encoding",
+                retryable=False,
+                detail="compressed responses are not accepted",
+            )
+
+        content_length = response.headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared_length = int(content_length)
+            except ValueError:
+                declared_length = 0
+            if declared_length > _MAX_RESPONSE_BYTES:
+                raise ProviderError(
+                    code="response_too_large",
+                    retryable=False,
+                    detail="response exceeded 2 MiB",
+                )
+
+        chunks: list[bytes] = []
+        total_size = 0
+        async for chunk in response.aiter_bytes():
+            total_size += len(chunk)
+            if total_size > _MAX_RESPONSE_BYTES:
+                raise ProviderError(
+                    code="response_too_large",
+                    retryable=False,
+                    detail="response exceeded 2 MiB",
+                )
+            chunks.append(chunk)
+        return b"".join(chunks)
 
     @staticmethod
     def _filter_expression(allowed_hosts: frozenset[str]) -> str | None:
@@ -147,9 +190,9 @@ class ZhihuGlobalSearchProvider:
         return clauses[0] if len(clauses) == 1 else f"({' OR '.join(clauses)})"
 
     @staticmethod
-    def _parse_json(response: httpx.Response) -> Mapping[str, Any]:
+    def _parse_json(content: bytes) -> Mapping[str, Any]:
         try:
-            payload = response.json()
+            payload = json.loads(content)
         except ValueError as error:
             raise ProviderError(code="invalid_json", retryable=False, detail=str(error)) from error
         if not isinstance(payload, Mapping):
@@ -173,10 +216,15 @@ class ZhihuGlobalSearchProvider:
         if not isinstance(items, list) or not isinstance(has_more, bool):
             raise ProviderError(code="invalid_response", retryable=False, detail="Data fields are invalid")
         try:
-            documents = tuple(cls._parse_document(item) for item in items)
+            documents = tuple(
+                cls._parse_document(item) for item in items[:_MAX_RESPONSE_ITEMS]
+            )
         except (KeyError, TypeError, ValueError, OverflowError, OSError, ValidationError) as error:
             raise ProviderError(code="invalid_response", retryable=False, detail=str(error)) from error
-        return ProviderResult(documents=documents, truncated=has_more)
+        return ProviderResult(
+            documents=documents,
+            truncated=has_more or len(items) > _MAX_RESPONSE_ITEMS,
+        )
 
     @staticmethod
     def _parse_document(item: object) -> RawDocument:

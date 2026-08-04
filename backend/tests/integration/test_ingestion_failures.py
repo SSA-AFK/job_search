@@ -11,7 +11,6 @@ from app.cache.redis import RedisCompanyCache
 from app.companies.repository import CompanyRepository
 from app.companies.router import get_company_service
 from app.companies.service import CompanyService
-from app.ingestion.contracts import ProviderQuery, ProviderResult
 from app.ingestion.errors import ProviderError
 from app.ingestion.persistence.service import PersistenceError, PersistenceService
 from app.ingestion.providers.company_site import CompanySiteProvider
@@ -159,6 +158,8 @@ def test_unsafe_llm_url_never_reaches_persistence(
 
 def test_partial_company_site_failure_persists_valid_evidence(
     integration_harness: IntegrationHarness,
+    zhihu_payload: dict[str, object],
+    respx_mock,
 ) -> None:
     class Robots:
         async def can_fetch(self, _url: str) -> bool:
@@ -179,38 +180,36 @@ def test_partial_company_site_failure_persists_valid_evidence(
                 links=(),
             )
 
-    real_provider = CompanySiteProvider(http_client=Http(), robots_policy=Robots())
-
-    class ConfiguredCompanySite:
-        name = "company_site"
-
-        async def search(self, query: ProviderQuery) -> ProviderResult:
-            return await real_provider.search(
-                query.model_copy(update={"website": "https://www.example.com"})
-            )
+    route = respx_mock.get(ENDPOINT).mock(
+        return_value=httpx.Response(200, json=zhihu_payload)
+    )
+    company_http = Http()
+    company_site = CompanySiteProvider(
+        http_client=company_http,
+        robots_policy=Robots(),
+    )
 
     integration_harness.configure(
-        (ConfiguredCompanySite(),),
-        successful_llm_responses(evidence_id="document-1")[:2]
-        + (
-            json.dumps(
-                {
-                    "companies": [],
-                    "profiles": [],
-                    "jobs": [],
-                    "filings": [],
-                }
-            ),
-        ),
+        (zhihu_provider(), company_site),
+        successful_llm_responses(),
     )
 
     terminal = submit_and_get(integration_harness)
 
     assert terminal["status"] == "partial"
     assert terminal["error_code"] == "provider_warning"
-    assert row_count(integration_harness, SourceDocument) == 2
+    assert route.call_count == 1
+    assert company_http.calls == 3
+    assert row_count(integration_harness, SourceDocument) == 3
     assert row_count(integration_harness, Company) == 1
     assert row_count(integration_harness, CompanySource) == 1
+    assert row_count(integration_harness, JobPosting) == 1
+    assert row_count(integration_harness, JobSource) == 1
+    with integration_harness.session() as session:
+        run = session.scalar(select(CrawlRun))
+        assert run is not None
+        assert run.providers_attempted == ["zhihu_global_search", "company_site"]
+        assert run.error_code == "provider_warning"
 
 
 def test_persistence_failure_rolls_back_every_domain_row(

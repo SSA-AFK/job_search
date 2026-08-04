@@ -1,3 +1,4 @@
+import gzip
 from datetime import UTC, datetime
 
 import httpx
@@ -9,6 +10,7 @@ from app.ingestion.errors import ProviderError
 from app.ingestion.providers.zhihu import ZhihuGlobalSearchProvider
 
 ENDPOINT = "https://developer.zhihu.com/api/v1/content/global_search"
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 
 def zhihu_payload(
@@ -59,6 +61,26 @@ class ExpiredAfterRequest:
         raise TimeoutError
 
 
+class OversizedChunkedBody(httpx.AsyncByteStream):
+    def __init__(self) -> None:
+        self.chunks_read = 0
+
+    async def __aiter__(self):
+        for chunk in (b"x" * MAX_RESPONSE_BYTES, b"y", b"unread"):
+            self.chunks_read += 1
+            yield chunk
+
+
+class EncodedBody(httpx.AsyncByteStream):
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+        self.chunks_read = 0
+
+    async def __aiter__(self):
+        self.chunks_read += 1
+        yield self.content
+
+
 @pytest.fixture
 def frozen_time() -> datetime:
     return datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
@@ -99,6 +121,7 @@ async def test_encodes_filter_and_authentication(
 
     request = route.calls[0].request
     assert request.headers["Authorization"] == "Bearer test-secret"
+    assert request.headers["Accept-Encoding"] == "identity"
     assert request.headers["X-Request-Timestamp"] == str(int(frozen_time.timestamp()))
     assert request.headers["Content-Type"] == "application/json"
     assert request.url.params["Query"] == "Example Company hiring"
@@ -183,6 +206,78 @@ async def test_marks_result_truncated_without_requesting_a_page(
     result = await provider.search(ProviderQuery(query="Example Company"))
 
     assert result.truncated is True
+    assert route.call_count == 1
+
+
+@pytest.mark.anyio
+async def test_caps_returned_items_at_twenty_and_marks_extra_items_truncated(
+    provider: ZhihuGlobalSearchProvider, respx_mock: respx.MockRouter
+) -> None:
+    route = respx_mock.get(ENDPOINT).mock(
+        return_value=httpx.Response(200, json=zhihu_payload(items=21, has_more=False))
+    )
+
+    result = await provider.search(ProviderQuery(query="Example Company", max_results=20))
+
+    assert len(result.documents) == 20
+    assert result.truncated is True
+    assert route.call_count == 1
+
+
+@pytest.mark.anyio
+async def test_rejects_oversized_content_length_before_reading_body(
+    provider: ZhihuGlobalSearchProvider, respx_mock: respx.MockRouter
+) -> None:
+    route = respx_mock.get(ENDPOINT).mock(
+        return_value=httpx.Response(
+            200,
+            headers={"content-length": str(MAX_RESPONSE_BYTES + 1)},
+            content=b"{}",
+        )
+    )
+
+    with pytest.raises(ProviderError, match="response_too_large") as caught:
+        await provider.search(ProviderQuery(query="Example Company"))
+
+    assert caught.value.retryable is False
+    assert route.call_count == 1
+
+
+@pytest.mark.anyio
+async def test_rejects_compressed_response_before_decoding_body(
+    provider: ZhihuGlobalSearchProvider, respx_mock: respx.MockRouter
+) -> None:
+    body = EncodedBody(gzip.compress(b"x" * (MAX_RESPONSE_BYTES + 1)))
+    route = respx_mock.get(ENDPOINT).mock(
+        return_value=httpx.Response(
+            200,
+            headers={"content-encoding": "gzip"},
+            stream=body,
+        )
+    )
+
+    with pytest.raises(ProviderError, match="unsupported_content_encoding") as caught:
+        await provider.search(ProviderQuery(query="Example Company"))
+
+    assert caught.value.retryable is False
+    assert body.chunks_read == 0
+    assert route.call_count == 1
+
+
+@pytest.mark.anyio
+async def test_stops_streaming_chunked_body_at_two_mibibytes(
+    provider: ZhihuGlobalSearchProvider, respx_mock: respx.MockRouter
+) -> None:
+    body = OversizedChunkedBody()
+    route = respx_mock.get(ENDPOINT).mock(
+        return_value=httpx.Response(200, stream=body)
+    )
+
+    with pytest.raises(ProviderError, match="response_too_large") as caught:
+        await provider.search(ProviderQuery(query="Example Company"))
+
+    assert caught.value.retryable is False
+    assert body.chunks_read == 2
     assert route.call_count == 1
 
 

@@ -9,6 +9,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.collection.router import get_collection_service
 from app.collection.service import CollectionService
+from app.core.config import settings
 from app.main import create_app
 from app.models import Base
 
@@ -33,6 +34,11 @@ def client(session: Session) -> Iterator[TestClient]:
     )
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture(autouse=True)
+def enable_collection(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "collection_enabled", True)
 
 
 def test_create_collection_request_returns_accepted(client: TestClient) -> None:

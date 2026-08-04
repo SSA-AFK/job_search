@@ -1,7 +1,7 @@
 """Provider-facing immutable data contracts."""
 
 from datetime import datetime
-from typing import Annotated, Protocol
+from typing import Annotated, Protocol, runtime_checkable
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, HttpUrl
 
@@ -46,3 +46,9 @@ class ProviderResult(BaseModel):
 
 class Provider(Protocol):
     async def search(self, query: ProviderQuery) -> ProviderResult: ...
+
+
+@runtime_checkable
+class WebsiteDependentProvider(Provider, Protocol):
+    @property
+    def requires_website(self) -> bool: ...

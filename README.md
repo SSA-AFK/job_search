@@ -184,7 +184,7 @@ Enable company-site collection only for explicitly approved websites:
 $env:COMPANY_SITE_PROVIDER_ENABLED = "true"
 ```
 
-The factory must supply the approved company website/host to `CompanySiteProvider`. The Provider enforces public HTTP(S) destinations, redirect revalidation, `robots.txt`, same-host crawling, a ten-page cap, and partial page-failure warnings. Leave it disabled when ownership, authorization, or robots compliance is unclear.
+The orchestrator runs Providers in two phases. Discovery Providers first identify the selected company's validated website; only then does it run website-dependent Providers such as `CompanySiteProvider` with that website. The runtime factory constructs and orders both Provider types but does not inject a website into `CompanySiteProvider`. The Provider enforces public HTTP(S) destinations, redirect revalidation, `robots.txt`, same-host crawling, a ten-page cap, and partial page-failure warnings. Enable this phase only when crawling discovery-derived company websites is explicitly authorized, and leave it disabled when ownership, authorization, or robots compliance is unclear.
 
 Unsupported commercial job-board and company-data Providers remain explicitly disabled pending both credentials and collection authorization. Do not add them to `RuntimeComponents.providers`; disabled Providers make no network call and do not appear in `providers_attempted`.
 

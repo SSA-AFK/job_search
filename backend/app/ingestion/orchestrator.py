@@ -2,13 +2,19 @@
 
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
 from sqlalchemy.exc import OperationalError
 
 from app.core.normalization import normalize_name, normalize_url
-from app.ingestion.contracts import Provider, ProviderQuery, RawDocument
+from app.ingestion.contracts import (
+    Provider,
+    ProviderQuery,
+    RawDocument,
+    WebsiteDependentProvider,
+)
 from app.ingestion.deduplication.company import CompanyDeduplicator, CompanyMatch
 from app.ingestion.deduplication.job import JobDeduplicator
 from app.ingestion.errors import ProviderError, RetryableInfrastructureError
@@ -42,6 +48,13 @@ _TERMINAL_STATUSES = {
     CollectionStatus.FAILED,
 }
 _PUBLIC_CODE = re.compile(r"^[a-z][a-z0-9_]{0,49}$")
+
+
+@dataclass(frozen=True)
+class _ProviderOutcome:
+    name: str
+    documents: tuple[RawDocument, ...]
+    issue: str | None
 
 
 class CrawlRunState(RunResultSource, Protocol):
@@ -274,7 +287,18 @@ class IngestionOrchestrator:
             request = self.runs.get_request_for_run(run)
             if request is None:
                 raise _PipelineError("invalid_run")
-            providers_attempted, documents, provider_error = await self._collect(request.query)
+            provider_entries = tuple(enumerate(self.providers))
+            discovery_providers = tuple(
+                entry for entry in provider_entries if not _requires_website(entry[1])
+            )
+            website_providers = tuple(
+                entry for entry in provider_entries if _requires_website(entry[1])
+            )
+            outcomes = await self._collect_providers(
+                discovery_providers,
+                ProviderQuery(query=request.query),
+            )
+            providers_attempted, documents, provider_error = self._merge_outcomes(outcomes)
             if not documents:
                 return self._finish(
                     run,
@@ -298,6 +322,14 @@ class IngestionOrchestrator:
                     error_code=discovery_error,
                 )
             company = CompanyRef(name=selected.name, website=selected.website)
+            if selected.website is not None and website_providers:
+                outcomes.update(
+                    await self._collect_providers(
+                        website_providers,
+                        ProviderQuery(query=request.query, website=selected.website),
+                    )
+                )
+                providers_attempted, documents, provider_error = self._merge_outcomes(outcomes)
             profile = await self.extractor.extract_profile(company, documents)
             jobs = await self.extractor.extract_jobs(company, documents)
             jobs_found = len(jobs)
@@ -331,26 +363,42 @@ class IngestionOrchestrator:
                 error_code=_public_code(exc, "ingestion_failed"),
             )
 
-    async def _collect(
-        self, query: str
-    ) -> tuple[tuple[str, ...], tuple[RawDocument, ...], str | None]:
-        attempted: list[str] = []
-        documents: list[RawDocument] = []
-        first_error: str | None = None
-        provider_query = ProviderQuery(query=query)
-        for provider in self.providers:
-            attempted.append(_provider_name(provider))
+    async def _collect_providers(
+        self,
+        providers: Sequence[tuple[int, Provider]],
+        provider_query: ProviderQuery,
+    ) -> dict[int, _ProviderOutcome]:
+        outcomes: dict[int, _ProviderOutcome] = {}
+        for index, provider in providers:
+            documents: tuple[RawDocument, ...] = ()
+            issue: str | None = None
             try:
                 result = await provider.search(provider_query)
             except ProviderError as exc:
-                first_error = first_error or _public_code(exc, "provider_unavailable")
+                issue = _public_code(exc, "provider_unavailable")
             except Exception:  # noqa: BLE001 - providers are an untrusted external boundary.
-                first_error = first_error or "provider_unavailable"
+                issue = "provider_unavailable"
             else:
-                documents.extend(result.documents)
+                documents = result.documents
                 for warning in result.warnings:
-                    first_error = first_error or _warning_code(warning)
-        return tuple(attempted), tuple(documents), first_error
+                    issue = issue or _warning_code(warning)
+            outcomes[index] = _ProviderOutcome(
+                name=_provider_name(provider),
+                documents=documents,
+                issue=issue,
+            )
+        return outcomes
+
+    @staticmethod
+    def _merge_outcomes(
+        outcomes: dict[int, _ProviderOutcome],
+    ) -> tuple[tuple[str, ...], tuple[RawDocument, ...], str | None]:
+        ordered = tuple(outcomes[index] for index in sorted(outcomes))
+        return (
+            tuple(outcome.name for outcome in ordered),
+            tuple(document for outcome in ordered for document in outcome.documents),
+            next((outcome.issue for outcome in ordered if outcome.issue is not None), None),
+        )
 
     def _finish(
         self,
@@ -395,6 +443,13 @@ class _PipelineError(Exception):
 def _provider_name(provider: Provider) -> str:
     value = getattr(provider, "name", type(provider).__name__)
     return str(value)[:50]
+
+
+def _requires_website(provider: Provider) -> bool:
+    return (
+        isinstance(provider, WebsiteDependentProvider)
+        and provider.requires_website is True
+    )
 
 
 def _public_code(error: Exception, fallback: str) -> str:
