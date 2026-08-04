@@ -16,7 +16,7 @@ This is the living delivery document for the AI Company Search project. It is th
 |----------|---------|--------|
 | [`specs/2026-07-31-ai-company-search-agent-design.md`](specs/2026-07-31-ai-company-search-agent-design.md) | Product, architecture, contracts, data model, and acceptance criteria | Approved |
 | [`plans/2026-07-31-company-search-web-foundation.md`](plans/2026-07-31-company-search-web-foundation.md) | Stage one implementation plan | Executed and integrated locally into `main` |
-| [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31-company-search-ingestion-pipeline.md) | Stage two implementation plan | Tasks 1-9 complete; Task 10 starting |
+| [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31-company-search-ingestion-pipeline.md) | Stage two implementation plan | Tasks 1-10 complete; Task 11 starting |
 | [`../zhihu.md`](../../zhihu.md) | Supplied Zhihu Global Search API contract | Reference |
 
 ## Current Snapshot
@@ -25,13 +25,13 @@ This is the living delivery document for the AI Company Search project. It is th
 |-------|-------|
 | Overall status | Stage one complete; stage two in progress |
 | Current stage | Stage two - Asynchronous ingestion pipeline |
-| Current task | Task 10 - Optional Redis caching and invalidation |
+| Current task | Task 11 - Frontend collection polling |
 | Execution method | Subagent-Driven Development |
 | Active branch/worktree | `codex/company-search-ingestion-pipeline` at `.worktrees/codex-company-search-ingestion-pipeline` |
 | Stage one progress | 8/8 tasks complete; completion gate passed |
-| Stage two progress | 9/12 tasks complete |
-| Last verified artifact state | Stage two Task 9 implementation and two scoped fix reviews through `bcaf218` |
-| Next action | Implement and independently review stage two Task 10 |
+| Stage two progress | 10/12 tasks complete |
+| Last verified artifact state | Stage two Task 10 implementation and scoped fix review through `7c2dd72` |
+| Next action | Implement and independently review stage two Task 11 |
 
 ## Delivery Sequence
 
@@ -88,8 +88,8 @@ Plan: [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31
 | 7 | Transactional idempotent persistence | Complete | `6a404ca`, `18726ab`, `fdadd26`, `90132b4`, `b9da944` | Approved after fix rounds 1-4 | Task 6/7 focused 125 passed; full pytest 247 passed/2 deselected; mypy and Ruff passed |
 | 8 | Orchestrator and terminal-state classification | Complete | `102b154..5c593da` | Approved after fix rounds 1-4; one deferred Minor | focused builder/runtime 14 passed; ingestion/collection 197 passed; full pytest 280 passed/2 deselected; mypy and Ruff passed |
 | 9 | Celery tasks, daily refresh, and job expiration | Complete | `f253f17`, `1e94c0e`, `bcaf218` | Approved after fix rounds 1-2; three deferred Minors | tasks/collection 24 passed; ingestion 190 passed; full pytest 297 passed/2 deselected; Ruff passed; scoped mypy retains one pre-existing core error |
-| 10 | Optional Redis caching and invalidation | Ready | - | - | - |
-| 11 | Frontend collection polling | Pending Task 10 | - | - | - |
+| 10 | Optional Redis caching and invalidation | Complete | `d49ba63`, `7c2dd72` | Approved after fix round 1 | cache 12 passed; cache/company/persistence 54 passed; full pytest 309 passed/2 deselected; Ruff and scoped mypy passed |
+| 11 | Frontend collection polling | Ready | - | - | - |
 | 12 | End-to-end failure verification and runbook | Pending Task 11 | - | - | - |
 
 ### Stage Two Gate
@@ -173,6 +173,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-08-03 | Stage two Task 7 | Transactional/idempotent persistence and four scoped fix re-reviews | PASS: Task 6/7 focused 125 passed; full pytest 247 passed/2 deselected; mypy/Ruff clean; race-safe savepoints, fallback identity index, stale ordering, deep immutability, DB bounds, and audited rollback verified |
 | 2026-08-03 | Stage two Task 8 | Traceable orchestration and four scoped fix re-reviews | PASS: focused builder/runtime 14 passed; ingestion/collection 197 passed; full pytest 280 passed/2 deselected; mypy/Ruff clean; terminal synchronization, discovery, warnings, evidence provenance, isolated sessions, and fresh-worker idempotency verified; one Minor deferred |
 | 2026-08-03 | Stage two Task 9 | Celery tasks, daily refresh, job expiration, and two scoped fix re-reviews | PASS: tasks/collection 24 passed; ingestion 190 passed; full pytest 297 passed/2 deselected; Ruff clean; Redis transport, fresh-worker registration, normalized-query race recovery, fresh-session retry recovery, same-run retry, and exhaustion terminalization verified; three Minors deferred |
+| 2026-08-04 | Stage two Task 10 | Optional Redis cache-aside queries and transactional invalidation with scoped fix re-review | PASS: cache 12 passed; cache/company/persistence 54 passed; full pytest 309 passed/2 deselected; Ruff/scoped mypy clean; exact TTLs, Pydantic serialization, bounded degraded mode, atomic version-token writes, and post-commit invalidation verified |
 
 ## Iteration History
 
@@ -203,6 +204,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-08-03 | Stage two Task 7 | Added persistence-ready immutable batch contracts and one-transaction upserts for documents, evidence, companies, jobs, sources, and filings; four review rounds added race-safe savepoint recovery, null-external document uniqueness, stale-write protection, deep bounds, and audited numeric overflow handling | Build the orchestrator and terminal-state classification |
 | 2026-08-03 | Stage two Task 8 | Added discovery-first provider orchestration, validated batch composition, synchronized terminal state, deterministic partial/failure classification, SQLAlchemy dedup repositories, and distinct-session runtime composition; four review rounds closed transaction ownership, provenance, warning, discovery, and fresh-worker idempotency gaps | Wire Celery tasks and daily maintenance |
 | 2026-08-03 | Stage two Task 9 | Added Redis-capable Celery wiring, registered collection and maintenance tasks, exact daily refresh/expiration rules, normalized-query race recovery, bounded same-run retries, and synchronized exhaustion failure; two review rounds closed deployment registration, session cleanup, and infrastructure-state recovery gaps | Add optional Redis query caching and transactional invalidation |
+| 2026-08-04 | Stage two Task 10 | Added optional cache-aside list/detail/job responses, canonical versioned keys, exact TTLs, warning-only Redis degradation, and post-commit invalidation; review round 1 added bounded timeouts, atomic version-token writes, and partial-failure-safe invalidation ordering | Implement frontend collection polling |
 
 ## Update Template
 
