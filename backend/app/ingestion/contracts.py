@@ -52,3 +52,6 @@ class Provider(Protocol):
 class WebsiteDependentProvider(Provider, Protocol):
     @property
     def requires_website(self) -> bool: ...
+
+    @property
+    def approved_hosts(self) -> frozenset[str]: ...

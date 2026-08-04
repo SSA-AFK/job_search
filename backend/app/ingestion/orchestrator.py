@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
+from pydantic import HttpUrl
 from sqlalchemy.exc import OperationalError
 
 from app.core.normalization import normalize_name, normalize_url
@@ -323,13 +324,27 @@ class IngestionOrchestrator:
                 )
             company = CompanyRef(name=selected.name, website=selected.website)
             if selected.website is not None and website_providers:
-                outcomes.update(
-                    await self._collect_providers(
-                        website_providers,
-                        ProviderQuery(query=request.query, website=selected.website),
-                    )
+                website_host = _normalized_website_host(selected.website)
+                approved_website_providers = tuple(
+                    entry
+                    for entry in website_providers
+                    if website_host is not None
+                    and _provider_approves_host(entry[1], website_host)
                 )
-                providers_attempted, documents, provider_error = self._merge_outcomes(outcomes)
+                if website_host is not None and approved_website_providers:
+                    outcomes.update(
+                        await self._collect_providers(
+                            approved_website_providers,
+                            ProviderQuery(
+                                query=request.query,
+                                website=selected.website,
+                                allowed_hosts=frozenset({website_host}),
+                            ),
+                        )
+                    )
+                    providers_attempted, documents, provider_error = self._merge_outcomes(
+                        outcomes
+                    )
             profile = await self.extractor.extract_profile(company, documents)
             jobs = await self.extractor.extract_jobs(company, documents)
             jobs_found = len(jobs)
@@ -446,10 +461,19 @@ def _provider_name(provider: Provider) -> str:
 
 
 def _requires_website(provider: Provider) -> bool:
-    return (
-        isinstance(provider, WebsiteDependentProvider)
-        and provider.requires_website is True
-    )
+    return getattr(provider, "requires_website", False) is True
+
+
+def _normalized_website_host(website: HttpUrl) -> str | None:
+    host = website.host
+    if host is None:
+        return None
+    normalized = host.lower().rstrip(".")
+    return normalized or None
+
+
+def _provider_approves_host(provider: Provider, host: str) -> bool:
+    return isinstance(provider, WebsiteDependentProvider) and host in provider.approved_hosts
 
 
 def _public_code(error: Exception, fallback: str) -> str:

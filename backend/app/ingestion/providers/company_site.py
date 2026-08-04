@@ -19,9 +19,20 @@ class CompanySiteProvider:
     name = "company_site"
     requires_website = True
 
-    def __init__(self, *, http_client: SafeHttpClient, robots_policy: RobotsPolicy) -> None:
+    def __init__(
+        self,
+        *,
+        http_client: SafeHttpClient,
+        robots_policy: RobotsPolicy,
+        approved_hosts: frozenset[str],
+    ) -> None:
         self._http_client = http_client
         self._robots_policy = robots_policy
+        self.approved_hosts = frozenset(
+            normalized
+            for host in approved_hosts
+            if (normalized := host.strip().lower().rstrip("."))
+        )
 
     async def search(self, query: ProviderQuery) -> ProviderResult:
         if query.website is None:
@@ -32,6 +43,14 @@ class CompanySiteProvider:
         if canonical_origin is None:
             return ProviderResult(documents=())
         origin, normalized_host = canonical_origin
+        query_allowed_hosts = frozenset(
+            host.lower().rstrip(".") for host in query.allowed_hosts
+        )
+        if (
+            normalized_host not in self.approved_hosts
+            or normalized_host not in query_allowed_hosts
+        ):
+            return ProviderResult(documents=())
         seeds = tuple(urljoin(origin, path) for path in _SEED_PATHS)
 
         for seed in seeds:

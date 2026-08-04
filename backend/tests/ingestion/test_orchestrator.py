@@ -74,10 +74,12 @@ class FakeProvider:
         result: ProviderResult | Exception,
         *,
         requires_website: bool = False,
+        approved_hosts: frozenset[str] = frozenset(),
     ) -> None:
         self.name = name
         self.result = result
         self.requires_website = requires_website
+        self.approved_hosts = approved_hosts
         self.calls = 0
         self.queries: list[ProviderQuery] = []
 
@@ -282,6 +284,7 @@ async def test_website_provider_runs_after_discovery_and_enriches_extraction_doc
         "company_site",
         ProviderResult(documents=(website_document(),)),
         requires_website=True,
+        approved_hosts=frozenset({"acme.example"}),
     )
     selected = CompanyCandidate(
         name="Acme",
@@ -303,6 +306,7 @@ async def test_website_provider_runs_after_discovery_and_enriches_extraction_doc
     assert discovery.calls == 1
     assert company_site.calls == 1
     assert str(company_site.queries[0].website) == "https://acme.example/"
+    assert company_site.queries[0].allowed_hosts == frozenset({"acme.example"})
     assert [item.provider for item in orchestrator.extractor.profile_documents] == [  # type: ignore[attr-defined]
         "site",
         "company_site",
@@ -321,6 +325,7 @@ async def test_website_provider_failure_is_partial_with_original_provider_preced
         "company_site",
         ProviderError(code="site_timeout", retryable=True),
         requires_website=True,
+        approved_hosts=frozenset({"acme.example"}),
     )
     discovery = FakeProvider(
         "discovery",
@@ -357,6 +362,7 @@ async def test_website_provider_is_not_attempted_without_discovered_website() ->
         "company_site",
         ProviderResult(documents=(website_document(),)),
         requires_website=True,
+        approved_hosts=frozenset({"acme.example"}),
     )
     selected = CompanyCandidate(
         name="Acme",
@@ -373,6 +379,38 @@ async def test_website_provider_is_not_attempted_without_discovered_website() ->
 
     assert result.status is CollectionStatus.SUCCEEDED
     assert result.providers_attempted == ("discovery",)
+    assert discovery.calls == 1
+    assert company_site.calls == 0
+    assert persistence.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_unapproved_discovered_website_does_not_attempt_website_provider() -> None:
+    run = FakeRun(uuid4())
+    discovery = FakeProvider("discovery", ProviderResult(documents=(document(),)))
+    company_site = FakeProvider(
+        "company_site",
+        ProviderResult(documents=(website_document(),)),
+        requires_website=True,
+        approved_hosts=frozenset({"approved.example"}),
+    )
+    selected = CompanyCandidate(
+        name="Acme",
+        website="https://acme.example",
+        evidence_ids=("acme-home",),
+        confidence=1,
+    )
+    orchestrator, _runs, persistence = orchestrator_for(
+        run,
+        providers=[discovery, company_site],
+        discovered=(selected,),
+    )
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.SUCCEEDED
+    assert result.providers_attempted == ("discovery",)
+    assert result.documents_found == 1
     assert discovery.calls == 1
     assert company_site.calls == 0
     assert persistence.calls == 1

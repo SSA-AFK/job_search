@@ -182,9 +182,10 @@ Enable company-site collection only for explicitly approved websites:
 
 ```powershell
 $env:COMPANY_SITE_PROVIDER_ENABLED = "true"
+$env:COMPANY_SITE_APPROVED_HOSTS = "www.example.com,careers.example.com"
 ```
 
-The orchestrator runs Providers in two phases. Discovery Providers first identify the selected company's validated website; only then does it run website-dependent Providers such as `CompanySiteProvider` with that website. The runtime factory constructs and orders both Provider types but does not inject a website into `CompanySiteProvider`. The Provider enforces public HTTP(S) destinations, redirect revalidation, `robots.txt`, same-host crawling, a ten-page cap, and partial page-failure warnings. Enable this phase only when crawling discovery-derived company websites is explicitly authorized, and leave it disabled when ownership, authorization, or robots compliance is unclear.
+The orchestrator runs Providers in two phases. Discovery Providers first identify a candidate website for the selected company. The runtime factory must parse `COMPANY_SITE_APPROVED_HOSTS` as exact hostnames and pass that trusted set to `CompanySiteProvider`; it must refuse enabled startup when the set is empty or invalid. The orchestrator invokes a website-dependent Provider only when the candidate host exactly matches that Provider's operator-approved set, and passes only the matched host through `ProviderQuery.allowed_hosts`. `CompanySiteProvider` enforces both authorization checks again before robots or HTTP work, then enforces public HTTP(S) destinations, redirect revalidation, `robots.txt`, same-host crawling, a ten-page cap, and partial page-failure warnings. LLM output never expands the allowlist. Leave this phase disabled when ownership, authorization, or robots compliance is unclear.
 
 Unsupported commercial job-board and company-data Providers remain explicitly disabled pending both credentials and collection authorization. Do not add them to `RuntimeComponents.providers`; disabled Providers make no network call and do not appear in `providers_attempted`.
 

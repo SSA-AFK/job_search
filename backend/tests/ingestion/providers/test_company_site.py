@@ -13,11 +13,15 @@ from app.ingestion.providers.http import HttpDocument, SafeHttpClient
 from app.ingestion.providers.robots import RobotsPolicy
 
 
-def company_query(website: str = "https://example.com") -> ProviderQuery:
+def company_query(
+    website: str = "https://example.com",
+    *,
+    allowed_hosts: frozenset[str] = frozenset({"example.com"}),
+) -> ProviderQuery:
     return ProviderQuery(
         query="Example Company",
         website=website,
-        allowed_hosts=frozenset({"evil.test"}),
+        allowed_hosts=allowed_hosts,
     )
 
 
@@ -51,7 +55,41 @@ def robots_policy() -> AsyncMock:
 
 @pytest.fixture
 def provider(safe_client: AsyncMock, robots_policy: AsyncMock) -> CompanySiteProvider:
-    return CompanySiteProvider(http_client=safe_client, robots_policy=robots_policy)
+    return CompanySiteProvider(
+        http_client=safe_client,
+        robots_policy=robots_policy,
+        approved_hosts=frozenset({"example.com"}),
+    )
+
+
+@pytest.mark.anyio
+async def test_does_not_fetch_candidate_outside_operator_approved_hosts(
+    safe_client: AsyncMock, robots_policy: AsyncMock
+) -> None:
+    provider = CompanySiteProvider(
+        http_client=safe_client,
+        robots_policy=robots_policy,
+        approved_hosts=frozenset({"approved.example"}),
+    )
+
+    result = await provider.search(company_query())
+
+    assert result.documents == ()
+    robots_policy.can_fetch.assert_not_awaited()
+    safe_client.get_text.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_does_not_fetch_candidate_missing_from_trusted_query_allowlist(
+    provider: CompanySiteProvider, safe_client: AsyncMock, robots_policy: AsyncMock
+) -> None:
+    result = await provider.search(
+        company_query(allowed_hosts=frozenset({"other.example"}))
+    )
+
+    assert result.documents == ()
+    robots_policy.can_fetch.assert_not_awaited()
+    safe_client.get_text.assert_not_awaited()
 
 
 @pytest.mark.anyio
@@ -339,7 +377,11 @@ async def test_robots_policy_keeps_explicit_zero_port_as_distinct_origin() -> No
 async def test_canonicalizes_configured_origin_before_seed_deduplication(
     safe_client: AsyncMock, robots_policy: AsyncMock
 ) -> None:
-    provider = CompanySiteProvider(http_client=safe_client, robots_policy=robots_policy)
+    provider = CompanySiteProvider(
+        http_client=safe_client,
+        robots_policy=robots_policy,
+        approved_hosts=frozenset({"example.com"}),
+    )
 
     async def fetch(
         url: str, *, allowed_hosts: set[str], redirect_validator: object
@@ -370,7 +412,11 @@ async def public_dns(_host: str) -> list[str]:
 async def test_rejects_robots_disallowed_redirect_before_fetching_target() -> None:
     client = SafeHttpClient(dns_resolver=public_dns)
     robots = RobotsPolicy(http_client=client)
-    provider = CompanySiteProvider(http_client=client, robots_policy=robots)
+    provider = CompanySiteProvider(
+        http_client=client,
+        robots_policy=robots,
+        approved_hosts=frozenset({"example.com"}),
+    )
     respx.get("https://example.com/robots.txt").mock(
         return_value=httpx.Response(
             200,
@@ -412,7 +458,11 @@ async def test_rejects_robots_disallowed_redirect_before_fetching_target() -> No
 async def test_rejects_ineligible_redirect_before_fetching_target() -> None:
     client = SafeHttpClient(dns_resolver=public_dns)
     robots = RobotsPolicy(http_client=client)
-    provider = CompanySiteProvider(http_client=client, robots_policy=robots)
+    provider = CompanySiteProvider(
+        http_client=client,
+        robots_policy=robots,
+        approved_hosts=frozenset({"example.com"}),
+    )
     respx.get("https://example.com/robots.txt").mock(
         return_value=httpx.Response(
             200, headers={"content-type": "text/plain"}, text="User-agent: *\nAllow: /"

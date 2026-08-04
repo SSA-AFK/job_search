@@ -187,6 +187,7 @@ def test_partial_company_site_failure_persists_valid_evidence(
     company_site = CompanySiteProvider(
         http_client=company_http,
         robots_policy=Robots(),
+        approved_hosts=frozenset({"www.example.com"}),
     )
 
     integration_harness.configure(
@@ -210,6 +211,54 @@ def test_partial_company_site_failure_persists_valid_evidence(
         assert run is not None
         assert run.providers_attempted == ["zhihu_global_search", "company_site"]
         assert run.error_code == "provider_warning"
+
+
+def test_unapproved_discovered_company_site_never_reaches_http(
+    integration_harness: IntegrationHarness,
+    zhihu_payload: dict[str, object],
+    respx_mock,
+) -> None:
+    class Robots:
+        calls = 0
+
+        async def can_fetch(self, _url: str) -> bool:
+            self.calls += 1
+            raise AssertionError("unapproved website reached robots policy")
+
+    class Http:
+        calls = 0
+
+        async def get_text(self, _url: str, **_kwargs) -> HttpDocument:
+            self.calls += 1
+            raise AssertionError("unapproved website reached HTTP")
+
+    route = respx_mock.get(ENDPOINT).mock(
+        return_value=httpx.Response(200, json=zhihu_payload)
+    )
+    company_http = Http()
+    robots = Robots()
+    company_site = CompanySiteProvider(
+        http_client=company_http,
+        robots_policy=robots,
+        approved_hosts=frozenset({"approved.example"}),
+    )
+    integration_harness.configure(
+        (zhihu_provider(), company_site),
+        successful_llm_responses(),
+    )
+
+    terminal = submit_and_get(integration_harness)
+
+    assert terminal["status"] == "succeeded"
+    assert terminal["error_code"] is None
+    assert route.call_count == 1
+    assert robots.calls == 0
+    assert company_http.calls == 0
+    assert row_count(integration_harness, SourceDocument) == 1
+    with integration_harness.session() as session:
+        run = session.scalar(select(CrawlRun))
+        assert run is not None
+        assert run.providers_attempted == ["zhihu_global_search"]
 
 
 def test_persistence_failure_rolls_back_every_domain_row(
