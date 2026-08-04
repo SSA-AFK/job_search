@@ -2,6 +2,7 @@ import type {
   CompanyDetail,
   CompanyListItem,
   CompanySearchParams,
+  CollectionRequest,
   JobListItem,
   Page,
 } from "./types";
@@ -73,12 +74,19 @@ export const api = {
     if (!response.ok) throw await apiError(response);
     return (await response.json()) as Page<JobListItem>;
   },
-  async createCollectionRequest(query: string): Promise<void> {
+  async createCollectionRequest(query: string, signal?: AbortSignal): Promise<CollectionRequest> {
     const response = await fetch("/api/v1/collection-requests", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query: query.trim() }),
+      signal,
     });
     if (!response.ok) throw await apiError(response);
+    return (await response.json()) as CollectionRequest;
+  },
+  async getCollectionRequest(requestId: string, signal?: AbortSignal): Promise<CollectionRequest> {
+    const response = await fetch(`/api/v1/collection-requests/${encodeURIComponent(requestId)}`, { signal });
+    if (!response.ok) throw await apiError(response);
+    return (await response.json()) as CollectionRequest;
   },
 };

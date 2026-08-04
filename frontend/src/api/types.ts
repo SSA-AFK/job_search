@@ -50,6 +50,20 @@ export type Page<T> = {
   total: number;
 };
 
+export type CollectionRequestStatus = "queued" | "running" | "partial" | "succeeded" | "failed";
+
+export type CollectionRequest = {
+  id: string;
+  query: string;
+  normalized_query: string;
+  status: CollectionRequestStatus;
+  company_id: string | null;
+  error_code: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type FilingItem = {
   filing_type: "icp" | "algorithm" | "business_license";
   filing_number: string;

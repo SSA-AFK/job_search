@@ -173,7 +173,7 @@ img.company-logo { border: 1px solid var(--border); padding: 5px; }
 
 .result-message p { max-width: 65ch; margin: 7px 0 0; color: var(--muted); font-size: 0.875rem; line-height: 1.5; }
 
-.collection-status { min-height: 150px; margin-top: 28px; padding: 28px; border-radius: 8px; background: var(--surface); }
+.collection-status { min-height: 150px; display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-top: 28px; padding: 28px; border-radius: 8px; background: var(--surface); }
 
 .collection-status h2 { margin: 0; font-size: 1rem; }
 
@@ -299,7 +299,7 @@ img.detail-logo { border: 1px solid var(--border); padding: 7px; }
   .company-website, .website-unavailable { grid-column: 2; justify-self: start; align-self: start; margin-top: -4px; }
   .result-message { align-items: flex-start; flex-direction: column; padding: 22px; }
   .secondary-button { width: 100%; }
-  .collection-status { padding: 22px; }
+  .collection-status { align-items: flex-start; flex-direction: column; padding: 22px; }
   .detail-workspace { padding-block: 14px 44px; }
   .detail-identity { grid-template-columns: 52px minmax(0, 1fr); gap: 13px; }
   .detail-logo { width: 52px; height: 52px; }
