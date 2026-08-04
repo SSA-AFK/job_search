@@ -23,15 +23,15 @@ This is the living delivery document for the AI Company Search project. It is th
 
 | Field | Value |
 |-------|-------|
-| Overall status | Stage one complete; stage two task execution complete; completion review blocked |
+| Overall status | Stage one complete; stage two complete; integration decision pending |
 | Current stage | Stage two - Asynchronous ingestion pipeline |
-| Current task | Stage two whole-branch review and completion gate |
+| Current task | Integration decision |
 | Execution method | Subagent-Driven Development |
 | Active branch/worktree | `codex/company-search-ingestion-pipeline` at `.worktrees/codex-company-search-ingestion-pipeline` |
 | Stage one progress | 8/8 tasks complete; completion gate passed |
-| Stage two progress | 12/12 tasks complete; final verification green; two merge-blocking review findings open |
-| Last verified artifact state | Final fix wave through `5152155`; backend 398 passed/2 deselected; official scoped re-review not ready to merge |
-| Next action | Decide whether to authorize one additional targeted repair for reconciliation atomicity and employment-type preservation |
+| Stage two progress | 12/12 tasks complete; completion gate passed |
+| Last verified artifact state | Authorized targeted repair through `1060f96`; backend 414 passed/2 deselected; official scoped re-review ready to merge |
+| Next action | Run final current-HEAD verification and choose local merge, pull request, or branch preservation |
 
 ## Delivery Sequence
 
@@ -177,6 +177,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-08-04 | Stage two Task 11 | Frontend collection polling with three scoped fix re-reviews | PASS: focused Vitest 26 passed; full Vitest 54 passed; build passed; desktop/mobile Playwright passed; exact cadence, independent deadline, StrictMode single submission, Unicode-normalized bounded sessions, manual recovery, and responsive layout verified |
 | 2026-08-04 | Stage two Task 12 | End-to-end failure verification, runbook, and two scoped fix re-reviews | PASS: Ruff clean; mypy 69 files; full pytest 347 passed/2 deselected; integration 12 passed; performance 2 passed; migrations/seed 19 passed; Vitest 54 passed; build passed; Playwright 9 passed; opt-in collection, deterministic conflicts, bounded Zhihu responses, two-phase company-site collection, and operator-owned host authorization verified; two Minors deferred |
 | 2026-08-04 | Stage two final review fix wave | Ten Important findings plus scoped concurrency/security follow-ups | BLOCKED: implementation gates pass (Ruff, mypy 71 files, backend 398 passed/2 deselected, integration 12, performance 2, migrations/seed 21, Vitest 54, build, Playwright 9), but official scoped review found a reconciliation race and employment-type loss |
+| 2026-08-04 | Stage two authorized targeted repair | Atomic reconciliation, employment-type preservation, and two scoped review rounds | PASS: Ruff clean; mypy 71 files; backend 414 passed/2 deselected; integration 12; performance 2; migrations/seed 24; Vitest 55; build passed; Playwright 9; official scoped re-review found no Critical/Important |
 
 ## Iteration History
 
@@ -211,6 +212,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-08-04 | Stage two Task 11 | Added typed collection polling, exact capped backoff, public status UI, manual refresh, and success navigation; three review rounds added independent deadlines, durable StrictMode-safe request sessions, full Unicode normalization, capacity/TTL policy, transport recovery, and terminal manual persistence | Verify end-to-end failure modes and update the runbook |
 | 2026-08-04 | Stage two Task 12 | Added real API-to-worker-to-persistence acceptance coverage and operating documentation; two review rounds closed opt-in gating, production company-site reachability, response bounds, deterministic conflict recovery, local URL aliases, and LLM-controlled outbound authorization | Run the stage two whole-branch review and completion gate |
 | 2026-08-04 | Stage two whole-branch review | Implemented the single approved final fix wave and passed all current-HEAD verification; official scoped re-review closed nine original findings but retained one reconciliation atomicity defect and found employment-type loss in production deduplication | Await authorization for an additional targeted repair; do not merge `5152155` as-is |
+| 2026-08-04 | Stage two authorized targeted repair | Added atomic run-to-request reconciliation locking and first-class part-time/temporary job types; the second scoped round corrected SQLite FK-preserving migration, PostgreSQL lock order, and frontend contracts | Completion review approved; run final current-HEAD verification and choose integration path |
 
 ## Update Template
 
