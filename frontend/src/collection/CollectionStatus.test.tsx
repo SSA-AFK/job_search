@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserRouter, Route, Routes, useLocation } from "react-router-dom";
 
 import type { CompanyListItem, CollectionRequest } from "../api/types";
+import { createCollectionRegistry, type CollectionRegistry } from "./polling";
 import { SearchPage } from "../search/SearchPage";
 
 const company: CompanyListItem = {
@@ -53,24 +54,24 @@ function Location() {
   return <output data-testid="location">{location.pathname}</output>;
 }
 
-function renderSearch(query = "Example company") {
+function renderSearch(query = "Example company", collectionRegistry: CollectionRegistry = createCollectionRegistry()) {
   window.history.replaceState({}, "", `/companies?q=${encodeURIComponent(query)}`);
   return render(
     <BrowserRouter>
       <Routes>
-        <Route path="/companies" element={<SearchPage />} />
+        <Route path="/companies" element={<SearchPage collectionRegistry={collectionRegistry} />} />
         <Route path="/companies/:companyId" element={<Location />} />
       </Routes>
     </BrowserRouter>,
   );
 }
 
-function renderStrictSearch(query = "Example company") {
+function renderStrictSearch(query = "Example company", collectionRegistry: CollectionRegistry = createCollectionRegistry()) {
   window.history.replaceState({}, "", `/companies?q=${encodeURIComponent(query)}`);
   return render(
     <StrictMode>
       <BrowserRouter>
-        <Routes><Route path="/companies" element={<SearchPage />} /></Routes>
+        <Routes><Route path="/companies" element={<SearchPage collectionRegistry={collectionRegistry} />} /></Routes>
       </BrowserRouter>
     </StrictMode>,
   );
@@ -108,6 +109,28 @@ describe("CollectionStatus", () => {
     expect(screen.getByText("正在采集")).toBeInTheDocument();
     await act(() => vi.advanceTimersByTimeAsync(4_000));
     expect(screen.getByTestId("location")).toHaveTextContent("/companies/company-1");
+  });
+
+  it("caps subsequent automatic polling intervals at ten seconds", async () => {
+    vi.useFakeTimers();
+    const pollTimes: number[] = [];
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(String(input), window.location.origin);
+      if (url.pathname === "/api/v1/companies") return response(emptyResults());
+      if (url.pathname === "/api/v1/collection-requests") return response(collection("queued"), 202);
+      pollTimes.push(Date.now());
+      return response(collection("queued"));
+    }));
+
+    renderSearch("Capped polling");
+    await flush();
+    await act(() => vi.advanceTimersByTimeAsync(2_000));
+    await act(() => vi.advanceTimersByTimeAsync(4_000));
+    await act(() => vi.advanceTimersByTimeAsync(8_000));
+    await act(() => vi.advanceTimersByTimeAsync(10_000));
+    await act(() => vi.advanceTimersByTimeAsync(10_000));
+
+    expect(pollTimes.slice(1).map((time, index) => time - pollTimes[index])).toEqual([4_000, 8_000, 10_000, 10_000]);
   });
 
   it("shows a partial result without continuing to poll", async () => {
@@ -173,7 +196,7 @@ describe("CollectionStatus", () => {
     fireEvent.click(screen.getByRole("button", { name: "刷新状态" }));
     await flush();
 
-    expect(screen.getByText("正在排队")).toBeInTheDocument();
+    expect(screen.getByText("采集仍在进行中")).toBeInTheDocument();
     expect(requests.filter((request) => request.path === "/api/v1/collection-requests" && request.method === "POST")).toHaveLength(1);
   });
 
@@ -202,7 +225,7 @@ describe("CollectionStatus", () => {
     expect(submitted).toEqual(["Example company", "Another company"]);
   });
 
-  it("aborts the collection request when the page unmounts", async () => {
+  it("keeps a collection submission alive when the page unmounts", async () => {
     let signal: AbortSignal | undefined;
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input), window.location.origin);
@@ -214,10 +237,10 @@ describe("CollectionStatus", () => {
     const view = renderSearch();
     await flush();
     view.unmount();
-    expect(signal?.aborted).toBe(true);
+    expect(signal?.aborted).toBe(false);
   });
 
-  it("aborts a pending collection request when the query changes", async () => {
+  it("keeps the prior submission alive when the query changes", async () => {
     vi.useFakeTimers();
     const signals: AbortSignal[] = [];
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -233,7 +256,7 @@ describe("CollectionStatus", () => {
     await act(() => vi.advanceTimersByTimeAsync(250));
     await flush();
 
-    expect(signals[0].aborted).toBe(true);
+    expect(signals[0].aborted).toBe(false);
   });
 
   it("does not repeat POST when the search page rerenders", async () => {
@@ -245,11 +268,12 @@ describe("CollectionStatus", () => {
       return response(collection("queued"), 202);
     }));
 
-    const view = renderSearch();
+    const registry = createCollectionRegistry();
+    const view = renderSearch("Example company", registry);
     await flush();
     view.rerender(
       <BrowserRouter>
-        <Routes><Route path="/companies" element={<SearchPage />} /></Routes>
+        <Routes><Route path="/companies" element={<SearchPage collectionRegistry={registry} />} /></Routes>
       </BrowserRouter>,
     );
     await flush();
@@ -259,21 +283,170 @@ describe("CollectionStatus", () => {
 
   it("recovers collection submission after a StrictMode effect replay cancels the first request", async () => {
     let submissions = 0;
+    let resolveDurablePost!: () => void;
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input), window.location.origin);
       if (url.pathname === "/api/v1/companies") return response(emptyResults());
       if (url.pathname !== "/api/v1/collection-requests") return response(collection("queued"));
       submissions += 1;
-      if (submissions > 1) return response(collection("queued"), 202);
-      return new Promise<Response>((_resolve, reject) => {
+      return new Promise<Response>((resolve, reject) => {
         init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+        resolveDurablePost = () => resolve(new Response(JSON.stringify(collection("queued")), { status: 202 }));
       });
     }));
 
     renderStrictSearch();
     await flush();
 
+    expect(submissions).toBe(1);
+    await act(async () => resolveDurablePost());
     expect(screen.getByText("正在排队")).toBeInTheDocument();
-    expect(submissions).toBeGreaterThanOrEqual(2);
+  });
+
+  it("times out and aborts a stalled collection submission after two minutes", async () => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), window.location.origin);
+      if (url.pathname === "/api/v1/companies") return response(emptyResults());
+      signal = init?.signal ?? undefined;
+      return new Promise<Response>(() => undefined);
+    }));
+
+    renderSearch("Stalled POST");
+    await flush();
+    await act(() => vi.advanceTimersByTimeAsync(120_000));
+
+    expect(screen.getByText("采集仍在进行中")).toBeInTheDocument();
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it("ignores a collection submission that resolves after its deadline", async () => {
+    vi.useFakeTimers();
+    let resolvePost!: () => void;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(String(input), window.location.origin);
+      if (url.pathname === "/api/v1/companies") return response(emptyResults());
+      return new Promise<Response>((resolve) => {
+        resolvePost = () => resolve(new Response(JSON.stringify(collection("succeeded", {
+          company_id: "company-1",
+          completed_at: "2026-08-04T00:01:00Z",
+        })), { status: 202 }));
+      });
+    }));
+
+    renderSearch("Late POST");
+    await flush();
+    await act(() => vi.advanceTimersByTimeAsync(120_000));
+    await act(async () => resolvePost());
+
+    expect(screen.getByText("采集仍在进行中")).toBeInTheDocument();
+    expect(screen.queryByTestId("location")).not.toBeInTheDocument();
+  });
+
+  it("times out and aborts a stalled database status read", async () => {
+    vi.useFakeTimers();
+    let readSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), window.location.origin);
+      if (url.pathname === "/api/v1/companies") return response(emptyResults());
+      if (url.pathname === "/api/v1/collection-requests") return response(collection("queued"), 202);
+      readSignal = init?.signal ?? undefined;
+      return new Promise<Response>(() => undefined);
+    }));
+
+    renderSearch("Stalled GET");
+    await flush();
+    await act(() => vi.advanceTimersByTimeAsync(2_000));
+    await act(() => vi.advanceTimersByTimeAsync(118_000));
+
+    expect(screen.getByText("采集仍在进行中")).toBeInTheDocument();
+    expect(readSignal?.aborted).toBe(true);
+  });
+
+  it("does not submit equivalent NFKC, case, and whitespace queries twice", async () => {
+    vi.useFakeTimers();
+    const submitted: string[] = [];
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), window.location.origin);
+      if (url.pathname === "/api/v1/companies") return response(emptyResults());
+      if (url.pathname === "/api/v1/collection-requests") submitted.push(JSON.parse(String(init?.body)).query);
+      return response(collection("queued"), 202);
+    }));
+
+    renderSearch("Ｆｏｏ　ＢＡＲ");
+    await flush();
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索公司" }), { target: { value: " fOo\tbar " } });
+    await act(() => vi.advanceTimersByTimeAsync(250));
+    await flush();
+
+    expect(submitted).toEqual(["Ｆｏｏ　ＢＡＲ"]);
+  });
+
+  it("reuses a collection request after the search route remounts", async () => {
+    const submitted: string[] = [];
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), window.location.origin);
+      if (url.pathname === "/api/v1/companies") return response(emptyResults());
+      if (url.pathname === "/api/v1/collection-requests") submitted.push(String(init?.body));
+      return response(collection("queued"), 202);
+    }));
+
+    const registry = createCollectionRegistry();
+    const first = renderSearch("Route remount", registry);
+    await flush();
+    first.unmount();
+    renderSearch("Route remount", registry);
+    await flush();
+
+    expect(submitted).toHaveLength(1);
+  });
+
+  it("performs one manual status read without restarting polling", async () => {
+    vi.useFakeTimers();
+    let reads = 0;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(String(input), window.location.origin);
+      if (url.pathname === "/api/v1/companies") return response(emptyResults());
+      if (url.pathname === "/api/v1/collection-requests") return response(collection("queued"), 202);
+      reads += 1;
+      return response(collection("queued"));
+    }));
+
+    renderSearch("Manual one shot");
+    await flush();
+    await act(() => vi.advanceTimersByTimeAsync(120_000));
+    fireEvent.click(screen.getByRole("button", { name: "刷新状态" }));
+    await flush();
+    const readsAfterRefresh = reads;
+    await act(() => vi.advanceTimersByTimeAsync(20_000));
+
+    expect(readsAfterRefresh).toBeGreaterThan(0);
+    expect(reads).toBe(readsAfterRefresh);
+    expect(screen.getByRole("button", { name: "刷新状态" })).toBeEnabled();
+  });
+
+  it("retains the last database state and offers refresh after a transient status-read failure", async () => {
+    vi.useFakeTimers();
+    let reads = 0;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(String(input), window.location.origin);
+      if (url.pathname === "/api/v1/companies") return response(emptyResults());
+      if (url.pathname === "/api/v1/collection-requests") return response(collection("queued"), 202);
+      reads += 1;
+      return reads === 1
+        ? response({ error: { code: "upstream_unavailable" } }, 503)
+        : response(collection("running"));
+    }));
+
+    renderSearch("Transient GET");
+    await flush();
+    await act(() => vi.advanceTimersByTimeAsync(2_000));
+
+    expect(screen.getByText("正在排队")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "刷新状态" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "刷新状态" }));
+    await flush();
+    expect(screen.getByText("采集仍在进行中")).toBeInTheDocument();
   });
 });

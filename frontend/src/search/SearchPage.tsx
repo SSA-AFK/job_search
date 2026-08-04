@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { api } from "../api/client";
 import type { CompanyListItem, Page } from "../api/types";
 import { CollectionStatus } from "../collection/CollectionStatus";
-import type { CollectionSession } from "../collection/polling";
+import { defaultCollectionRegistry, type CollectionRegistry } from "../collection/polling";
 import { CompanyResults } from "./CompanyResults";
 import { Filters } from "./Filters";
 import {
@@ -14,7 +14,7 @@ import {
   withSearchParam,
 } from "./search-params";
 
-export function SearchPage() {
+export function SearchPage({ collectionRegistry = defaultCollectionRegistry }: { collectionRegistry?: CollectionRegistry }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const serializedParams = searchParams.toString();
   const params = useMemo(
@@ -26,7 +26,6 @@ export function SearchPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
-  const collectionSessions = useRef(new Map<string, CollectionSession>());
   const hasStructuredFilters = Boolean(
     params.industry
     || params.sub_industry
@@ -140,7 +139,7 @@ export function SearchPage() {
           onPageChange={(page) => setSearchParams(withPage(searchParams, page))}
           onClear={clearFilters}
           onRetry={() => setRetryCount((count) => count + 1)}
-          emptyQueryStatus={collectionQuery ? <CollectionStatus query={collectionQuery} sessions={collectionSessions.current} /> : null}
+          emptyQueryStatus={collectionQuery ? <CollectionStatus query={collectionQuery} registry={collectionRegistry} /> : null}
         />
       </div>
     </main>

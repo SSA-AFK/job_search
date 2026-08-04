@@ -76,7 +76,7 @@ test("collection lifecycle reaches success, partial, failed, and timeout states 
 
   await visitCollection(page, "Example company");
   await expect(page.getByText("正在排队")).toBeVisible();
-  await expect(page.getByText("正在采集")).toBeVisible();
+  await expect(page.getByText("正在采集")).toBeVisible({ timeout: 10_000 });
   await expect(page).toHaveURL(`/companies/${companyId}`, { timeout: 10_000 });
 
   scenario.current = "partial";
