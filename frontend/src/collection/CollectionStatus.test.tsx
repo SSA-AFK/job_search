@@ -613,4 +613,43 @@ describe("CollectionStatus", () => {
     await flush();
     expect(screen.getByText("采集仍在进行中")).toBeInTheDocument();
   });
+
+  it("keeps a pre-timeout manual terminal recovery after the original deadline and remount", async () => {
+    vi.useFakeTimers();
+    let reads = 0;
+    let submissions = 0;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), window.location.origin);
+      if (url.pathname === "/api/v1/companies") return response(emptyResults());
+      if (url.pathname === "/api/v1/collection-requests") {
+        submissions += 1;
+        return response(collection("queued"), 202);
+      }
+      reads += 1;
+      return reads === 1
+        ? response({ error: { code: "upstream_unavailable" } }, 503)
+        : response(collection("partial", { completed_at: "2026-08-04T00:01:00Z" }));
+    }));
+
+    const registry = createCollectionRegistry();
+    const first = renderSearch("Pre-timeout manual terminal", registry);
+    await flush();
+    await act(() => vi.advanceTimersByTimeAsync(2_000));
+    expect(screen.getByText("正在排队")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "刷新状态" }));
+    await flush();
+    expect(screen.getByText("已完成部分资料采集")).toBeInTheDocument();
+
+    await act(() => vi.advanceTimersByTimeAsync(118_000));
+    expect(screen.getByText("已完成部分资料采集")).toBeInTheDocument();
+    expect(reads).toBe(2);
+    expect(submissions).toBe(1);
+
+    first.unmount();
+    renderSearch("Pre-timeout manual terminal", registry);
+    await flush();
+    expect(screen.getByText("已完成部分资料采集")).toBeInTheDocument();
+    expect(reads).toBe(2);
+    expect(submissions).toBe(1);
+  });
 });

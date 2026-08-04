@@ -153,6 +153,10 @@ export function createCollectionRegistry({
   const rememberManualRequest = (session: CollectionSession, request: CollectionRequest) => {
     session.request = request;
     session.lastAccessedAt = Date.now();
+    if (isTerminal(request) && session.deadlineTimer !== null) {
+      clearTimeout(session.deadlineTimer);
+      session.deadlineTimer = null;
+    }
     notify(session);
   };
 
