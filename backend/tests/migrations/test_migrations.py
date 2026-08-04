@@ -1,9 +1,15 @@
 import runpy
+from io import StringIO
 from pathlib import Path
+from uuid import uuid4
 
+import pytest
 from alembic.config import Config
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import IntegrityError
 
 from alembic import command
 
@@ -151,3 +157,95 @@ def test_claim_token_migration_backfills_existing_running_runs(tmp_path: Path) -
             text("SELECT claim_token FROM crawl_runs WHERE id = :id"),
             {"id": run_id},
         ) == run_id
+
+
+def test_job_type_extension_migration_round_trip(tmp_path: Path) -> None:
+    database_path = tmp_path / "job-type-migration.sqlite3"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config(Path(__file__).parents[2] / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", database_url)
+    engine = create_engine(database_url)
+    company_id = str(uuid4())
+    command.upgrade(config, "0004_crawl_run_claim_token")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO companies "
+                "(id, canonical_name, normalized_name, funding_stage, scale, "
+                "created_at, updated_at) "
+                "VALUES (:id, 'Example', 'example', 'unknown', 'unknown', "
+                ":created_at, :created_at)"
+            ),
+            {"id": company_id, "created_at": "2026-08-04 00:00:00+00:00"},
+        )
+
+    command.upgrade(config, "head")
+
+    with engine.begin() as connection:
+        for job_type in ("part_time", "temporary"):
+            connection.execute(
+                text(
+                    "INSERT INTO job_postings "
+                    "(id, company_id, title, normalized_title, job_type, city, "
+                    "description, is_active, created_at, updated_at) "
+                    "VALUES (:id, :company_id, :title, :title, :job_type, '', '', 1, "
+                    ":created_at, :created_at)"
+                ),
+                {
+                    "id": str(uuid4()),
+                    "company_id": company_id,
+                    "title": f"{job_type}engineer",
+                    "job_type": job_type,
+                    "created_at": "2026-08-04 00:00:00+00:00",
+                },
+            )
+        assert set(
+            connection.scalars(text("SELECT job_type FROM job_postings"))
+        ) == {"part_time", "temporary"}
+
+    command.downgrade(config, "0004_crawl_run_claim_token")
+    with engine.connect() as connection:
+        assert set(
+            connection.scalars(text("SELECT job_type FROM job_postings"))
+        ) == {"unknown"}
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO job_postings "
+                "(id, company_id, title, normalized_title, job_type, city, "
+                "description, is_active, created_at, updated_at) "
+                "VALUES (:id, :company_id, 'parttime', 'parttime', 'part_time', "
+                "'', '', 1, :created_at, :created_at)"
+            ),
+            {
+                "id": str(uuid4()),
+                "company_id": company_id,
+                "created_at": "2026-08-04 00:00:00+00:00",
+            },
+        )
+
+    command.upgrade(config, "head")
+
+
+def test_job_type_extension_emits_postgresql_constraint_ddl() -> None:
+    migration_path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "0005_extend_job_type_values.py"
+    )
+    migration = runpy.run_path(str(migration_path))
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect=postgresql.dialect(),
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    migration["upgrade"].__globals__["op"] = Operations(context)
+
+    migration["upgrade"]()
+
+    sql = " ".join(output.getvalue().split())
+    assert "ALTER TABLE job_postings DROP CONSTRAINT job_type" in sql
+    assert "ALTER TABLE job_postings ADD CONSTRAINT job_type CHECK" in sql
+    assert "'part_time'" in sql
+    assert "'temporary'" in sql

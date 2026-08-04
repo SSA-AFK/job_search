@@ -30,6 +30,7 @@ from app.models import (
     FilingType,
     JobPosting,
     JobSource,
+    JobType,
     RegulatoryFiling,
     SourceDocument,
 )
@@ -94,13 +95,14 @@ def normalized_job(
     seen_at: datetime = NOW,
     is_active: bool = True,
     job_posting_id: UUID | None = None,
+    employment_type: str | None = "full_time",
 ) -> NormalizedJobRecord:
     return NormalizedJobRecord(
         candidate=normalize_job(
             JobCandidate(
                 company_name="Example",
                 title="Software Engineer",
-                employment_type="full_time",
+                employment_type=employment_type,
                 location="Shanghai",
                 provider="official",
                 source_raw_id=source_raw_id,
@@ -701,6 +703,44 @@ def test_job_source_unique_race_converges_and_removes_orphan_posting(
     assert count_rows(non_autoflush_session, JobSource) == 1
 
 
+def test_job_source_unique_race_rejects_incompatible_known_type(
+    non_autoflush_session: Session,
+) -> None:
+    company = Company(canonical_name="Example", normalized_name="example")
+    non_autoflush_session.add(company)
+    non_autoflush_session.flush()
+    winner_job = JobPosting(
+        company_id=company.id,
+        title="Winner",
+        normalized_title="winner",
+        job_type=JobType.FULL_TIME,
+        city="beijing",
+        description="Winner description",
+    )
+    non_autoflush_session.add(winner_job)
+    non_autoflush_session.commit()
+    winner_source = JobSource(
+        job_posting_id=winner_job.id,
+        provider="official",
+        source_raw_id="job-type-race",
+        apply_url="https://example.com/winner",
+        first_seen_at=NOW,
+        last_seen_at=NOW,
+        is_active=True,
+    )
+    candidate = normalized_job(
+        "job-type-race", employment_type="part_time"
+    ).model_copy(update={"source_evidence_id": None})
+    service = PersistenceService(non_autoflush_session)
+
+    with pytest.raises(PersistenceError) as raised, non_autoflush_session.begin():
+        non_autoflush_session.add(winner_source)
+        service._upsert_jobs(company.id, (candidate,), {}, uuid4())
+
+    assert raised.value.constraint == "job_type"
+    assert count_rows(non_autoflush_session, JobPosting) == 1
+
+
 def test_statement_error_is_sanitized_with_run_context_and_full_rollback(
     session: Session, persistence: PersistenceService
 ) -> None:
@@ -902,3 +942,72 @@ def test_unknown_incoming_type_does_not_degrade_known_canonical_type(
 
     session.refresh(existing)
     assert existing.job_type.value == "full_time"
+
+
+@pytest.mark.parametrize("employment_type", ["part_time", "temporary"])
+def test_persistence_writes_first_class_employment_types(
+    employment_type: str, session: Session, persistence: PersistenceService
+) -> None:
+    persistence.persist(
+        normalized_batch(
+            jobs=(
+                normalized_job(
+                    f"{employment_type}-1", employment_type=employment_type
+                ),
+            ),
+            filings=(),
+        ),
+        run_id=uuid4(),
+    )
+
+    stored = session.scalar(select(JobPosting))
+    assert stored is not None
+    assert stored.job_type.value == employment_type
+
+
+@pytest.mark.parametrize(
+    ("existing_type", "incoming_type"),
+    [
+        (JobType.FULL_TIME, "part_time"),
+        (JobType.PART_TIME, "temporary"),
+        (JobType.TEMPORARY, "internship"),
+    ],
+)
+def test_persistence_rejects_unequal_known_employment_types(
+    existing_type: JobType,
+    incoming_type: str,
+    session: Session,
+    persistence: PersistenceService,
+) -> None:
+    company = Company(canonical_name="Example", normalized_name="example")
+    session.add(company)
+    session.flush()
+    existing = JobPosting(
+        company_id=company.id,
+        title="Software Engineer",
+        normalized_title="softwareengineer",
+        job_type=existing_type,
+        city="shanghai",
+        description="Existing",
+    )
+    session.add(existing)
+    session.commit()
+    incoming = normalized_job(
+        f"{incoming_type}-1",
+        employment_type=incoming_type,
+        job_posting_id=existing.id,
+    )
+
+    with pytest.raises(PersistenceError) as raised:
+        persistence.persist(
+            normalized_batch(
+                company=normalized_company(company_id=company.id),
+                jobs=(incoming,),
+                filings=(),
+            ),
+            run_id=uuid4(),
+        )
+
+    assert raised.value.constraint == "job_type"
+    session.refresh(existing)
+    assert existing.job_type is existing_type

@@ -66,6 +66,36 @@ class CollectionRepository:
             return None
         return self.get_request(run.collection_request_id)
 
+    def _lock_run_request(
+        self, run_id: UUID
+    ) -> tuple[CrawlRun, CollectionRequest] | None:
+        self.session.rollback()
+        self.session.expire_all()
+        statement = (
+            select(CollectionRequest, CrawlRun)
+            .join(
+                CrawlRun,
+                CrawlRun.collection_request_id == CollectionRequest.id,
+            )
+            .where(CrawlRun.id == run_id)
+            .order_by(CrawlRun.id, CollectionRequest.id)
+            .with_for_update(of=(CrawlRun.id, CollectionRequest.id))
+            .execution_options(populate_existing=True)
+        )
+        row = self.session.execute(statement).one_or_none()
+        if row is None:
+            return None
+        request, run = row
+        return run, request
+
+    def _reload_run(self, run_id: UUID, *, commit: bool = False) -> CrawlRun | None:
+        if commit:
+            self.session.commit()
+        else:
+            self.session.rollback()
+        self.session.expire_all()
+        return self.get_run(run_id)
+
     def claim_queued(self, run_id: UUID) -> RunClaim | None:
         claim_token = str(uuid4())
         try:
@@ -158,16 +188,17 @@ class CollectionRepository:
         self, run_id: UUID, *, failed_at: datetime | None = None
     ) -> CrawlRun | None:
         """Fail only work that is still undispatched; preserve a worker's claim."""
-        self.session.rollback()
-        run = self.get_run(run_id)
-        if run is None or run.status is not CollectionStatus.QUEUED:
-            return run
-        request = self.get_request_for_run(run)
-        if request is None or request.status is not CollectionStatus.QUEUED:
-            return run
+        pair = self._lock_run_request(run_id)
+        if pair is None:
+            return self._reload_run(run_id)
+        run, request = pair
+        if (
+            run.status is not CollectionStatus.QUEUED
+            or request.status is not CollectionStatus.QUEUED
+        ):
+            return self._reload_run(run_id)
         request_id = request.id
         now = failed_at or utc_now()
-        self.session.rollback()
         run_update = self.session.execute(
             update(CrawlRun)
             .where(CrawlRun.id == run_id, CrawlRun.status == CollectionStatus.QUEUED)
@@ -191,46 +222,76 @@ class CollectionRepository:
             )
         )
         if run_update.rowcount != 1 or request_update.rowcount != 1:
-            self.session.rollback()
-            self.session.expire_all()
-            return self.get_run(run_id)
-        self.session.commit()
-        self.session.expire_all()
-        return self.get_run(run_id)
+            return self._reload_run(run_id)
+        return self._reload_run(run_id, commit=True)
 
-    def _finish_invalid(
-        self, run: CrawlRun, request: CollectionRequest | None
-    ) -> CrawlRun:
+    def _fail_invalid_locked(
+        self,
+        run: CrawlRun,
+        request: CollectionRequest,
+        *,
+        expected_claim_token: str,
+    ) -> CrawlRun | None:
+        if (
+            run.status is not CollectionStatus.RUNNING
+            or run.claim_token != expected_claim_token
+            or request.status is not CollectionStatus.QUEUED
+        ):
+            return self._reload_run(run.id)
         now = utc_now()
-        run.status = CollectionStatus.FAILED
-        run.error_code = "invalid_run_state"
-        run.error_detail = "invalid_run_state"
-        run.completed_at = now
-        if request is not None:
-            request.status = CollectionStatus.FAILED
-            request.error_code = "invalid_run_state"
-            request.completed_at = now
-        self.session.commit()
-        return run
+        run_update = self.session.execute(
+            update(CrawlRun)
+            .where(
+                CrawlRun.id == run.id,
+                CrawlRun.status == CollectionStatus.RUNNING,
+                CrawlRun.claim_token == expected_claim_token,
+            )
+            .values(
+                status=CollectionStatus.FAILED,
+                error_code="invalid_run_state",
+                error_detail="invalid_run_state",
+                completed_at=now,
+            )
+        )
+        request_update = self.session.execute(
+            update(CollectionRequest)
+            .where(
+                CollectionRequest.id == request.id,
+                CollectionRequest.status == CollectionStatus.QUEUED,
+            )
+            .values(
+                status=CollectionStatus.FAILED,
+                error_code="invalid_run_state",
+                completed_at=now,
+            )
+        )
+        if run_update.rowcount != 1 or request_update.rowcount != 1:
+            return self._reload_run(run.id)
+        return self._reload_run(run.id, commit=True)
 
     def requeue_for_retry(
         self, run_id: UUID, *, expected_claim_token: str
     ) -> CrawlRun | None:
-        self.session.rollback()
-        run = self.get_run(run_id)
-        if run is None or run.status in _TERMINAL_STATUSES:
-            return run
-        request = self.get_request_for_run(run)
-        if request is None:
-            return self._finish_invalid(run, request)
+        pair = self._lock_run_request(run_id)
+        if pair is None:
+            return self._reload_run(run_id)
+        run, request = pair
+        if run.status in _TERMINAL_STATUSES:
+            return self._reload_run(run_id)
         if run.status is CollectionStatus.QUEUED and request.status is CollectionStatus.QUEUED:
-            return run
-        if run.status is not CollectionStatus.RUNNING or request.status is not CollectionStatus.RUNNING:
-            return self._finish_invalid(run, request)
+            return self._reload_run(run_id)
         if run.claim_token != expected_claim_token:
-            return run
+            return self._reload_run(run_id)
+        if (
+            run.status is not CollectionStatus.RUNNING
+            or request.status is not CollectionStatus.RUNNING
+        ):
+            return self._fail_invalid_locked(
+                run,
+                request,
+                expected_claim_token=expected_claim_token,
+            )
         request_id = request.id
-        self.session.rollback()
         run_update = self.session.execute(
             update(CrawlRun)
             .where(
@@ -254,32 +315,31 @@ class CollectionRepository:
             .values(status=CollectionStatus.QUEUED)
         )
         if run_update.rowcount != 1 or request_update.rowcount != 1:
-            self.session.rollback()
-            self.session.expire_all()
-            return self.get_run(run_id)
-        self.session.commit()
-        self.session.expire_all()
-        return self.get_run(run_id)
+            return self._reload_run(run_id)
+        return self._reload_run(run_id, commit=True)
 
     def fail_retry_exhausted(
         self, run_id: UUID, *, expected_claim_token: str
     ) -> CrawlRun | None:
-        self.session.rollback()
-        run = self.get_run(run_id)
-        if run is None or run.status in _TERMINAL_STATUSES:
-            return run
-        request = self.get_request_for_run(run)
+        pair = self._lock_run_request(run_id)
+        if pair is None:
+            return self._reload_run(run_id)
+        run, request = pair
+        if run.status in _TERMINAL_STATUSES:
+            return self._reload_run(run_id)
+        if run.claim_token != expected_claim_token:
+            return self._reload_run(run_id)
         if (
             run.status is not CollectionStatus.RUNNING
-            or request is None
             or request.status is not CollectionStatus.RUNNING
         ):
-            return run
-        if run.claim_token != expected_claim_token:
-            return run
+            return self._fail_invalid_locked(
+                run,
+                request,
+                expected_claim_token=expected_claim_token,
+            )
         request_id = request.id
         now = utc_now()
-        self.session.rollback()
         run_update = self.session.execute(
             update(CrawlRun)
             .where(
@@ -307,12 +367,8 @@ class CollectionRepository:
             )
         )
         if run_update.rowcount != 1 or request_update.rowcount != 1:
-            self.session.rollback()
-            self.session.expire_all()
-            return self.get_run(run_id)
-        self.session.commit()
-        self.session.expire_all()
-        return self.get_run(run_id)
+            return self._reload_run(run_id)
+        return self._reload_run(run_id, commit=True)
 
     def finish(
         self,

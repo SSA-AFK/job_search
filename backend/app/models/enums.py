@@ -38,7 +38,9 @@ class RunType(StrEnum):
 
 class JobType(StrEnum):
     FULL_TIME = "full_time"
+    PART_TIME = "part_time"
     INTERNSHIP = "internship"
+    TEMPORARY = "temporary"
     CAMPUS = "campus"
     EXPERIENCED = "experienced"
     UNKNOWN = "unknown"

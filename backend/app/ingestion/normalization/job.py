@@ -10,8 +10,8 @@ from app.models.enums import JobType
 _JOB_TYPE_BY_EMPLOYMENT_TYPE = {
     EmploymentType.FULL_TIME: JobType.FULL_TIME,
     EmploymentType.INTERNSHIP: JobType.INTERNSHIP,
-    EmploymentType.PART_TIME: JobType.UNKNOWN,
-    EmploymentType.TEMPORARY: JobType.UNKNOWN,
+    EmploymentType.PART_TIME: JobType.PART_TIME,
+    EmploymentType.TEMPORARY: JobType.TEMPORARY,
 }
 
 

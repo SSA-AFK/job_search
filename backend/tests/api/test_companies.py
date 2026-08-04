@@ -431,6 +431,36 @@ def test_jobs_apply_type_city_and_active_filters(
     assert response.json()["items"][0]["title"] == expected_title
 
 
+@pytest.mark.parametrize("job_type", ["part_time", "temporary"])
+def test_jobs_serialize_and_filter_first_class_employment_types(
+    job_type: str,
+    client: TestClient,
+    seeded_session: Session,
+    deepseek_id: UUID,
+) -> None:
+    seeded_session.add(
+        JobPosting(
+            company_id=deepseek_id,
+            title=f"{job_type} engineer",
+            normalized_title=f"{job_type}engineer",
+            job_type=job_type,
+            city="Shanghai",
+            description="Scoped role",
+            is_active=True,
+        )
+    )
+    seeded_session.commit()
+
+    response = client.get(
+        f"/api/v1/companies/{deepseek_id}/jobs",
+        params={"job_type": job_type},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert response.json()["items"][0]["job_type"] == job_type
+
+
 def test_jobs_paginate(client: TestClient, deepseek_id: UUID) -> None:
     response = client.get(
         f"/api/v1/companies/{deepseek_id}/jobs",

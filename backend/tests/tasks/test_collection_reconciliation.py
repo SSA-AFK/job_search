@@ -4,7 +4,8 @@ from uuid import uuid4
 
 import pytest
 from celery.exceptions import Retry
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session
 
 from app.collection.repository import CollectionRepository
@@ -404,3 +405,96 @@ def test_stale_running_reconciliation_cannot_requeue_a_new_claim_generation(
             verification.get(CollectionRequest, request_id).status
             is CollectionStatus.RUNNING
         )
+
+
+def test_retry_recovery_cannot_fail_work_requeued_between_legacy_row_reads(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'paired-recovery-race.sqlite3'}")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as setup:
+        request, run = CollectionRepository(setup).create_request("Acme", "acme")
+        setup.commit()
+        claim = CollectionRepository(setup).claim_queued(run.id)
+        assert claim is not None and claim.claim_token is not None
+        run_id = run.id
+        request_id = request.id
+        claim_token = claim.claim_token
+
+    with Session(engine, expire_on_commit=False) as first_recovery:
+        repository = CollectionRepository(first_recovery)
+        get_run = repository.get_run
+        raced = False
+
+        def get_run_then_requeue(received_run_id):
+            nonlocal raced
+            observed = get_run(received_run_id)
+            if not raced:
+                raced = True
+                with Session(engine, expire_on_commit=False) as second_recovery:
+                    second = CollectionRepository(second_recovery).requeue_for_retry(
+                        run_id, expected_claim_token=claim_token
+                    )
+                    assert second is not None
+                    assert second.status is CollectionStatus.QUEUED
+            return observed
+
+        monkeypatch.setattr(repository, "get_run", get_run_then_requeue)
+
+        observed = repository.requeue_for_retry(
+            run_id, expected_claim_token=claim_token
+        )
+
+    assert raced is True
+    assert observed is not None and observed.status is CollectionStatus.QUEUED
+    with Session(engine) as verification:
+        stored_run = verification.get(CrawlRun, run_id)
+        stored_request = verification.get(CollectionRequest, request_id)
+        assert stored_run is not None and stored_run.status is CollectionStatus.QUEUED
+        assert stored_run.claim_token is None
+        assert stored_run.error_code is None
+        assert stored_request is not None
+        assert stored_request.status is CollectionStatus.QUEUED
+        assert stored_request.error_code is None
+
+
+def test_retry_recovery_locks_the_linked_pair_in_one_postgresql_statement(
+    tmp_path,
+) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'paired-recovery-lock.sqlite3'}")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as setup:
+        _request, run = CollectionRepository(setup).create_request("Acme", "acme")
+        setup.commit()
+        claim = CollectionRepository(setup).claim_queued(run.id)
+        assert claim is not None and claim.claim_token is not None
+        run_id = run.id
+        claim_token = claim.claim_token
+
+    statements = []
+    with Session(engine, expire_on_commit=False) as recovery:
+        @event.listens_for(recovery, "do_orm_execute")
+        def capture_statement(state) -> None:
+            if state.is_select:
+                statements.append(state.statement)
+
+        CollectionRepository(recovery).requeue_for_retry(
+            run_id, expected_claim_token=claim_token
+        )
+
+    compiled = [
+        " ".join(str(statement.compile(dialect=postgresql.dialect())).split())
+        for statement in statements
+    ]
+    paired_lock = next(
+        (
+            sql
+            for sql in compiled
+            if "JOIN crawl_runs" in sql
+            and "FOR UPDATE OF crawl_runs, collection_requests" in sql
+        ),
+        None,
+    )
+
+    assert paired_lock is not None
+    assert "ORDER BY crawl_runs.id, collection_requests.id" in paired_lock
