@@ -6,7 +6,9 @@ from sqlalchemy.orm import Session
 
 from app.collection.schemas import CollectionRequestCreate, CollectionRequestRead
 from app.collection.service import CollectionService
+from app.core.config import settings
 from app.core.database import get_session
+from app.core.errors import DomainError
 
 router = APIRouter(prefix="/collection-requests", tags=["collection-requests"])
 
@@ -28,6 +30,12 @@ def create_collection_request(
     payload: CollectionRequestCreate,
     service: Annotated[CollectionService, Depends(get_collection_service)],
 ) -> CollectionRequestRead:
+    if not settings.collection_enabled:
+        raise DomainError(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code="collection_unavailable",
+            message="Collection service is unavailable.",
+        )
     return service.submit(payload.query)
 
 

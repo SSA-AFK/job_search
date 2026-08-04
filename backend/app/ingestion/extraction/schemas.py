@@ -2,6 +2,7 @@
 
 from datetime import date
 from enum import StrEnum
+from ipaddress import ip_address
 from typing import Annotated
 
 from pydantic import (
@@ -21,7 +22,29 @@ def _bounded_external_url(value: HttpUrl) -> HttpUrl:
     return value
 
 
-ExternalUrl = Annotated[HttpUrl, AfterValidator(_bounded_external_url)]
+def _require_statically_public_url(value: HttpUrl) -> HttpUrl:
+    host = (value.host or "").lower().rstrip(".")
+    if value.username is not None or value.password is not None:
+        raise ValueError("URL must be a public URL without credentials")
+    if not host or host == "localhost" or host.endswith((".localhost", ".local")):
+        raise ValueError("URL must be a public URL")
+    literal_host = host.removeprefix("[").removesuffix("]")
+    try:
+        address = ip_address(literal_host)
+    except ValueError:
+        if "." not in host:
+            raise ValueError("URL must be a public URL") from None
+    else:
+        if not address.is_global:
+            raise ValueError("URL must be a public URL")
+    return value
+
+
+ExternalUrl = Annotated[
+    HttpUrl,
+    AfterValidator(_bounded_external_url),
+    AfterValidator(_require_statically_public_url),
+]
 
 
 def _bounded_company_url(value: HttpUrl) -> HttpUrl:
@@ -30,7 +53,11 @@ def _bounded_company_url(value: HttpUrl) -> HttpUrl:
     return value
 
 
-CompanyUrl = Annotated[HttpUrl, AfterValidator(_bounded_company_url)]
+CompanyUrl = Annotated[
+    HttpUrl,
+    AfterValidator(_bounded_company_url),
+    AfterValidator(_require_statically_public_url),
+]
 
 
 class FrozenExtractionModel(BaseModel):

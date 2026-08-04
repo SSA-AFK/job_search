@@ -1,0 +1,27 @@
+{
+  "Code": 0,
+  "Message": "success",
+  "Data": {
+    "HasMore": true,
+    "Items": [
+      {
+        "Title": "Example <em>Technologies</em> hiring",
+        "ContentType": "Answer",
+        "ContentID": "answer-123",
+        "ContentText": "Example Technologies builds enterprise data systems and is hiring a Senior Data Engineer in Shanghai.",
+        "Url": "https://www.example.com/answer/123",
+        "CommentCount": 12,
+        "VoteUpCount": 42,
+        "AuthorName": "Example Careers",
+        "AuthorAvatar": "https://www.example.com/avatar.png",
+        "AuthorBadge": "organization",
+        "AuthorBadgeText": "Verified",
+        "EditTime": 1785456000,
+        "CommentInfoList": [
+          {"Content": "Applications are open."}
+        ],
+        "AuthorityLevel": 3
+      }
+    ]
+  }
+}

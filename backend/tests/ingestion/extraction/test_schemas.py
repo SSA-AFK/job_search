@@ -109,6 +109,28 @@ def test_job_candidate_rejects_oversized_apply_url() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "apply_url",
+    [
+        "http://127.0.0.1/private",
+        "http://10.0.0.1/private",
+        "http://[::1]/private",
+        "https://user:password@example.com/jobs/42",
+        "https://localhost/jobs/42",
+    ],
+)
+def test_job_candidate_rejects_statically_unsafe_apply_url(apply_url: str) -> None:
+    with pytest.raises(ValidationError, match="public URL"):
+        JobCandidate.model_validate(
+            {
+                "title": "Software Engineer",
+                "apply_url": apply_url,
+                "evidence_ids": ["doc-1"],
+                "confidence": 0.9,
+            }
+        )
+
+
 def test_filing_candidate_matches_persisted_filing_vocabulary_and_fields() -> None:
     candidate = FilingCandidate.model_validate(
         {

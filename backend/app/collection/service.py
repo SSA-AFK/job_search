@@ -42,28 +42,32 @@ class CollectionService:
         try:
             task_id = self.dispatch_collection(run.id)
         except Exception:  # The task never started, so queued may become failed here.
-            request = self.repository.get_request(request.id)
-            failed_run = self.repository.get_run_for_request(request.id) if request else None
-            if request is None or failed_run is None:
+            persisted_request = self.repository.get_request(request.id)
+            failed_run = (
+                self.repository.get_run_for_request(persisted_request.id)
+                if persisted_request
+                else None
+            )
+            if persisted_request is None or failed_run is None:
                 raise
-            request.status = CollectionStatus.FAILED
-            request.error_code = "collection_unavailable"
-            request.completed_at = utc_now()
+            persisted_request.status = CollectionStatus.FAILED
+            persisted_request.error_code = "collection_unavailable"
+            persisted_request.completed_at = utc_now()
             failed_run.status = CollectionStatus.FAILED
             failed_run.error_code = "collection_unavailable"
             failed_run.completed_at = utc_now()
             self.session.commit()
-            return self._read(request)
+            return self._read(persisted_request)
 
         persisted_run = self.session.get(type(run), run.id)
         if persisted_run is None:
             raise RuntimeError("Collection run disappeared before task id could be stored")
         persisted_run.celery_task_id = task_id
         self.session.commit()
-        request = self.repository.get_request(request.id)
-        if request is None:
+        persisted_request = self.repository.get_request(request.id)
+        if persisted_request is None:
             raise RuntimeError("Collection request disappeared after dispatch")
-        return self._read(request)
+        return self._read(persisted_request)
 
     def get(self, request_id: UUID) -> CollectionRequestRead:
         request = self.repository.get_request(request_id)

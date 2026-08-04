@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from typing import Any, cast
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
@@ -15,7 +16,7 @@ if settings.database_url.startswith("sqlite"):
 
     @event.listens_for(engine, "connect")
     def enable_sqlite_foreign_keys(dbapi_connection: object, _connection_record: object) -> None:
-        cursor = dbapi_connection.cursor()  # type: ignore[union-attr]
+        cursor = cast(Any, dbapi_connection).cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 

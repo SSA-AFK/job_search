@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.models import Base, CollectionRequest, CollectionStatus, Company, CrawlRun, RunType
@@ -135,6 +135,44 @@ def test_refresh_recovers_named_active_request_conflict_from_scheduler_race(tmp_
     assert enqueue_stale_companies.apply().get() == {"enqueued": 0, "skipped_active": 1}
     with Session(engine) as session:
         assert session.query(CollectionRequest).count() == 1
+
+
+def test_refresh_dispatch_failure_terminalizes_request_and_run_with_completion_time(
+    monkeypatch,
+) -> None:
+    from app.tasks.schedule import enqueue_stale_companies
+
+    now = datetime(2026, 8, 3, 2, 0, tzinfo=UTC)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(company("Acme", now - timedelta(days=2)))
+        session.commit()
+
+    def fail_dispatch(_run_id: str):
+        raise ConnectionError("broker unavailable")
+
+    monkeypatch.setattr(
+        "app.tasks.schedule.SessionLocal",
+        lambda: Session(engine, expire_on_commit=False),
+    )
+    monkeypatch.setattr("app.tasks.schedule.utc_now", lambda: now)
+    monkeypatch.setattr(
+        "app.tasks.schedule.run_ingestion",
+        type("Task", (), {"delay": staticmethod(fail_dispatch)})(),
+    )
+
+    assert enqueue_stale_companies.apply().get() == {"enqueued": 0, "skipped_active": 0}
+    with Session(engine) as session:
+        request = session.scalar(select(CollectionRequest))
+        run = session.scalar(select(CrawlRun))
+        assert request is not None and run is not None
+        assert request.status is CollectionStatus.FAILED
+        assert run.status is CollectionStatus.FAILED
+        assert request.error_code == "collection_unavailable"
+        assert run.error_code == "collection_unavailable"
+        assert request.completed_at == now
+        assert run.completed_at == now
 
 
 def test_celery_uses_json_and_runs_both_maintenance_tasks_at_shanghai_two_am() -> None:

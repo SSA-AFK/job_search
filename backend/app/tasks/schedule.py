@@ -82,10 +82,13 @@ def enqueue_stale_companies() -> dict[str, int]:
             try:
                 task_result = run_ingestion.delay(str(run.id))
             except (ConnectionError, OSError, KombuOperationalError):
+                completed_at = utc_now()
                 request.status = CollectionStatus.FAILED
                 request.error_code = "collection_unavailable"
+                request.completed_at = completed_at
                 run.status = CollectionStatus.FAILED
                 run.error_code = "collection_unavailable"
+                run.completed_at = completed_at
                 session.commit()
                 continue
             run.celery_task_id = str(task_result.id)
