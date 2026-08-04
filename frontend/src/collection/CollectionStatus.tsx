@@ -6,6 +6,7 @@ import { api, ApiError } from "../api/client";
 import type { CollectionRequest } from "../api/types";
 import {
   collectionReducer,
+  CollectionCapacityError,
   type CollectionRegistry,
   type CollectionSession,
   defaultCollectionRegistry,
@@ -43,7 +44,16 @@ export function CollectionStatus({
   const manualControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    const session = registry.getOrCreate(query);
+    let session: CollectionSession;
+    try {
+      session = registry.getOrCreate(query);
+    } catch (error: unknown) {
+      dispatch({
+        type: "submission_failed",
+        errorCode: error instanceof CollectionCapacityError ? "collection_unavailable" : null,
+      });
+      return;
+    }
     const controller = new AbortController();
     sessionRef.current = session;
     let active = true;
@@ -73,6 +83,13 @@ export function CollectionStatus({
 
     const collect = async () => {
       if (session.expired) {
+        if (session.request && !shouldPoll(session.request.status)) {
+          dispatch({ type: "received", request: session.request });
+          if (session.request.status === "succeeded" && session.request.company_id) {
+            navigate(`/companies/${session.request.company_id}`);
+          }
+          return;
+        }
         stopAtDeadline();
         return;
       }
@@ -139,7 +156,7 @@ export function CollectionStatus({
     void api.getCollectionRequest(request.id, controller.signal)
       .then((updatedRequest) => {
         if (controller.signal.aborted) return;
-        registry.rememberRequest(session, updatedRequest);
+        registry.rememberManualRequest(session, updatedRequest);
         if (updatedRequest.status === "succeeded" && updatedRequest.company_id) {
           dispatch({ type: "received", request: updatedRequest });
           navigate(`/companies/${updatedRequest.company_id}`);

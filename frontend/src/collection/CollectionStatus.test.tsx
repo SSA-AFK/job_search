@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserRouter, Route, Routes, useLocation } from "react-router-dom";
 
 import type { CompanyListItem, CollectionRequest } from "../api/types";
-import { createCollectionRegistry, type CollectionRegistry } from "./polling";
+import { createCollectionRegistry, normalizeCollectionQuery, type CollectionRegistry } from "./polling";
 import { SearchPage } from "../search/SearchPage";
 
 const company: CompanyListItem = {
@@ -88,6 +88,11 @@ afterEach(() => {
 });
 
 describe("CollectionStatus", () => {
+  it("uses backend-compatible NFKC, full case-folding, and Unicode-whitespace query keys", () => {
+    expect(normalizeCollectionQuery("Straße")).toBe("strasse");
+    expect(normalizeCollectionQuery("Ｆｏｏ\u2003ＢＡＲ")).toBe("foobar");
+  });
+
   it("polls with capped backoff and navigates after success", async () => {
     vi.useFakeTimers();
     let polls = 0;
@@ -383,6 +388,76 @@ describe("CollectionStatus", () => {
     expect(submitted).toEqual(["Ｆｏｏ　ＢＡＲ"]);
   });
 
+  it("does not submit case-fold-equivalent Unicode queries twice", async () => {
+    vi.useFakeTimers();
+    const submitted: string[] = [];
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), window.location.origin);
+      if (url.pathname === "/api/v1/companies") return response(emptyResults());
+      if (url.pathname === "/api/v1/collection-requests") submitted.push(JSON.parse(String(init?.body)).query);
+      return response(collection("queued"), 202);
+    }));
+
+    renderSearch("Straße\u2003");
+    await flush();
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索公司" }), { target: { value: "ＳＴＲＡＳＳＥ" } });
+    await act(() => vi.advanceTimersByTimeAsync(250));
+    await flush();
+
+    expect(submitted).toEqual(["Straße"]);
+  });
+
+  it("recreates an expired terminal session when the same query is revisited after its TTL", async () => {
+    vi.useFakeTimers();
+    const submitted: string[] = [];
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), window.location.origin);
+      if (url.pathname === "/api/v1/companies") return response(emptyResults());
+      if (url.pathname === "/api/v1/collection-requests") submitted.push(JSON.parse(String(init?.body)).query);
+      return response(collection("partial"), 202);
+    }));
+
+    const registry = createCollectionRegistry({ sessionTtlMs: 1_000 });
+    const first = renderSearch("Expired terminal", registry);
+    await flush();
+    first.unmount();
+    await act(() => vi.advanceTimersByTimeAsync(1_001));
+    renderSearch("Expired terminal", registry);
+    await flush();
+
+    expect(submitted).toEqual(["Expired terminal", "Expired terminal"]);
+  });
+
+  it("rejects a new collection request at capacity without evicting active sessions", async () => {
+    vi.useFakeTimers();
+    const submitted: string[] = [];
+    const signals: AbortSignal[] = [];
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), window.location.origin);
+      if (url.pathname === "/api/v1/companies") return response(emptyResults());
+      if (url.pathname === "/api/v1/collection-requests") {
+        submitted.push(JSON.parse(String(init?.body)).query);
+        signals.push(init?.signal as AbortSignal);
+        return response(collection("queued"), 202);
+      }
+      return response(collection("queued"));
+    }));
+
+    const registry = createCollectionRegistry({ maxSessions: 2 });
+    renderSearch("Capacity one", registry);
+    await flush();
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索公司" }), { target: { value: "Capacity two" } });
+    await act(() => vi.advanceTimersByTimeAsync(250));
+    await flush();
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索公司" }), { target: { value: "Capacity three" } });
+    await act(() => vi.advanceTimersByTimeAsync(250));
+    await flush();
+
+    expect(submitted).toEqual(["Capacity one", "Capacity two"]);
+    expect(signals.map((signal) => signal.aborted)).toEqual([false, false]);
+    expect(screen.getByText("采集服务暂不可用，请稍后再试")).toBeInTheDocument();
+  });
+
   it("reuses a collection request after the search route remounts", async () => {
     const submitted: string[] = [];
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -424,6 +499,95 @@ describe("CollectionStatus", () => {
     expect(readsAfterRefresh).toBeGreaterThan(0);
     expect(reads).toBe(readsAfterRefresh);
     expect(screen.getByRole("button", { name: "刷新状态" })).toBeEnabled();
+  });
+
+  it("preserves a manual terminal result across a route remount", async () => {
+    vi.useFakeTimers();
+    let reads = 0;
+    const requests: Array<{ path: string; method: string }> = [];
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), window.location.origin);
+      requests.push({ path: url.pathname, method: init?.method ?? "GET" });
+      if (url.pathname === "/api/v1/companies") return response(emptyResults());
+      if (url.pathname === "/api/v1/collection-requests") return response(collection("queued"), 202);
+      reads += 1;
+      if (reads === 1) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+        });
+      }
+      return response(collection("partial", { completed_at: "2026-08-04T00:01:00Z" }));
+    }));
+
+    const registry = createCollectionRegistry();
+    const first = renderSearch("Manual terminal", registry);
+    await flush();
+    await act(() => vi.advanceTimersByTimeAsync(120_000));
+    fireEvent.click(screen.getByRole("button", { name: "刷新状态" }));
+    await flush();
+    first.unmount();
+    renderSearch("Manual terminal", registry);
+    await flush();
+
+    expect(screen.getByText("已完成部分资料采集")).toBeInTheDocument();
+    expect(reads).toBe(2);
+    expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
+  });
+
+  it("preserves a manual active result as manual-only across a route remount", async () => {
+    vi.useFakeTimers();
+    let reads = 0;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), window.location.origin);
+      if (url.pathname === "/api/v1/companies") return response(emptyResults());
+      if (url.pathname === "/api/v1/collection-requests") return response(collection("queued"), 202);
+      reads += 1;
+      if (reads === 1) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+        });
+      }
+      return response(collection("running"));
+    }));
+
+    const registry = createCollectionRegistry();
+    const first = renderSearch("Manual active", registry);
+    await flush();
+    await act(() => vi.advanceTimersByTimeAsync(120_000));
+    fireEvent.click(screen.getByRole("button", { name: "刷新状态" }));
+    await flush();
+    first.unmount();
+    renderSearch("Manual active", registry);
+    await flush();
+    await act(() => vi.advanceTimersByTimeAsync(20_000));
+
+    expect(screen.getByText("采集仍在进行中")).toBeInTheDocument();
+    expect(reads).toBe(2);
+  });
+
+  it("ignores a database status read that resolves after its deadline", async () => {
+    vi.useFakeTimers();
+    let resolveRead!: () => void;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(String(input), window.location.origin);
+      if (url.pathname === "/api/v1/companies") return response(emptyResults());
+      if (url.pathname === "/api/v1/collection-requests") return response(collection("queued"), 202);
+      return new Promise<Response>((resolve) => {
+        resolveRead = () => resolve(new Response(JSON.stringify(collection("succeeded", {
+          company_id: "company-1",
+          completed_at: "2026-08-04T00:01:00Z",
+        }))));
+      });
+    }));
+
+    renderSearch("Late GET");
+    await flush();
+    await act(() => vi.advanceTimersByTimeAsync(2_000));
+    await act(() => vi.advanceTimersByTimeAsync(118_000));
+    await act(async () => resolveRead());
+
+    expect(screen.getByText("采集仍在进行中")).toBeInTheDocument();
+    expect(screen.queryByTestId("location")).not.toBeInTheDocument();
   });
 
   it("retains the last database state and offers refresh after a transient status-read failure", async () => {

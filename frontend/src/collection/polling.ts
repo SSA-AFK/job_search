@@ -1,5 +1,6 @@
 import { api } from "../api/client";
 import type { CollectionRequest, CollectionRequestStatus } from "../api/types";
+import { caseFold } from "unicode-case-folding";
 
 export const POLL_TIMEOUT_MS = 120_000;
 
@@ -39,8 +40,21 @@ export type CollectionRegistry = {
   getOrCreate(query: string): CollectionSession;
   subscribe(session: CollectionSession, listener: () => void): () => void;
   rememberRequest(session: CollectionSession, request: CollectionRequest): void;
+  rememberManualRequest(session: CollectionSession, request: CollectionRequest): void;
   expire(session: CollectionSession): void;
 };
+
+export type CollectionRegistryOptions = {
+  maxSessions?: number;
+  sessionTtlMs?: number;
+};
+
+export class CollectionCapacityError extends Error {
+  constructor() {
+    super("Collection session capacity reached");
+    this.name = "CollectionCapacityError";
+  }
+}
 
 export type CollectionAction =
   | { type: "submitting" }
@@ -83,7 +97,7 @@ export function collectionReducer(
 }
 
 export function normalizeCollectionQuery(query: string) {
-  return query.normalize("NFKC").toLocaleLowerCase("und").replace(/\s+/gu, "");
+  return caseFold(query.normalize("NFKC")).replace(/\s+/gu, "");
 }
 
 function isTerminal(request: CollectionRequest | null) {
@@ -98,24 +112,31 @@ function notify(session: CollectionSession) {
   for (const listener of session.listeners) listener();
 }
 
-export function createCollectionRegistry(): CollectionRegistry {
+export function createCollectionRegistry({
+  maxSessions = MAX_SESSIONS,
+  sessionTtlMs = SESSION_TTL_MS,
+}: CollectionRegistryOptions = {}): CollectionRegistry {
   const sessions = new Map<string, CollectionSession>();
 
-  const evictExpiredSessions = () => {
+  const pruneExpiredSessions = () => {
     const now = Date.now();
     for (const [key, session] of sessions) {
-      if (isInactive(session) && session.listeners.size === 0 && now - session.lastAccessedAt > SESSION_TTL_MS) {
+      if (isInactive(session) && session.listeners.size === 0 && now - session.lastAccessedAt > sessionTtlMs) {
         sessions.delete(key);
       }
     }
-    if (sessions.size <= MAX_SESSIONS) return;
+  };
+
+  const makeRoomForSession = () => {
+    if (sessions.size < maxSessions) return;
     const evictable = [...sessions.values()]
       .filter((session) => isInactive(session) && session.listeners.size === 0)
       .sort((left, right) => left.lastAccessedAt - right.lastAccessedAt);
     for (const session of evictable) {
-      if (sessions.size <= MAX_SESSIONS) break;
+      if (sessions.size < maxSessions) break;
       sessions.delete(session.key);
     }
+    if (sessions.size >= maxSessions) throw new CollectionCapacityError();
   };
 
   const rememberRequest = (session: CollectionSession, request: CollectionRequest) => {
@@ -126,6 +147,12 @@ export function createCollectionRegistry(): CollectionRegistry {
       clearTimeout(session.deadlineTimer);
       session.deadlineTimer = null;
     }
+    notify(session);
+  };
+
+  const rememberManualRequest = (session: CollectionSession, request: CollectionRequest) => {
+    session.request = request;
+    session.lastAccessedAt = Date.now();
     notify(session);
   };
 
@@ -143,13 +170,14 @@ export function createCollectionRegistry(): CollectionRegistry {
   return {
     getOrCreate(query) {
       const key = normalizeCollectionQuery(query);
+      pruneExpiredSessions();
       const existing = sessions.get(key);
       if (existing) {
         existing.lastAccessedAt = Date.now();
         return existing;
       }
 
-      evictExpiredSessions();
+      makeRoomForSession();
       const submissionController = new AbortController();
       const session: CollectionSession = {
         key,
@@ -195,6 +223,7 @@ export function createCollectionRegistry(): CollectionRegistry {
       return () => session.listeners.delete(listener);
     },
     rememberRequest,
+    rememberManualRequest,
     expire,
   };
 }
