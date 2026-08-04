@@ -16,22 +16,22 @@ This is the living delivery document for the AI Company Search project. It is th
 |----------|---------|--------|
 | [`specs/2026-07-31-ai-company-search-agent-design.md`](specs/2026-07-31-ai-company-search-agent-design.md) | Product, architecture, contracts, data model, and acceptance criteria | Approved |
 | [`plans/2026-07-31-company-search-web-foundation.md`](plans/2026-07-31-company-search-web-foundation.md) | Stage one implementation plan | Executed and integrated locally into `main` |
-| [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31-company-search-ingestion-pipeline.md) | Stage two implementation plan | Tasks 1-11 complete; Task 12 starting |
+| [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31-company-search-ingestion-pipeline.md) | Stage two implementation plan | All 12 tasks complete; whole-branch review pending |
 | [`../zhihu.md`](../../zhihu.md) | Supplied Zhihu Global Search API contract | Reference |
 
 ## Current Snapshot
 
 | Field | Value |
 |-------|-------|
-| Overall status | Stage one complete; stage two in progress |
+| Overall status | Stage one complete; stage two task execution complete; completion review in progress |
 | Current stage | Stage two - Asynchronous ingestion pipeline |
-| Current task | Task 12 - End-to-end failure verification and runbook |
+| Current task | Stage two whole-branch review and completion gate |
 | Execution method | Subagent-Driven Development |
 | Active branch/worktree | `codex/company-search-ingestion-pipeline` at `.worktrees/codex-company-search-ingestion-pipeline` |
 | Stage one progress | 8/8 tasks complete; completion gate passed |
-| Stage two progress | 11/12 tasks complete |
-| Last verified artifact state | Stage two Task 11 implementation and three scoped fix reviews through `c7326b4` |
-| Next action | Implement and independently review stage two Task 12 |
+| Stage two progress | 12/12 tasks complete; broad review pending |
+| Last verified artifact state | Stage two Task 12 implementation and two scoped fix reviews through `aca6f75` |
+| Next action | Run the stage two whole-branch review, resolve any findings, and execute final current-HEAD verification |
 
 ## Delivery Sequence
 
@@ -90,18 +90,18 @@ Plan: [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31
 | 9 | Celery tasks, daily refresh, and job expiration | Complete | `f253f17`, `1e94c0e`, `bcaf218` | Approved after fix rounds 1-2; three deferred Minors | tasks/collection 24 passed; ingestion 190 passed; full pytest 297 passed/2 deselected; Ruff passed; scoped mypy retains one pre-existing core error |
 | 10 | Optional Redis caching and invalidation | Complete | `d49ba63`, `7c2dd72` | Approved after fix round 1 | cache 12 passed; cache/company/persistence 54 passed; full pytest 309 passed/2 deselected; Ruff and scoped mypy passed |
 | 11 | Frontend collection polling | Complete | `9e4bd03`, `514eedd`, `73be699`, `c7326b4` | Approved after fix rounds 1-3 | focused Vitest 26 passed; full Vitest 54 passed; build passed; desktop/mobile Playwright collection flow passed |
-| 12 | End-to-end failure verification and runbook | Ready | - | - | - |
+| 12 | End-to-end failure verification and runbook | Complete | `22f3c6a`, `b6589d1`, `aca6f75` | Approved after fix rounds 1-2; two deferred Minors | Ruff passed; mypy 69 files passed; full pytest 347 passed/2 deselected; integration 12 passed; performance 2 passed; migrations/seed 19 passed; Vitest 54 passed; build passed; Playwright 9 passed |
 
 ### Stage Two Gate
 
-- [ ] A mocked collection request reaches a terminal state and successful data becomes searchable.
-- [ ] Duplicate requests, Celery delivery, and Provider documents remain idempotent.
-- [ ] Zhihu requests match the supplied contract and never use undocumented pagination.
-- [ ] Unsafe URLs and invalid LLM output cannot reach persistence.
-- [ ] Refresh uses `last_collected_at < now - 24 hours`.
-- [ ] Expiration uses `last_seen_at < now - 30 days` while retaining jobs with another active source.
-- [ ] Search remains readable when Redis, Celery, the LLM, or any Provider is unavailable.
-- [ ] Every enabled Provider declares credentials, compliance limits, timeouts, rate limits, and mock coverage.
+- [x] A mocked collection request reaches a terminal state and successful data becomes searchable.
+- [x] Duplicate requests, Celery delivery, and Provider documents remain idempotent.
+- [x] Zhihu requests match the supplied contract and never use undocumented pagination.
+- [x] Unsafe URLs and invalid LLM output cannot reach persistence.
+- [x] Refresh uses `last_collected_at < now - 24 hours`.
+- [x] Expiration uses `last_seen_at < now - 30 days` while retaining jobs with another active source.
+- [x] Search remains readable when Redis, Celery, the LLM, or any Provider is unavailable.
+- [x] Every enabled Provider declares credentials, compliance limits, timeouts, rate limits, and mock coverage.
 
 ## Quality Gates Per Task
 
@@ -175,6 +175,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-08-03 | Stage two Task 9 | Celery tasks, daily refresh, job expiration, and two scoped fix re-reviews | PASS: tasks/collection 24 passed; ingestion 190 passed; full pytest 297 passed/2 deselected; Ruff clean; Redis transport, fresh-worker registration, normalized-query race recovery, fresh-session retry recovery, same-run retry, and exhaustion terminalization verified; three Minors deferred |
 | 2026-08-04 | Stage two Task 10 | Optional Redis cache-aside queries and transactional invalidation with scoped fix re-review | PASS: cache 12 passed; cache/company/persistence 54 passed; full pytest 309 passed/2 deselected; Ruff/scoped mypy clean; exact TTLs, Pydantic serialization, bounded degraded mode, atomic version-token writes, and post-commit invalidation verified |
 | 2026-08-04 | Stage two Task 11 | Frontend collection polling with three scoped fix re-reviews | PASS: focused Vitest 26 passed; full Vitest 54 passed; build passed; desktop/mobile Playwright passed; exact cadence, independent deadline, StrictMode single submission, Unicode-normalized bounded sessions, manual recovery, and responsive layout verified |
+| 2026-08-04 | Stage two Task 12 | End-to-end failure verification, runbook, and two scoped fix re-reviews | PASS: Ruff clean; mypy 69 files; full pytest 347 passed/2 deselected; integration 12 passed; performance 2 passed; migrations/seed 19 passed; Vitest 54 passed; build passed; Playwright 9 passed; opt-in collection, deterministic conflicts, bounded Zhihu responses, two-phase company-site collection, and operator-owned host authorization verified; two Minors deferred |
 
 ## Iteration History
 
@@ -207,6 +208,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-08-03 | Stage two Task 9 | Added Redis-capable Celery wiring, registered collection and maintenance tasks, exact daily refresh/expiration rules, normalized-query race recovery, bounded same-run retries, and synchronized exhaustion failure; two review rounds closed deployment registration, session cleanup, and infrastructure-state recovery gaps | Add optional Redis query caching and transactional invalidation |
 | 2026-08-04 | Stage two Task 10 | Added optional cache-aside list/detail/job responses, canonical versioned keys, exact TTLs, warning-only Redis degradation, and post-commit invalidation; review round 1 added bounded timeouts, atomic version-token writes, and partial-failure-safe invalidation ordering | Implement frontend collection polling |
 | 2026-08-04 | Stage two Task 11 | Added typed collection polling, exact capped backoff, public status UI, manual refresh, and success navigation; three review rounds added independent deadlines, durable StrictMode-safe request sessions, full Unicode normalization, capacity/TTL policy, transport recovery, and terminal manual persistence | Verify end-to-end failure modes and update the runbook |
+| 2026-08-04 | Stage two Task 12 | Added real API-to-worker-to-persistence acceptance coverage and operating documentation; two review rounds closed opt-in gating, production company-site reachability, response bounds, deterministic conflict recovery, local URL aliases, and LLM-controlled outbound authorization | Run the stage two whole-branch review and completion gate |
 
 ## Update Template
 
