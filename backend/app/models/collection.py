@@ -68,6 +68,7 @@ class CrawlRun(Base):
     jobs_written: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     error_code: Mapped[str | None] = mapped_column(String(50))
     error_detail: Mapped[str | None] = mapped_column(Text)
+    claim_token: Mapped[str | None] = mapped_column(String(36))
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     created_at: Mapped[datetime] = mapped_column(

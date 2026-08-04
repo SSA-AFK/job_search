@@ -2,9 +2,10 @@
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 from typing import Protocol
 from uuid import UUID
+
+from rapidfuzz.fuzz import ratio
 
 from app.ingestion.extraction.schemas import CompanyCandidate
 from app.ingestion.normalization.company import normalize_company
@@ -57,4 +58,4 @@ class CompanyDeduplicator:
 
     @staticmethod
     def _similarity(left: str, right: str) -> float:
-        return SequenceMatcher(a=left, b=right, autojunk=False).ratio() * 100
+        return ratio(left, right)

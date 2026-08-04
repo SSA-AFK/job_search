@@ -780,3 +780,18 @@ git commit -m "test: verify ingestion pipeline acceptance criteria"
 - The 24-hour refresh and 30-day expiry comparisons use the correct direction and exact boundaries.
 - Existing search data remains readable when Redis, Celery, LLM, or a Provider is unavailable.
 - All enabled Providers have explicit credentials, compliance conditions, timeouts, rate limits, and mock coverage.
+
+## Final Review Fix-Wave Amendment (2026-08-04)
+
+This amendment is part of the approved implementation plan and supersedes conflicting earlier examples:
+
+- Runtime: add `app/ingestion/production.py`, a concrete bounded OpenAI-compatible HTTP client, `LlmSemanticDuplicateJudge`, and settings-backed Provider construction. Keep `COLLECTION_RUNTIME_FACTORY` only as an optional `RuntimeComponents` override. `httpx` and `rapidfuzz` are production dependencies.
+- Extraction: keep exactly `discover`, `extract_profile`, and `extract_jobs`. Change `extract_profile` to return `ProfileExtraction(profile, filings)`. Add required `JobCandidate.company_name` and optional discovery aliases.
+- Orchestration: select the target by deterministic normalized name/alias relationship, validate every job against the selected company, carry filings through normalization, and persist sanitized structured stage/provider diagnostics.
+- Run ownership: replace read-then-start with atomic `RunClaim`; assign a fresh UUID `claim_token` to every claim and reserve `started_at` for stale-time selection; treat `running` redelivery as a no-op; require the token for retry/terminal writes; conditionally lock paired run/request ownership inside the persistence transaction through commit; rollback a failed claim transaction before recovering its token; run stale queued/running reconciliation from Beat every minute. Dispatch failures may update only paired `queued` rows.
+- LLM boundary: stream chat-completions responses with a fixed byte cap, reject oversized declared lengths and compressed responses, and directly test HTTP request, status, malformed, and oversized contracts. Prompts must state each role's root arrays, required/optional fields, and supported enums.
+- Persistence/security: preserve the deduplicator's selected job identity and compatible type precedence; validate public credential-free URLs at raw-document and persistence DTO boundaries; use validated reconstruction after derived field updates.
+- Provider controls: apply shared per-provider concurrency/rate gates and stable Zhihu auth/rate-limit codes.
+- Semantic comparison: represent the incoming job operand with `job_posting_id=None`.
+
+Required focused gates cover runtime smoke/fail-fast behavior, atomic claims and reconciliation, filing propagation, job type races, URL rejection, target-company scoping, Provider controls/codes/diagnostics, and distinct semantic operands. The final gate remains Ruff, mypy, full backend, integration, performance, migration/seed, Vitest, production build, Playwright, artifact/secret/port checks, and clean staged diff review.

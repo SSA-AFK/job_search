@@ -113,11 +113,18 @@ class ZhihuGlobalSearchProvider:
                 ):
                     if response.status_code < 400:
                         return await self._read_bounded_body(response)
+                    status_code = response.status_code
+                    code = (
+                        "provider_auth_failed"
+                        if status_code in {401, 403}
+                        else "provider_rate_limited"
+                        if status_code == 429
+                        else "http_status"
+                    )
                     provider_error = ProviderError(
-                        code="http_status",
-                        retryable=response.status_code == 429
-                        or response.status_code >= 500,
-                        detail=f"received HTTP {response.status_code}",
+                        code=code,
+                        retryable=status_code == 429 or status_code >= 500,
+                        detail=f"received HTTP {status_code}",
                     )
             except httpx.ConnectTimeout as error:
                 provider_error = ProviderError(

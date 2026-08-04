@@ -113,7 +113,7 @@ Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/collection-requests/$($requ
 Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/companies?q=Example%20Technologies"
 ```
 
-Database request/run rows are the status source of truth. Terminal statuses are `succeeded`, `partial`, and `failed`; public failure codes include `collection_unavailable`, Provider codes such as `request_timeout`, and extraction `invalid_output`.
+Database request/run rows are the status source of truth. Terminal statuses are `succeeded`, `partial`, and `failed`; public failure codes include `collection_unavailable`, Provider codes such as `request_timeout`, `provider_auth_failed`, and `provider_rate_limited`, plus extraction `invalid_output`. `crawl_runs.error_detail` stores sanitized JSON issues with stage, code, and optional provider attribution; it never stores credentials or raw model output.
 
 ## Collection services
 
@@ -150,14 +150,24 @@ $env:COLLECTION_ENABLED = "true"
 $env:CELERY_BROKER_URL = "redis://localhost:6379/0"
 $env:CELERY_RESULT_BACKEND = "redis://localhost:6379/1"
 $env:CACHE_REDIS_URL = "redis://localhost:6379/2"
-$env:COLLECTION_RUNTIME_FACTORY = "your_runtime.module:create_components"
+$env:OPENAI_COMPATIBLE_BASE_URL = "https://llm.example.com/v1"
+$env:OPENAI_COMPATIBLE_MODEL = "approved-model-name"
+$env:OPENAI_COMPATIBLE_API_KEY = "<authorized-api-key>"
+$env:ZHIHU_PROVIDER_ENABLED = "true"
+$env:ZHIHU_ACCESS_SECRET = "<authorized-secret>"
 ```
 
-`COLLECTION_RUNTIME_FACTORY` must be a `module:callable` path. The callable takes no arguments and returns `app.tasks.collection.RuntimeComponents(providers, extractor, semantic_judge)`. The worker, not the factory, creates and closes three distinct SQLAlchemy sessions for run state, deduplication reads, and persistence writes. An absent, unimportable, or invalid factory terminalizes the request and run as `collection_unavailable`.
+The default checked-in factory is `app.ingestion.production.create_runtime_components`. It constructs the OpenAI-compatible extraction client, semantic duplicate judge, and enabled Providers directly from settings. It fails fast unless the endpoint, model, API key, and at least one authorized Provider are configured; invalid configuration terminalizes the request and run as `collection_unavailable` without making an external call.
+
+`COLLECTION_RUNTIME_FACTORY` is an optional `module:callable` override for deployments that need another composition. The callable takes no arguments and returns `app.ingestion.runtime.RuntimeComponents(providers, extractor, semantic_judge)`. The worker creates and closes three distinct SQLAlchemy sessions for run state, deduplication reads, and persistence writes. An unimportable or invalid override also maps to `collection_unavailable`.
+
+Beat runs `redispatch_stale_queued_runs` every minute. It requeues abandoned `running` rows and redispatches committed `queued` rows that have no task id, using `started_at` only for the `COLLECTION_STALE_RUNNING_SECONDS` cutoff and `COLLECTION_STALE_QUEUED_SECONDS` for queued rows. Each atomic claim gets a new UUID `claim_token`; retry, reconciliation, persistence, and terminal compare-and-set updates must carry that exact token. A duplicate delivery that observes `running` is an in-progress no-op. Persistence conditionally locks the paired run/request token inside its own transaction and holds ownership through commit. Migration `0004` backfills a unique token for running rows created by an older release. Ambiguous broker failures can terminalize only a paired request/run that remains `queued`, so they cannot overwrite a worker that already claimed or completed the run.
 
 ## Provider enablement
 
-The runtime factory is the composition boundary. It reads Provider/LLM environment values, validates them, constructs only authorized Providers, and returns them in `RuntimeComponents.providers`. A disabled Provider is omitted from that sequence and therefore omitted from each run's `providers_attempted`; an enabled Provider failure is reported through the terminal/partial `error_code` and persisted run metadata.
+The checked-in production composition reads Provider/LLM environment values, validates them, constructs only authorized Providers, and returns them in `RuntimeComponents.providers`. A disabled Provider is omitted from that sequence and therefore omitted from each run's `providers_attempted`; an enabled Provider failure is reported through the terminal/partial `error_code` and persisted run metadata.
+
+Every enabled Provider is wrapped in process-shared concurrency and start-rate controls. Configure `PROVIDER_MAX_CONCURRENCY` (default `2`) and `PROVIDER_MIN_INTERVAL_SECONDS` (default `0.25`); invalid values fail runtime composition before collection starts.
 
 Enable Zhihu only with an authorized Global Search API secret:
 
@@ -166,17 +176,18 @@ $env:ZHIHU_PROVIDER_ENABLED = "true"
 $env:ZHIHU_ACCESS_SECRET = "<authorized-secret>"
 ```
 
-`ZhihuGlobalSearchProvider` refuses enabled startup without `ZHIHU_ACCESS_SECRET`, uses a 5-second connect timeout and 15-second total deadline, sends at most 20 results in one documented response, and retries only 429/5xx or transport timeouts with bounded delays. It does not perform undocumented pagination.
+`ZhihuGlobalSearchProvider` refuses enabled startup without `ZHIHU_ACCESS_SECRET`, uses a 5-second connect timeout and 15-second total deadline, sends at most 20 results in one documented response, and retries only 429/5xx or transport timeouts with bounded delays. Exhausted 429 responses use `provider_rate_limited`; 401/403 responses use `provider_auth_failed`. It does not perform undocumented pagination.
 
-Configure the OpenAI-compatible extractor used by your runtime factory:
+Configure the OpenAI-compatible extractor and semantic judge used by the default runtime:
 
 ```powershell
 $env:OPENAI_COMPATIBLE_BASE_URL = "https://llm.example.com/v1"
 $env:OPENAI_COMPATIBLE_MODEL = "approved-model-name"
 $env:OPENAI_COMPATIBLE_API_KEY = "<authorized-api-key>"
+$env:OPENAI_REQUEST_TIMEOUT_SECONDS = "30"
 ```
 
-The repository defines the LLM protocol and validated JSON extraction boundary; the operator-supplied runtime factory must construct the compatible client, enforce its request timeout/rate limit, and pass it to `CrewExtractor`. Never enable collection with an unbounded client or persist raw model output.
+The repository constructs a bounded chat-completions client and passes it to `CrewExtractor` and `LlmSemanticDuplicateJudge`. The client requests identity encoding, rejects compressed responses, rejects oversized declared lengths, and stops streamed bodies at a fixed byte cap before JSON parsing. Each extraction role states its root arrays, required/optional fields, and supported enums in the prompt; all outputs still cross validated JSON schemas. Never persist raw model output.
 
 Enable company-site collection only for explicitly approved websites:
 
@@ -185,7 +196,7 @@ $env:COMPANY_SITE_PROVIDER_ENABLED = "true"
 $env:COMPANY_SITE_APPROVED_HOSTS = "www.example.com,careers.example.com"
 ```
 
-The orchestrator runs Providers in two phases. Discovery Providers first identify a candidate website for the selected company. The runtime factory must parse `COMPANY_SITE_APPROVED_HOSTS` as exact hostnames and pass that trusted set to `CompanySiteProvider`; it must refuse enabled startup when the set is empty or invalid. The orchestrator invokes a website-dependent Provider only when the candidate host exactly matches that Provider's operator-approved set, and passes only the matched host through `ProviderQuery.allowed_hosts`. `CompanySiteProvider` enforces both authorization checks again before robots or HTTP work, then enforces public HTTP(S) destinations, redirect revalidation, `robots.txt`, same-host crawling, a ten-page cap, and partial page-failure warnings. LLM output never expands the allowlist. Leave this phase disabled when ownership, authorization, or robots compliance is unclear.
+The orchestrator runs Providers in two phases. Discovery Providers first identify a candidate website for the selected company. The checked-in composition parses `COMPANY_SITE_APPROVED_HOSTS` as exact hostnames and passes that trusted set to `CompanySiteProvider`; it refuses enabled startup when the set is empty or invalid. The orchestrator invokes a website-dependent Provider only when the candidate host exactly matches that Provider's operator-approved set, and passes only the matched host through `ProviderQuery.allowed_hosts`. `CompanySiteProvider` enforces both authorization checks again before robots or HTTP work, then enforces public HTTP(S) destinations, redirect revalidation, `robots.txt`, same-host crawling, a ten-page cap, and partial page-failure warnings. LLM output never expands the allowlist. Leave this phase disabled when ownership, authorization, or robots compliance is unclear.
 
 Unsupported commercial job-board and company-data Providers remain explicitly disabled pending both credentials and collection authorization. Do not add them to `RuntimeComponents.providers`; disabled Providers make no network call and do not appear in `providers_attempted`.
 

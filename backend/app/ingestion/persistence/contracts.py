@@ -15,7 +15,7 @@ from pydantic import (
     model_validator,
 )
 
-from app.ingestion.contracts import RawDocument
+from app.ingestion.contracts import RawDocument, require_statically_public_url
 from app.ingestion.extraction.schemas import FilingCandidate
 from app.ingestion.normalization.company import NormalizedCompanyCandidate
 from app.ingestion.normalization.job import NormalizedJobCandidate
@@ -30,7 +30,11 @@ def _bounded_external_url(value: HttpUrl) -> HttpUrl:
     return value
 
 
-ExternalUrl = Annotated[HttpUrl, AfterValidator(_bounded_external_url)]
+ExternalUrl = Annotated[
+    HttpUrl,
+    AfterValidator(_bounded_external_url),
+    AfterValidator(require_statically_public_url),
+]
 CompanyFieldName = Literal[
     "canonical_name",
     "industry",

@@ -11,15 +11,16 @@ dependencies = [
     "alembic",
     "celery[redis]",
     "fastapi",
+    "httpx",
     "pydantic-settings",
     "python-multipart",
+    "rapidfuzz",
     "sqlalchemy",
     "uvicorn[standard]",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "httpx",
     "mypy",
     "pytest",
     "pytest-cov",

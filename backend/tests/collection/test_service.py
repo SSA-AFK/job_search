@@ -4,11 +4,12 @@ from threading import Event
 from uuid import UUID
 
 import pytest
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import Session
 
 from app.collection.repository import CollectionRepository
 from app.collection.service import CollectionService
+from app.ingestion.errors import RunClaimError
 from app.models import Base, CollectionRequest, CollectionStatus, CrawlRun
 
 
@@ -116,6 +117,27 @@ def test_dispatch_failure_marks_request_and_run_failed(session: Session) -> None
     assert run.error_code == "collection_unavailable"
 
 
+def test_ambiguous_dispatch_failure_does_not_overwrite_running_claim(
+    session: Session,
+) -> None:
+    def dispatch_collection(run_id: UUID) -> str:
+        claim = CollectionRepository(session).claim_queued(run_id)
+        assert claim is not None and claim.claimed is True
+        raise RuntimeError("publish acknowledgement lost")
+
+    submitted = CollectionService(session, dispatch_collection).submit(
+        "Example Technologies"
+    )
+    run = session.scalar(
+        select(CrawlRun).where(CrawlRun.collection_request_id == submitted.id)
+    )
+
+    assert submitted.status is CollectionStatus.RUNNING
+    assert submitted.error_code is None
+    assert run is not None and run.status is CollectionStatus.RUNNING
+    assert run.error_code is None
+
+
 def test_get_returns_persisted_request(service: CollectionService) -> None:
     submitted = service.submit("Example Technologies")
 
@@ -124,19 +146,60 @@ def test_get_returns_persisted_request(service: CollectionService) -> None:
     assert found == submitted
 
 
-def test_invalid_run_start_terminalizes_run_and_linked_request(session: Session) -> None:
+def test_running_run_delivery_is_an_in_progress_noop(session: Session) -> None:
     repository = CollectionRepository(session)
     request, run = repository.create_request("Acme", "acme")
     session.commit()
     run.status = CollectionStatus.RUNNING
     session.commit()
 
-    terminal = repository.start_or_get_terminal(run.id)
+    claim = repository.claim_queued(run.id)
 
-    assert terminal is not None
-    assert terminal.status is CollectionStatus.FAILED
-    assert terminal.error_code == "invalid_run_state"
+    assert claim is not None and claim.claimed is False
+    assert claim.run.status is CollectionStatus.RUNNING
+    assert claim.run.error_code is None
     persisted_request = session.get(CollectionRequest, request.id)
     assert persisted_request is not None
-    assert persisted_request.status is CollectionStatus.FAILED
-    assert persisted_request.error_code == "invalid_run_state"
+    assert persisted_request.status is CollectionStatus.QUEUED
+    assert persisted_request.error_code is None
+
+
+def test_claim_recovery_rejects_another_workers_token(session: Session) -> None:
+    repository = CollectionRepository(session)
+    _request, run = repository.create_request("Acme", "acme")
+    session.commit()
+    claim = repository.claim_queued(run.id)
+    assert claim is not None and claim.claim_token is not None
+
+    recovered = repository.recover_claim_token(
+        run.id, expected_claim_token="another-worker-token"
+    )
+
+    assert recovered is None
+    persisted = session.get(CrawlRun, run.id)
+    assert persisted is not None
+    assert persisted.claim_token == claim.claim_token
+
+
+def test_claim_queued_reports_its_token_after_ambiguous_commit_failure(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = CollectionRepository(session)
+    _request, run = repository.create_request("Acme", "acme")
+    session.commit()
+    commit = session.commit
+
+    def commit_then_lose_connection() -> None:
+        commit()
+        session.execute(text("SELECT * FROM missing_claim_acknowledgement"))
+
+    monkeypatch.setattr(session, "commit", commit_then_lose_connection)
+
+    with pytest.raises(RunClaimError) as raised:
+        repository.claim_queued(run.id)
+
+    assert str(raised.value) == "run claim failed"
+    recovered = repository.recover_claim_token(
+        run.id, expected_claim_token=raised.value.claim_token
+    )
+    assert recovered == raised.value.claim_token

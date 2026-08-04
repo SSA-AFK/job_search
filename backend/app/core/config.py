@@ -9,6 +9,18 @@ class Settings(BaseSettings):
     cache_redis_url: str | None = None
     celery_task_always_eager: bool = False
     collection_runtime_factory: str | None = None
+    zhihu_provider_enabled: bool = False
+    zhihu_access_secret: str | None = None
+    openai_compatible_base_url: str | None = None
+    openai_compatible_model: str | None = None
+    openai_compatible_api_key: str | None = None
+    openai_request_timeout_seconds: float = 30.0
+    company_site_provider_enabled: bool = False
+    company_site_approved_hosts: str = ""
+    provider_max_concurrency: int = 2
+    provider_min_interval_seconds: float = 0.25
+    collection_stale_queued_seconds: int = 300
+    collection_stale_running_seconds: int = 1_800
 
 
 settings = Settings()

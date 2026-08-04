@@ -1,9 +1,11 @@
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from app.collection.repository import CollectionRepository
+from app.ingestion.persistence.result import PersistenceResult
 from app.models import Base, CollectionRequest, CollectionStatus, Company, CrawlRun, RunType
 
 
@@ -175,6 +177,66 @@ def test_refresh_dispatch_failure_terminalizes_request_and_run_with_completion_t
         assert run.completed_at == now
 
 
+def test_refresh_ambiguous_dispatch_failure_preserves_completed_worker_result(
+    monkeypatch,
+) -> None:
+    from app.tasks.schedule import enqueue_stale_companies
+
+    now = datetime(2026, 8, 3, 2, 0, tzinfo=UTC)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        stale = company("Acme", now - timedelta(days=2))
+        session.add(stale)
+        session.commit()
+        stale_id = stale.id
+
+    def complete_then_raise(run_id: str):
+        with Session(engine, expire_on_commit=False) as worker:
+            repository = CollectionRepository(worker)
+            claim = repository.claim_queued(UUID(run_id))
+            assert claim is not None and claim.claimed
+            repository.finish(
+                claim.run,
+                expected_claim_token=claim.claim_token,
+                status=CollectionStatus.SUCCEEDED,
+                providers_attempted=("test",),
+                documents_found=1,
+                jobs_found=0,
+                persistence=PersistenceResult(
+                    company_id=stale_id,
+                    documents_written=1,
+                    jobs_written=0,
+                    warnings=(),
+                ),
+                error_code=None,
+                error_detail=None,
+            )
+        raise ConnectionError("publish acknowledgement lost")
+
+    monkeypatch.setattr(
+        "app.tasks.schedule.SessionLocal",
+        lambda: Session(engine, expire_on_commit=False),
+    )
+    monkeypatch.setattr("app.tasks.schedule.utc_now", lambda: now)
+    monkeypatch.setattr(
+        "app.tasks.schedule.run_ingestion",
+        type("Task", (), {"delay": staticmethod(complete_then_raise)})(),
+    )
+
+    assert enqueue_stale_companies.apply().get() == {
+        "enqueued": 0,
+        "skipped_active": 0,
+    }
+    with Session(engine) as verification:
+        request = verification.scalar(select(CollectionRequest))
+        run = verification.scalar(select(CrawlRun))
+        assert request is not None and request.status is CollectionStatus.SUCCEEDED
+        assert run is not None and run.status is CollectionStatus.SUCCEEDED
+        assert request.error_code is None
+        assert run.error_code is None
+
+
 def test_celery_uses_json_and_runs_both_maintenance_tasks_at_shanghai_two_am() -> None:
     from app.tasks.celery_app import celery_app
 
@@ -185,5 +247,11 @@ def test_celery_uses_json_and_runs_both_maintenance_tasks_at_shanghai_two_am() -
     assert celery_app.conf.timezone == "Asia/Shanghai"
     assert celery_app.conf.task_acks_late is True
     schedules = celery_app.conf.beat_schedule
-    assert set(schedules) == {"enqueue-stale-companies", "expire-stale-job-sources"}
-    assert all(item["schedule"].hour == {2} and item["schedule"].minute == {0} for item in schedules.values())
+    assert set(schedules) == {
+        "enqueue-stale-companies",
+        "expire-stale-job-sources",
+        "redispatch-stale-queued-runs",
+    }
+    daily = (schedules["enqueue-stale-companies"], schedules["expire-stale-job-sources"])
+    assert all(item["schedule"].hour == {2} and item["schedule"].minute == {0} for item in daily)
+    assert schedules["redispatch-stale-queued-runs"]["schedule"].minute == set(range(60))

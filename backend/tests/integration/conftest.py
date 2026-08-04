@@ -103,6 +103,7 @@ def successful_llm_responses(*, evidence_id: str = "answer-123") -> tuple[str, s
                 "profiles": [],
                 "jobs": [
                     {
+                        "company_name": "Example Technologies",
                         "title": "Senior Data Engineer",
                         "employment_type": "full_time",
                         "location": "Shanghai",

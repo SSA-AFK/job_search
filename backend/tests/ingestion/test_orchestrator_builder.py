@@ -5,7 +5,9 @@ from app.ingestion.extraction.schemas import (
     CompanyCandidate,
     CompanyProfileCandidate,
     CompanyRef,
+    FilingCandidate,
     JobCandidate,
+    ProfileExtraction,
 )
 from app.ingestion.orchestrator import NormalizedBatchBuilder
 
@@ -21,15 +23,19 @@ def source(external_id: str, *, provider: str = "site") -> RawDocument:
     )
 
 
+def profile(candidate: CompanyProfileCandidate) -> ProfileExtraction:
+    return ProfileExtraction(profile=candidate)
+
+
 @pytest.mark.asyncio
 async def test_builder_derives_job_source_identity_from_its_evidence_document() -> None:
     documents = (source("company"), source("job-42", provider="careers"))
     batch = await NormalizedBatchBuilder().build(
         company=CompanyRef(name="Acme"),
-        profile=CompanyProfileCandidate(
+        profile=profile(CompanyProfileCandidate(
             name="Acme", evidence_ids=("company",), confidence=1, description="A company"
-        ),
-        jobs=(JobCandidate(title="Engineer", evidence_ids=("job-42",), confidence=1),),
+        )),
+        jobs=(JobCandidate(company_name="Acme", title="Engineer", evidence_ids=("job-42",), confidence=1),),
         documents=documents,
         discovered=CompanyCandidate(
             name="Acme", evidence_ids=("company",), confidence=1
@@ -47,7 +53,7 @@ async def test_builder_uses_discovery_evidence_for_discovery_fallback_fields() -
     batch = await NormalizedBatchBuilder().build(
         company=CompanyRef(name="Acme"),
         discovered=CompanyCandidate(name="Acme", website="https://acme.example", description="Acme", evidence_ids=("company",), confidence=1),
-        profile=CompanyProfileCandidate(name="Acme", evidence_ids=("profile",), confidence=1),
+        profile=profile(CompanyProfileCandidate(name="Acme", evidence_ids=("profile",), confidence=1)),
         jobs=(), documents=(source("company"), source("profile")),
     )
 
@@ -61,7 +67,7 @@ async def test_builder_treats_whitespace_profile_description_as_discovery_fallba
     batch = await NormalizedBatchBuilder().build(
         company=CompanyRef(name="Acme"),
         discovered=CompanyCandidate(name="Acme Holdings", description="Discovery text", evidence_ids=("company",), confidence=1),
-        profile=CompanyProfileCandidate(name="  Acme   Holdings ", description="   ", evidence_ids=("profile",), confidence=1),
+        profile=profile(CompanyProfileCandidate(name="  Acme   Holdings ", description="   ", evidence_ids=("profile",), confidence=1)),
         jobs=(), documents=(source("company"), source("profile")),
     )
 
@@ -76,7 +82,7 @@ async def test_builder_treats_whitespace_profile_description_as_discovery_fallba
 async def test_builder_cites_profile_evidence_for_profile_description() -> None:
     batch = await NormalizedBatchBuilder().build(
         company=CompanyRef(name="Acme"), discovered=CompanyCandidate(name="Acme", evidence_ids=("company",), confidence=1),
-        profile=CompanyProfileCandidate(name="Acme", description=" Profile text ", evidence_ids=("profile",), confidence=1),
+        profile=profile(CompanyProfileCandidate(name="Acme", description=" Profile text ", evidence_ids=("profile",), confidence=1)),
         jobs=(), documents=(source("company"), source("profile")),
     )
 
@@ -98,7 +104,7 @@ async def test_builder_rejects_conflicting_profile_data(profile: CompanyProfileC
         await NormalizedBatchBuilder().build(
             company=CompanyRef(name="Acme"),
             discovered=CompanyCandidate(name="Acme", website="https://acme.example", description="Acme", evidence_ids=("company",), confidence=1),
-            profile=profile, jobs=(), documents=(source("company"), source("profile")),
+            profile=ProfileExtraction(profile=profile), jobs=(), documents=(source("company"), source("profile")),
         )
 
 
@@ -113,12 +119,12 @@ async def test_builder_rejects_description_conflict_hidden_by_internal_whitespac
                 evidence_ids=("company",),
                 confidence=1,
             ),
-            profile=CompanyProfileCandidate(
+            profile=profile(CompanyProfileCandidate(
                 name="Acme",
                 description="A B",
                 evidence_ids=("profile",),
                 confidence=1,
-            ),
+            )),
             jobs=(),
             documents=(source("company"), source("profile")),
         )
@@ -129,8 +135,8 @@ async def test_builder_requires_explicit_source_for_multiple_job_evidence() -> N
     with pytest.raises(Exception, match="invalid_evidence"):
         await NormalizedBatchBuilder().build(
             company=CompanyRef(name="Acme"), discovered=CompanyCandidate(name="Acme", evidence_ids=("company",), confidence=1),
-            profile=CompanyProfileCandidate(name="Acme", evidence_ids=("company",), confidence=1),
-            jobs=(JobCandidate(title="Engineer", evidence_ids=("job-1", "job-2"), confidence=1),),
+            profile=profile(CompanyProfileCandidate(name="Acme", evidence_ids=("company",), confidence=1)),
+            jobs=(JobCandidate(company_name="Acme", title="Engineer", evidence_ids=("job-1", "job-2"), confidence=1),),
             documents=(source("company"), source("job-1"), source("job-2")),
         )
 
@@ -139,8 +145,8 @@ async def test_builder_requires_explicit_source_for_multiple_job_evidence() -> N
 async def test_builder_uses_explicit_source_for_multiple_job_evidence() -> None:
     batch = await NormalizedBatchBuilder().build(
         company=CompanyRef(name="Acme"), discovered=CompanyCandidate(name="Acme", evidence_ids=("company",), confidence=1),
-        profile=CompanyProfileCandidate(name="Acme", evidence_ids=("company",), confidence=1),
-        jobs=(JobCandidate(title="Engineer", evidence_ids=("job-1", "job-2"), source_evidence_id="job-2", confidence=1),),
+        profile=profile(CompanyProfileCandidate(name="Acme", evidence_ids=("company",), confidence=1)),
+        jobs=(JobCandidate(company_name="Acme", title="Engineer", evidence_ids=("job-1", "job-2"), source_evidence_id="job-2", confidence=1),),
         documents=(source("company"), source("job-1", provider="first"), source("job-2", provider="second")),
     )
 
@@ -148,3 +154,34 @@ async def test_builder_uses_explicit_source_for_multiple_job_evidence() -> None:
     assert job.source_evidence_id == "job-2"
     assert job.candidate.candidate.provider == "second"
     assert job.candidate.candidate.source_raw_id == "job-2"
+
+
+@pytest.mark.asyncio
+async def test_builder_normalizes_profile_filings_into_the_persistence_batch() -> None:
+    extraction = ProfileExtraction(
+        profile=CompanyProfileCandidate(
+            name="Acme", evidence_ids=("company",), confidence=1
+        ),
+        filings=(
+            FilingCandidate(
+                title="Acme ICP",
+                filing_type="icp",
+                filing_number="ICP-42",
+                evidence_ids=("company",),
+                confidence=1,
+            ),
+        ),
+    )
+
+    batch = await NormalizedBatchBuilder().build(
+        company=CompanyRef(name="Acme"),
+        profile=extraction,
+        jobs=(),
+        documents=(source("company"),),
+        discovered=CompanyCandidate(
+            name="Acme", evidence_ids=("company",), confidence=1
+        ),
+    )
+
+    assert [filing.filing_number for filing in batch.filings] == ["ICP-42"]
+    assert batch.filings[0].source_evidence_id == "company"

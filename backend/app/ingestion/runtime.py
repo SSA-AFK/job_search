@@ -1,6 +1,7 @@
 """Explicit caller-owned session composition for ingestion workers."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import cast
 
 from sqlalchemy.orm import Session
@@ -18,6 +19,13 @@ from app.ingestion.orchestrator import (
     IngestionOrchestrator,
     NormalizedBatchBuilder,
 )
+
+
+@dataclass(frozen=True)
+class RuntimeComponents:
+    providers: Sequence[Provider]
+    extractor: Extractor
+    semantic_judge: SemanticDuplicateJudge
 from app.ingestion.persistence.service import PersistenceService
 from app.ingestion.repositories import (
     SqlAlchemyCompanyDeduplicationRepository,

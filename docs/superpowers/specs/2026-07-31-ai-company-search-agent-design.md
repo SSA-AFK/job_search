@@ -240,6 +240,7 @@ Browser -> FastAPI -> Query Service -> SQLAlchemy -> Database
 | `jobs_written` | INTEGER | 默认 0 |
 | `error_code` | VARCHAR(50) | 可空 |
 | `error_detail` | TEXT | 仅后台可见，截断且不含密钥 |
+| `claim_token` | VARCHAR(36) | 可空，UUID Worker 代际令牌 |
 | `started_at` | DATETIME | 可空 |
 | `completed_at` | DATETIME | 可空 |
 | `created_at` | DATETIME | 创建时间 |
@@ -493,3 +494,15 @@ company_search/
 ## 16. 后续扩展
 
 新增国家或平台时实现新的 Provider，并声明凭证、合规条件、速率限制和输出能力。LinkedIn、Wellfound、Crunchbase、Glassdoor、企查查、天眼查、Boss 直聘和拉勾均不属于第一期已启用 Provider。
+
+## 17. Final-review contract amendments (2026-08-04)
+
+- Production collection uses the checked-in settings-backed composition by default. `COLLECTION_RUNTIME_FACTORY` is only an optional override. Runtime composition fails before any external call unless the OpenAI-compatible endpoint, model, key, and at least one authorized Provider are configured.
+- The Extractor retains exactly three methods. `extract_profile(...)` returns bounded `ProfileExtraction(profile, filings)`, and evidence-validated filings flow into `NormalizedBatch.filings`.
+- Every `JobCandidate` carries the target `company_name`. Discovery accepts only a deterministic normalized name, declared alias, or normalized containment relationship to the submitted query; a sole unrelated candidate is rejected.
+- `RawDocument` and all persistence DTO URLs must be public HTTP(S) URLs without credentials. Reconstructed Pydantic objects are revalidated rather than updated through unchecked copies.
+- Workers atomically compare-and-set `queued -> running` and assign a fresh UUID `claim_token`; `started_at` is only the stale-time signal. A delivery that observes `running` is an in-progress no-op. Retry, reconciliation, terminal writes, and the persistence transaction require the original token; persistence locks the paired run/request ownership through commit. Claim-error recovery first rolls back the failed transaction. Dispatch failure updates only paired `queued` rows, and Beat recovers stale queued/running rows every minute.
+- The OpenAI-compatible client reads streamed identity responses up to a fixed byte cap and rejects compressed or oversized responses. Extraction prompts define role-specific root arrays, required/optional fields, and supported enums before Pydantic validates the returned JSON.
+- Enabled Providers share per-process concurrency and start-rate gates. Stable Zhihu codes are `provider_auth_failed` for 401/403 and `provider_rate_limited` for exhausted 429; sanitized `stage`, `code`, and optional `provider` diagnostics are persisted in `crawl_runs.error_detail`.
+- Job persistence preserves the deduplicator's identity decision, never degrades a known job type to `unknown`, and rejects incompatible race winners. The incoming semantic comparison operand has no persisted posting identity.
+- Company fuzzy matching uses RapidFuzz ratio semantics with the inclusive 80 threshold declared by the implementation plan.

@@ -10,6 +10,7 @@ from app.ingestion.extraction.schemas import (
     CompanyProfileCandidate,
     CompanyRef,
     JobCandidate,
+    ProfileExtraction,
 )
 from app.ingestion.runtime import build_ingestion_orchestrator
 from app.models import (
@@ -42,10 +43,10 @@ class Extractor:
         return (CompanyCandidate(name="Acme", evidence_ids=("job-1",), confidence=1),)
 
     async def extract_profile(self, _company: CompanyRef, _documents):
-        return CompanyProfileCandidate(name="Acme", evidence_ids=("job-1",), confidence=1, description="Acme")
+        return ProfileExtraction(profile=CompanyProfileCandidate(name="Acme", evidence_ids=("job-1",), confidence=1, description="Acme"))
 
     async def extract_jobs(self, _company: CompanyRef, _documents):
-        return (JobCandidate(title="Engineer", evidence_ids=("job-1",), confidence=1),)
+        return (JobCandidate(company_name="Acme", title="Engineer", evidence_ids=("job-1",), confidence=1),)
 
 
 class SemanticJudge:

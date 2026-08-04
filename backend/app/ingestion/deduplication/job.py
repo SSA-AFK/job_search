@@ -17,7 +17,7 @@ _SEMANTIC_MAXIMUM = 85.0
 
 @dataclass(frozen=True)
 class JobForComparison:
-    job_posting_id: UUID
+    job_posting_id: UUID | None
     normalized_title: str
     city: str
     job_type: JobType
@@ -84,7 +84,7 @@ class JobDeduplicator:
 
         decision = await self._semantic_judge.jobs_are_duplicates(
             JobForComparison(
-                job_posting_id=best_match[1].job_posting_id,
+                job_posting_id=None,
                 normalized_title=normalized.normalized_title,
                 city=normalized.normalized_city,
                 job_type=normalized.job_type,

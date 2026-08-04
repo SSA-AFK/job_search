@@ -10,12 +10,19 @@ from app.ingestion.extraction.schemas import (
 )
 
 
+def test_job_candidate_requires_target_company_reference() -> None:
+    with pytest.raises(ValidationError, match="company_name"):
+        JobCandidate(
+            title="Engineer", evidence_ids=("one",), confidence=1
+        )
+
+
 def test_job_source_evidence_must_be_listed_and_prompt_allowed() -> None:
     with pytest.raises(ValidationError, match="one of evidence_ids"):
-        JobCandidate(title="Engineer", evidence_ids=("one",), source_evidence_id="two", confidence=1)
+        JobCandidate(company_name="Example", title="Engineer", evidence_ids=("one",), source_evidence_id="two", confidence=1)
     with pytest.raises(ValidationError, match="supplied in the prompt"):
         JobCandidate.model_validate(
-            {"title": "Engineer", "evidence_ids": ["one", "two"], "source_evidence_id": "two", "confidence": 1},
+            {"company_name":"Example", "title": "Engineer", "evidence_ids": ["one", "two"], "source_evidence_id": "two", "confidence": 1},
             context={"allowed_evidence_ids": {"one"}},
         )
 
@@ -68,6 +75,7 @@ def test_job_candidate_rejects_unknown_employment_type() -> None:
 def test_job_candidate_preserves_optional_source_and_salary_fields() -> None:
     candidate = JobCandidate.model_validate(
         {
+            "company_name": "Example",
             "title": "Software Engineer",
             "provider": "zhihu",
             "source_raw_id": "42",
@@ -85,6 +93,7 @@ def test_job_candidate_preserves_optional_source_and_salary_fields() -> None:
 def test_job_candidate_preserves_apply_url_and_posted_date() -> None:
     candidate = JobCandidate.model_validate(
         {
+            "company_name": "Example",
             "title": "Software Engineer",
             "apply_url": "https://example.com/jobs/42",
             "posted_at": "2026-07-20",
@@ -101,6 +110,7 @@ def test_job_candidate_rejects_oversized_apply_url() -> None:
     with pytest.raises(ValidationError):
         JobCandidate.model_validate(
             {
+                "company_name": "Example",
                 "title": "Software Engineer",
                 "apply_url": "https://example.com/" + "x" * 2_000,
                 "evidence_ids": ["doc-1"],
@@ -129,6 +139,7 @@ def test_job_candidate_rejects_statically_unsafe_apply_url(apply_url: str) -> No
     with pytest.raises(ValidationError, match="public URL"):
         JobCandidate.model_validate(
             {
+                "company_name": "Example",
                 "title": "Software Engineer",
                 "apply_url": apply_url,
                 "evidence_ids": ["doc-1"],
@@ -147,6 +158,7 @@ def test_job_candidate_rejects_statically_unsafe_apply_url(apply_url: str) -> No
 def test_job_candidate_accepts_statically_public_apply_url(apply_url: str) -> None:
     candidate = JobCandidate.model_validate(
         {
+            "company_name": "Example",
             "title": "Software Engineer",
             "apply_url": apply_url,
             "evidence_ids": ["doc-1"],

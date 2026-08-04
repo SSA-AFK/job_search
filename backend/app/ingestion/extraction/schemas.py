@@ -2,7 +2,6 @@
 
 from datetime import date
 from enum import StrEnum
-from ipaddress import ip_address
 from typing import Annotated
 
 from pydantic import (
@@ -15,6 +14,8 @@ from pydantic import (
     field_validator,
 )
 
+from app.ingestion.contracts import require_statically_public_url
+
 
 def _bounded_external_url(value: HttpUrl) -> HttpUrl:
     if len(str(value)) > 2_000:
@@ -22,38 +23,10 @@ def _bounded_external_url(value: HttpUrl) -> HttpUrl:
     return value
 
 
-def _require_statically_public_url(value: HttpUrl) -> HttpUrl:
-    host = (value.host or "").lower().rstrip(".")
-    if value.username is not None or value.password is not None:
-        raise ValueError("URL must be a public URL without credentials")
-    if not host or host in {"localhost", "home.arpa"} or host.endswith(
-        (
-            ".localhost",
-            ".local",
-            ".localdomain",
-            ".internal",
-            ".lan",
-            ".home",
-            ".home.arpa",
-        )
-    ):
-        raise ValueError("URL must be a public URL")
-    literal_host = host.removeprefix("[").removesuffix("]")
-    try:
-        address = ip_address(literal_host)
-    except ValueError:
-        if "." not in host:
-            raise ValueError("URL must be a public URL") from None
-    else:
-        if not address.is_global:
-            raise ValueError("URL must be a public URL")
-    return value
-
-
 ExternalUrl = Annotated[
     HttpUrl,
     AfterValidator(_bounded_external_url),
-    AfterValidator(_require_statically_public_url),
+    AfterValidator(require_statically_public_url),
 ]
 
 
@@ -66,7 +39,7 @@ def _bounded_company_url(value: HttpUrl) -> HttpUrl:
 CompanyUrl = Annotated[
     HttpUrl,
     AfterValidator(_bounded_company_url),
-    AfterValidator(_require_statically_public_url),
+    AfterValidator(require_statically_public_url),
 ]
 
 
@@ -108,6 +81,9 @@ class CompanyRef(FrozenExtractionModel):
 
 
 class CompanyCandidate(CompanyRef, EvidenceCandidate):
+    aliases: tuple[Annotated[str, Field(min_length=1, max_length=200)], ...] = Field(
+        default_factory=tuple, max_length=20
+    )
     description: str | None = Field(default=None, max_length=4_000)
 
     @field_validator("description")
@@ -130,6 +106,7 @@ class CompanyProfileCandidate(CompanyRef, EvidenceCandidate):
 
 
 class JobCandidate(EvidenceCandidate):
+    company_name: str = Field(min_length=1, max_length=200)
     title: str = Field(min_length=1, max_length=255)
     employment_type: EmploymentType | None = None
     location: str | None = Field(default=None, max_length=50)
@@ -176,6 +153,11 @@ class FilingCandidate(EvidenceCandidate):
     @classmethod
     def description_must_not_contain_html(cls, description: str | None) -> str | None:
         return CompanyCandidate.description_must_not_contain_html(description)
+
+
+class ProfileExtraction(FrozenExtractionModel):
+    profile: CompanyProfileCandidate
+    filings: tuple[FilingCandidate, ...] = Field(default_factory=tuple, max_length=100)
 
 
 class ExtractionBatch(FrozenExtractionModel):

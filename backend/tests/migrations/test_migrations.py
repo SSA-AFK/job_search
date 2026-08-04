@@ -1,7 +1,9 @@
+import runpy
 from pathlib import Path
 
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.dialects import postgresql
 
 from alembic import command
 
@@ -18,6 +20,24 @@ EXPECTED_TABLES = {
 }
 
 
+def test_claim_token_backfill_compiles_uuid_cast_for_postgresql() -> None:
+    migration_path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "0004_crawl_run_claim_token.py"
+    )
+    migration = runpy.run_path(str(migration_path))
+
+    compiled = str(
+        migration["BACKFILL_RUNNING_CLAIMS"].compile(
+            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    )
+
+    assert "SET claim_token=CAST(crawl_runs.id AS VARCHAR(36))" in compiled
+
+
 def test_initial_migration_round_trip(tmp_path: Path) -> None:
     database_path = tmp_path / "migration.sqlite3"
     database_url = f"sqlite:///{database_path.as_posix()}"
@@ -28,6 +48,9 @@ def test_initial_migration_round_trip(tmp_path: Path) -> None:
     command.upgrade(config, "head")
     inspector = inspect(engine)
     assert set(inspector.get_table_names()) == EXPECTED_TABLES | {"alembic_version"}
+    assert "claim_token" in {
+        column["name"] for column in inspector.get_columns("crawl_runs")
+    }
     assert {index["name"] for index in inspector.get_indexes("companies")} >= {
         "ix_companies_normalized_name",
         "ix_companies_industry",
@@ -101,3 +124,30 @@ def test_initial_migration_round_trip(tmp_path: Path) -> None:
 
     command.upgrade(config, "head")
     assert set(inspect(engine).get_table_names()) == EXPECTED_TABLES | {"alembic_version"}
+
+
+def test_claim_token_migration_backfills_existing_running_runs(tmp_path: Path) -> None:
+    database_path = tmp_path / "claim-token-migration.sqlite3"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config(Path(__file__).parents[2] / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", database_url)
+    engine = create_engine(database_url)
+    run_id = "00000000-0000-0000-0000-000000000042"
+    command.upgrade(config, "0003_source_document_null_external_identity")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO crawl_runs "
+                "(id, run_type, status, providers_attempted, created_at) "
+                "VALUES (:id, 'discovery', 'running', '[]', :created_at)"
+            ),
+            {"id": run_id, "created_at": "2026-08-04 00:00:00+00:00"},
+        )
+
+    command.upgrade(config, "head")
+
+    with engine.connect() as connection:
+        assert connection.scalar(
+            text("SELECT claim_token FROM crawl_runs WHERE id = :id"),
+            {"id": run_id},
+        ) == run_id

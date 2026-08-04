@@ -1,11 +1,19 @@
+import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy.exc import OperationalError
 
 from app.ingestion.contracts import ProviderQuery, ProviderResult, RawDocument
-from app.ingestion.errors import ExtractionError, ProviderError
+from app.ingestion.errors import (
+    ExtractionError,
+    ProviderError,
+    RetryableInfrastructureError,
+    RunClaimError,
+)
 from app.ingestion.extraction.schemas import CompanyCandidate
 from app.ingestion.orchestrator import IngestionOrchestrator
 from app.ingestion.persistence.result import PersistenceResult
@@ -23,23 +31,52 @@ class FakeRun:
     jobs_written: int = 0
     error_code: str | None = None
     error_detail: str | None = None
+    claim_token: str | None = None
+    started_at: datetime | None = None
 
 
 class FakeRuns:
     def __init__(self, runs: dict[UUID, FakeRun]) -> None:
         self.runs = runs
         self.requests = {run_id: SimpleNamespace(query="Acme") for run_id in runs}
+        self.claim_is_current = True
 
-    def start_or_get_terminal(self, run_id: UUID) -> FakeRun | None:
+    def claim_queued(self, run_id: UUID):
         run = self.runs.get(run_id)
         if run is None:
             return None
         if run.status in {CollectionStatus.SUCCEEDED, CollectionStatus.PARTIAL, CollectionStatus.FAILED}:
-            return run
-        if run.status is not CollectionStatus.QUEUED:
-            raise ValueError("invalid_run_state")
+            return SimpleNamespace(
+                run=run, claimed=False, claim_token=run.claim_token
+            )
+        if run.status is CollectionStatus.RUNNING:
+            return SimpleNamespace(
+                run=run, claimed=False, claim_token=run.claim_token
+            )
         run.status = CollectionStatus.RUNNING
-        return run
+        run.claim_token = str(uuid4())
+        run.started_at = datetime(2026, 8, 4, 12, tzinfo=UTC)
+        return SimpleNamespace(run=run, claimed=True, claim_token=run.claim_token)
+
+    def get_run(self, run_id: UUID) -> FakeRun | None:
+        return self.runs.get(run_id)
+
+    def recover_claim_token(
+        self, run_id: UUID, *, expected_claim_token: str
+    ) -> str | None:
+        run = self.runs.get(run_id)
+        if run is None or run.claim_token != expected_claim_token:
+            return None
+        return run.claim_token
+
+    def owns_claim(self, run_id: UUID, *, expected_claim_token: str) -> bool:
+        run = self.runs.get(run_id)
+        return (
+            self.claim_is_current
+            and run is not None
+            and run.status is CollectionStatus.RUNNING
+            and run.claim_token == expected_claim_token
+        )
 
     def get_request_for_run(self, run: FakeRun) -> SimpleNamespace:
         return self.requests[run.id]
@@ -48,6 +85,7 @@ class FakeRuns:
         self,
         run: FakeRun,
         *,
+        expected_claim_token: str | None = None,
         status: CollectionStatus,
         providers_attempted: tuple[str, ...],
         documents_found: int,
@@ -56,6 +94,7 @@ class FakeRuns:
         error_code: str | None,
         error_detail: str | None,
     ) -> FakeRun:
+        assert expected_claim_token == run.claim_token
         run.status = status
         run.providers_attempted = list(providers_attempted)
         run.documents_found = documents_found
@@ -133,7 +172,14 @@ class FakePersistence:
         self.calls = 0
         self.result = PersistenceResult(uuid4(), documents_written=2, jobs_written=1, warnings=())
 
-    def persist(self, _batch: object, _run_id: UUID) -> PersistenceResult:
+    def persist(
+        self,
+        _batch: object,
+        _run_id: UUID,
+        *,
+        expected_claim_token: str | None = None,
+    ) -> PersistenceResult:
+        assert expected_claim_token is not None
         self.calls += 1
         return self.result
 
@@ -198,15 +244,15 @@ async def test_unknown_run_returns_a_deterministic_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_invalid_starting_state_returns_a_failure_without_external_work() -> None:
+async def test_running_redelivery_is_an_in_progress_noop_without_external_work() -> None:
     run = FakeRun(uuid4(), status=CollectionStatus.RUNNING)
     provider = FakeProvider("site", ProviderResult(documents=(document(),)))
     orchestrator, _runs, persistence = orchestrator_for(run, providers=[provider])
 
     result = await orchestrator.run(run.id)
 
-    assert result.status is CollectionStatus.FAILED
-    assert result.error_code == "invalid_run_state"
+    assert result.status is CollectionStatus.RUNNING
+    assert result.error_code is None
     assert provider.calls == 0
     assert persistence.calls == 0
 
@@ -226,6 +272,62 @@ async def test_terminal_run_is_returned_without_reprocessing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_claim_failure_recovers_only_the_attempted_token() -> None:
+    attempted_token = "worker-a-token"
+    current_token = "worker-b-token"
+    run = FakeRun(
+        uuid4(), status=CollectionStatus.RUNNING, claim_token=current_token
+    )
+    orchestrator, _runs, _persistence = orchestrator_for(run, providers=[])
+    recovered_tokens: list[str] = []
+
+    class ClaimFailingRuns(FakeRuns):
+        def claim_queued(self, run_id: UUID):
+            raise RunClaimError(claim_token=attempted_token)
+
+        def recover_claim_token(
+            self, run_id: UUID, *, expected_claim_token: str
+        ) -> str | None:
+            recovered_tokens.append(expected_claim_token)
+            return super().recover_claim_token(
+                run_id, expected_claim_token=expected_claim_token
+            )
+
+    orchestrator.runs = ClaimFailingRuns({run.id: run})
+
+    with pytest.raises(RetryableInfrastructureError) as raised:
+        await orchestrator.run(run.id)
+
+    assert recovered_tokens == [attempted_token]
+    assert raised.value.claim_token is None
+
+
+@pytest.mark.asyncio
+async def test_unattributed_claim_failure_does_not_recover_state() -> None:
+    run = FakeRun(uuid4())
+    orchestrator, _runs, _persistence = orchestrator_for(run, providers=[])
+    recovery_calls: list[UUID] = []
+
+    class UnattributedClaimFailureRuns(FakeRuns):
+        def claim_queued(self, run_id: UUID):
+            raise OperationalError(
+                "update crawl_runs", {}, RuntimeError("database unavailable")
+            )
+
+        def recover_claim_token(self, run_id: UUID, **_kwargs: str) -> str:
+            recovery_calls.append(run_id)
+            return "another-workers-token"
+
+    orchestrator.runs = UnattributedClaimFailureRuns({run.id: run})
+
+    with pytest.raises(RetryableInfrastructureError) as raised:
+        await orchestrator.run(run.id)
+
+    assert recovery_calls == []
+    assert raised.value.claim_token is None
+
+
+@pytest.mark.asyncio
 async def test_unexpected_extraction_exception_is_sanitized_before_terminal_failure() -> None:
     run = FakeRun(uuid4())
     provider = FakeProvider("site", ProviderResult(documents=(document(),)))
@@ -239,7 +341,9 @@ async def test_unexpected_extraction_exception_is_sanitized_before_terminal_fail
 
     assert result.status is CollectionStatus.FAILED
     assert result.error_code == "ingestion_failed"
-    assert runs.runs[run.id].error_detail == "ingestion_failed"
+    assert json.loads(runs.runs[run.id].error_detail) == {
+        "issues": [{"stage": "profile", "code": "ingestion_failed"}]
+    }
     assert persistence.calls == 0
 
 
@@ -258,6 +362,11 @@ async def test_provider_failure_with_persisted_data_is_partial() -> None:
     assert result.error_code == "provider_timeout"
     assert result.providers_attempted == ("site", "jobs")
     assert runs.runs[run.id].status is CollectionStatus.PARTIAL
+    assert json.loads(runs.runs[run.id].error_detail) == {
+        "issues": [
+            {"stage": "provider", "provider": "jobs", "code": "provider_timeout"}
+        ]
+    }
     assert persistence.calls == 1
 
 
@@ -274,6 +383,19 @@ async def test_provider_warning_with_persisted_data_is_partial() -> None:
     assert result.status is CollectionStatus.PARTIAL
     assert result.error_code == "provider_degraded"
     assert persistence.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_that_lost_its_claim_cannot_write_persistence() -> None:
+    run = FakeRun(uuid4())
+    provider = FakeProvider("site", ProviderResult(documents=(document(),)))
+    orchestrator, runs, persistence = orchestrator_for(run, providers=[provider])
+    runs.claim_is_current = False
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.RUNNING
+    assert persistence.calls == 0
 
 
 @pytest.mark.asyncio
@@ -464,7 +586,7 @@ async def test_ambiguous_discovery_fails_without_persistence() -> None:
 
 
 @pytest.mark.asyncio
-async def test_singular_non_exact_discovery_candidate_is_selected() -> None:
+async def test_singular_related_discovery_candidate_is_selected() -> None:
     run = FakeRun(uuid4())
     provider = FakeProvider("site", ProviderResult(documents=(document(),)))
     candidate = CompanyCandidate(name="Acme Incorporated", evidence_ids=("acme-home",), confidence=1)
@@ -474,6 +596,24 @@ async def test_singular_non_exact_discovery_candidate_is_selected() -> None:
 
     assert result.status is CollectionStatus.SUCCEEDED
     assert persistence.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_singular_unrelated_discovery_candidate_is_rejected() -> None:
+    run = FakeRun(uuid4())
+    provider = FakeProvider("site", ProviderResult(documents=(document(),)))
+    candidate = CompanyCandidate(
+        name="Unrelated Holdings", evidence_ids=("acme-home",), confidence=1
+    )
+    orchestrator, _runs, persistence = orchestrator_for(
+        run, providers=[provider], discovered=(candidate,)
+    )
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.FAILED
+    assert result.error_code == "ambiguous_company"
+    assert persistence.calls == 0
 
 
 @pytest.mark.asyncio
@@ -534,7 +674,9 @@ async def test_extraction_failure_without_data_is_failed_without_persistence() -
 
     assert result.status is CollectionStatus.FAILED
     assert result.error_code == "invalid_output"
-    assert runs.runs[run.id].error_detail == "invalid_output"
+    assert json.loads(runs.runs[run.id].error_detail) == {
+        "issues": [{"stage": "profile", "code": "invalid_output"}]
+    }
     assert persistence.calls == 0
 
 

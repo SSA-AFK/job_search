@@ -96,6 +96,7 @@ def test_batch_rejects_job_without_provider_source_identity() -> None:
     job = NormalizedJobRecord(
         candidate=normalize_job(
             JobCandidate(
+                company_name="Example",
                 title="Engineer",
                 location="Shanghai",
                 evidence_ids=["doc-1"],
@@ -124,6 +125,7 @@ def test_batch_with_fetched_at_updates_all_collection_times() -> None:
     job = NormalizedJobRecord(
         candidate=normalize_job(
             JobCandidate(
+                company_name="Example",
                 title="Engineer",
                 location="Shanghai",
                 provider="official",
@@ -216,9 +218,55 @@ def test_raw_document_rejects_values_too_long_for_database(
         RawDocument.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1/source",
+        "http://localhost/source",
+        "https://user:password@example.com/source",
+    ],
+)
+def test_raw_document_rejects_non_public_or_credentialed_urls(url: str) -> None:
+    with pytest.raises(ValidationError):
+        RawDocument(
+            provider="official",
+            external_id="doc-1",
+            url=url,
+            title="Source",
+            text="Evidence",
+            published_at=None,
+        )
+
+
+@pytest.mark.parametrize(
+    "url", ["http://127.0.0.1/jobs/1", "https://user:pass@example.com/jobs/1"]
+)
+def test_persistence_job_dto_rejects_unsafe_apply_url(url: str) -> None:
+    candidate = normalize_job(
+        JobCandidate(
+            company_name="Example",
+            title="Engineer",
+            provider="official",
+            source_raw_id="job-1",
+            evidence_ids=["doc-1"],
+            confidence=0.9,
+        )
+    )
+    with pytest.raises(ValidationError):
+        NormalizedJobRecord(
+            candidate=candidate,
+            job_posting_id=None,
+            source_evidence_id="doc-1",
+            apply_url=url,
+            posted_at=None,
+            seen_at=NOW,
+        )
+
+
 def test_normalized_job_rejects_salary_outside_database_integer_domain() -> None:
     candidate = normalize_job(
         JobCandidate(
+            company_name="Example",
             title="Engineer",
             location="Shanghai",
             provider="official",
@@ -250,6 +298,7 @@ def test_normalized_job_rejects_salary_months_outside_positive_smallint_domain(
 ) -> None:
     candidate = normalize_job(
         JobCandidate(
+            company_name="Example",
             title="Engineer",
             location="Shanghai",
             provider="official",
@@ -277,6 +326,7 @@ def test_normalized_job_rejects_non_integer_salary_months(
 ) -> None:
     candidate = normalize_job(
         JobCandidate(
+            company_name="Example",
             title="Engineer",
             location="Shanghai",
             provider="official",

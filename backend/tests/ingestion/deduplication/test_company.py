@@ -54,6 +54,19 @@ def test_company_fuzzy_match_uses_an_inclusive_80_percent_threshold(
     assert match.kind == expected_kind
 
 
+def test_company_fuzzy_match_uses_rapidfuzz_ratio_semantics(company_id: UUID) -> None:
+    repository = FakeCompanyRepository(
+        exact={},
+        comparisons=(CompanyForComparison(company_id, "prefixdiet"),),
+    )
+    deduplicator = CompanyDeduplicator(repository)
+
+    match = asyncio.run(deduplicator.resolve(company_candidate("prefixtide")))
+
+    assert match.kind == "existing"
+    assert match.company_id == company_id
+
+
 def company_candidate(name: str) -> CompanyCandidate:
     return CompanyCandidate(name=name, evidence_ids=["doc-1"], confidence=0.9)
 

@@ -2,14 +2,19 @@ from uuid import uuid4
 
 import pytest
 from celery.exceptions import Retry
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.collection.repository import CollectionRepository
 from app.ingestion.contracts import ProviderQuery, ProviderResult, RawDocument
 from app.ingestion.deduplication.semantic import DuplicateDecision
-from app.ingestion.extraction.schemas import CompanyCandidate, CompanyProfileCandidate, CompanyRef
+from app.ingestion.extraction.schemas import (
+    CompanyCandidate,
+    CompanyProfileCandidate,
+    CompanyRef,
+    ProfileExtraction,
+)
 from app.ingestion.runtime import build_ingestion_orchestrator
 from app.models import Base, CollectionStatus, CrawlRun
 
@@ -28,7 +33,7 @@ class Extractor:
         return (CompanyCandidate(name="Acme", evidence_ids=("source",), confidence=1),)
 
     async def extract_profile(self, _company: CompanyRef, _documents):
-        return CompanyProfileCandidate(name="Acme", evidence_ids=("source",), confidence=1)
+        return ProfileExtraction(profile=CompanyProfileCandidate(name="Acme", evidence_ids=("source",), confidence=1))
 
     async def extract_jobs(self, _company: CompanyRef, _documents):
         return ()
@@ -154,7 +159,8 @@ def test_collection_task_retries_infrastructure_error_with_same_run_id(monkeypat
 
     retries = []
 
-    def retry(*, exc, countdown):
+    def retry(*, exc, countdown, args):
+        assert args[0] == str(run_id)
         retries.append((exc, countdown))
         raise Retry()
 
@@ -198,7 +204,8 @@ def test_collection_task_requeues_real_running_run_before_retry(tmp_path, monkey
 
     retries = []
 
-    def retry(*, exc, countdown):
+    def retry(*, exc, countdown, args):
+        assert args[0] == str(run.id)
         retries.append((exc, countdown))
         raise Retry()
 
@@ -322,7 +329,8 @@ def test_collection_task_retries_real_terminal_write_infrastructure_failure(tmp_
 
     retries = []
 
-    def retry(*, exc, countdown):
+    def retry(*, exc, countdown, args):
+        assert args[0] == str(run.id)
         retries.append((exc, countdown))
         raise Retry()
 
@@ -352,6 +360,13 @@ def test_collection_task_recovers_real_running_state_with_a_fresh_session(tmp_pa
 
     def runtime_factory():
         sessions = tuple(Session(engine, expire_on_commit=False) for _ in range(3))
+        commit = sessions[0].commit
+
+        def commit_then_lose_connection() -> None:
+            commit()
+            sessions[0].execute(text("SELECT * FROM missing_claim_state"))
+
+        sessions[0].commit = commit_then_lose_connection
         orchestrator = build_ingestion_orchestrator(
             run_state_session=sessions[0],
             dedup_read_session=sessions[1],
@@ -360,19 +375,15 @@ def test_collection_task_recovers_real_running_state_with_a_fresh_session(tmp_pa
             extractor=Extractor(),
             semantic_judge=SemanticJudge(),
         )
-        start = orchestrator.runs.start_or_get_terminal
-
-        def fail_run_state(run_id):
-            start(run_id)
-            raise OperationalError("update crawl_runs", {}, RuntimeError("state database unavailable"))
-
-        orchestrator.runs.start_or_get_terminal = fail_run_state
-        orchestrator.runs.requeue_for_retry = lambda _run_id: pytest.fail("reused failed state session")
+        orchestrator.runs.requeue_for_retry = lambda _run_id, **_kwargs: pytest.fail(
+            "reused failed state session"
+        )
         return orchestrator, sessions
 
     retries = []
 
-    def retry(*, exc, countdown):
+    def retry(*, exc, countdown, args):
+        assert args[0] == str(run.id)
         retries.append((exc, countdown))
         raise Retry()
 
@@ -384,6 +395,7 @@ def test_collection_task_recovers_real_running_state_with_a_fresh_session(tmp_pa
         run_ingestion.run(str(run.id))
 
     assert retries and retries[0][1] == 1
+    assert retries[0][0].claim_token is not None
     with Session(engine) as session:
         persisted_run = session.get(CrawlRun, run.id)
         persisted_request = session.get(type(request), request.id)

@@ -1,6 +1,7 @@
 """Provider-facing immutable data contracts."""
 
 from datetime import datetime
+from ipaddress import ip_address
 from typing import Annotated, Protocol, runtime_checkable
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, HttpUrl
@@ -12,7 +13,39 @@ def _bounded_document_url(value: HttpUrl) -> HttpUrl:
     return value
 
 
-DocumentUrl = Annotated[HttpUrl, AfterValidator(_bounded_document_url)]
+def require_statically_public_url(value: HttpUrl) -> HttpUrl:
+    host = (value.host or "").lower().rstrip(".")
+    if value.username is not None or value.password is not None:
+        raise ValueError("URL must be a public URL without credentials")
+    if not host or host in {"localhost", "home.arpa"} or host.endswith(
+        (
+            ".localhost",
+            ".local",
+            ".localdomain",
+            ".internal",
+            ".lan",
+            ".home",
+            ".home.arpa",
+        )
+    ):
+        raise ValueError("URL must be a public URL")
+    literal_host = host.removeprefix("[").removesuffix("]")
+    try:
+        address = ip_address(literal_host)
+    except ValueError:
+        if "." not in host:
+            raise ValueError("URL must be a public URL") from None
+    else:
+        if not address.is_global:
+            raise ValueError("URL must be a public URL")
+    return value
+
+
+DocumentUrl = Annotated[
+    HttpUrl,
+    AfterValidator(_bounded_document_url),
+    AfterValidator(require_statically_public_url),
+]
 
 
 class ProviderQuery(BaseModel):

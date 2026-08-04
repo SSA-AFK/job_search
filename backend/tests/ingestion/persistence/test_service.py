@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.orm import Session
 
+from app.collection.repository import CollectionRepository
 from app.ingestion.contracts import RawDocument
 from app.ingestion.extraction.schemas import CompanyCandidate, JobCandidate
 from app.ingestion.normalization.company import normalize_company
@@ -23,6 +24,7 @@ from app.ingestion.persistence.contracts import (
 from app.ingestion.persistence.service import PersistenceError, PersistenceService
 from app.models import (
     Base,
+    CollectionStatus,
     Company,
     CompanySource,
     FilingType,
@@ -96,6 +98,7 @@ def normalized_job(
     return NormalizedJobRecord(
         candidate=normalize_job(
             JobCandidate(
+                company_name="Example",
                 title="Software Engineer",
                 employment_type="full_time",
                 location="Shanghai",
@@ -149,6 +152,35 @@ def normalized_batch(
     )
 
 
+def test_persistence_rejects_old_claim_after_requeue_and_reclaim(session: Session) -> None:
+    repository = CollectionRepository(session)
+    _request, run = repository.create_request("Example", "example")
+    session.commit()
+    first_claim = repository.claim_queued(run.id)
+    assert first_claim is not None and first_claim.claimed
+    first_token = first_claim.claim_token
+    assert first_token is not None
+    assert repository.owns_claim(run.id, expected_claim_token=first_token)
+    repository.requeue_for_retry(run.id, expected_claim_token=first_token)
+    second_claim = repository.claim_queued(run.id)
+    assert second_claim is not None and second_claim.claimed
+    second_token = second_claim.claim_token
+    run_id = run.id
+    session.rollback()
+
+    with pytest.raises(PersistenceError, match="run_claim"):
+        PersistenceService(session).persist(
+            normalized_batch(filings=()),
+            run_id=run_id,
+            expected_claim_token=first_token,
+        )
+
+    assert session.scalar(select(func.count(Company.id))) == 0
+    stored = session.get(type(run), run_id)
+    assert stored is not None and stored.status is CollectionStatus.RUNNING
+    assert stored.claim_token == second_token
+
+
 def test_persist_rejects_clean_autobegin_without_ending_caller_transaction(session: Session) -> None:
     assert session.scalar(select(Company).where(Company.canonical_name == "missing")) is None
     assert session.in_transaction()
@@ -180,11 +212,33 @@ def persistence(session: Session) -> PersistenceService:
     return PersistenceService(session)
 
 
+def existing_company_job(session: Session) -> tuple[Company, JobPosting]:
+    company = Company(canonical_name="Example", normalized_name="example")
+    session.add(company)
+    session.flush()
+    job = JobPosting(
+        company_id=company.id,
+        title="Software Engineer",
+        normalized_title="softwareengineer",
+        job_type="full_time",
+        city="shanghai",
+        description="",
+    )
+    session.add(job)
+    session.commit()
+    return company, job
+
+
 def test_reprocessing_same_batch_updates_seen_time_without_new_rows(
     session: Session, persistence: PersistenceService
 ) -> None:
+    company, job = existing_company_job(session)
     batch = normalized_batch(
-        jobs=(normalized_job("job-1"), normalized_job("job-2")),
+        company=normalized_company(company_id=company.id),
+        jobs=(
+            normalized_job("job-1", job_posting_id=job.id),
+            normalized_job("job-2", job_posting_id=job.id),
+        ),
     )
 
     first = persistence.persist(batch, run_id=uuid4())
@@ -202,9 +256,14 @@ def test_reprocessing_same_batch_updates_seen_time_without_new_rows(
 def test_two_sources_are_attached_to_one_canonical_job(
     session: Session, persistence: PersistenceService
 ) -> None:
+    company, job = existing_company_job(session)
     persistence.persist(
         normalized_batch(
-            jobs=(normalized_job("official-1"), normalized_job("board-1")),
+            company=normalized_company(company_id=company.id),
+            jobs=(
+                normalized_job("official-1", job_posting_id=job.id),
+                normalized_job("board-1", job_posting_id=job.id),
+            ),
             filings=(),
         ),
         run_id=uuid4(),
@@ -262,20 +321,24 @@ def test_source_documents_without_external_ids_use_url_and_hash_identity(
 def test_job_merge_keeps_earliest_date_longest_description_and_source_activity(
     session: Session, persistence: PersistenceService
 ) -> None:
+    company, job = existing_company_job(session)
     persistence.persist(
         normalized_batch(
+            company=normalized_company(company_id=company.id),
             jobs=(
                 normalized_job(
                     "job-newer",
                     description="short",
                     posted_at=date(2026, 7, 20),
                     is_active=False,
+                    job_posting_id=job.id,
                 ),
                 normalized_job(
                     "job-older",
                     description="A much longer valid description",
                     posted_at=date(2026, 7, 1),
                     is_active=True,
+                    job_posting_id=job.id,
                 ),
             ),
             filings=(),
@@ -479,7 +542,7 @@ def test_invalid_bypassed_job_state_becomes_audited_persistence_error(
         persistence.persist(invalid_batch, run_id=run_id)
 
     assert raised.value.run_id == run_id
-    assert raised.value.constraint == "uq_job_source_provider_raw_id"
+    assert raised.value.constraint == "persistence_dto"
     assert count_rows(session, SourceDocument) == 0
 
 
@@ -659,7 +722,7 @@ def test_statement_error_is_sanitized_with_run_context_and_full_rollback(
         persistence.persist(invalid_batch, run_id=run_id)
 
     assert raised.value.run_id == run_id
-    assert raised.value.detail == "database statement failed"
+    assert raised.value.detail == "invalid persistence boundary data"
     assert count_rows(session, SourceDocument) == 0
     assert count_rows(session, Company) == 0
 
@@ -687,7 +750,7 @@ def test_integer_overflow_is_sanitized_and_leaves_session_usable(
         persistence.persist(invalid_batch, run_id=run_id)
 
     assert raised.value.run_id == run_id
-    assert raised.value.detail == "database integer overflow"
+    assert raised.value.detail == "invalid persistence boundary data"
     assert count_rows(session, SourceDocument) == 0
     assert count_rows(session, Company) == 0
     assert count_rows(session, JobPosting) == 0
@@ -718,8 +781,8 @@ def test_bypassed_salary_months_outside_smallint_domain_rolls_back(
         persistence.persist(invalid_batch, run_id=run_id)
 
     assert raised.value.run_id == run_id
-    assert raised.value.constraint == "salary_months"
-    assert raised.value.detail == "normalized salary months exceed database domain"
+    assert raised.value.constraint == "persistence_dto"
+    assert raised.value.detail == "invalid persistence boundary data"
     assert count_rows(session, SourceDocument) == 0
     assert count_rows(session, Company) == 0
     assert count_rows(session, JobPosting) == 0
@@ -747,8 +810,95 @@ def test_bypassed_non_integer_salary_months_roll_back(
         persistence.persist(invalid_batch, run_id=run_id)
 
     assert raised.value.run_id == run_id
-    assert raised.value.constraint == "salary_months"
-    assert raised.value.detail == "normalized salary months exceed database domain"
+    assert raised.value.constraint == "persistence_dto"
+    assert raised.value.detail == "invalid persistence boundary data"
     assert count_rows(session, SourceDocument) == 0
     assert count_rows(session, Company) == 0
     assert count_rows(session, JobPosting) == 0
+
+
+def test_persistence_does_not_remerge_a_job_rejected_by_deduplication(
+    session: Session, persistence: PersistenceService
+) -> None:
+    company = Company(canonical_name="Example", normalized_name="example")
+    session.add(company)
+    session.flush()
+    existing = JobPosting(
+        company_id=company.id,
+        title="Software Engineer",
+        normalized_title="softwareengineer",
+        job_type="full_time",
+        city="shanghai",
+        description="Existing",
+    )
+    session.add(existing)
+    session.commit()
+    incoming = normalized_job("intern-1")
+    incoming_candidate = JobCandidate(
+        company_name="Example",
+        title="Software Engineer",
+        employment_type="internship",
+        location="Shanghai",
+        provider="official",
+        source_raw_id="intern-1",
+        evidence_ids=("doc-1",),
+        confidence=0.9,
+    )
+    incoming = incoming.model_copy(
+        update={"candidate": normalize_job(incoming_candidate), "job_posting_id": None}
+    )
+
+    persistence.persist(
+        normalized_batch(
+            company=normalized_company(company_id=company.id),
+            jobs=(incoming,),
+            filings=(),
+        ),
+        run_id=uuid4(),
+    )
+
+    jobs = session.scalars(select(JobPosting).order_by(JobPosting.created_at)).all()
+    assert len(jobs) == 2
+    assert {str(job.job_type) for job in jobs} == {"full_time", "internship"}
+
+
+def test_unknown_incoming_type_does_not_degrade_known_canonical_type(
+    session: Session, persistence: PersistenceService
+) -> None:
+    company = Company(canonical_name="Example", normalized_name="example")
+    session.add(company)
+    session.flush()
+    existing = JobPosting(
+        company_id=company.id,
+        title="Software Engineer",
+        normalized_title="softwareengineer",
+        job_type="full_time",
+        city="shanghai",
+        description="Existing",
+    )
+    session.add(existing)
+    session.commit()
+    candidate = JobCandidate(
+        company_name="Example",
+        title="Software Engineer",
+        location="Shanghai",
+        provider="official",
+        source_raw_id="unknown-1",
+        evidence_ids=("doc-1",),
+        confidence=0.9,
+    )
+    record = normalized_job("unknown-1", job_posting_id=existing.id).model_copy(
+        update={"candidate": normalize_job(candidate)}
+    )
+
+    persistence.persist(
+        normalized_batch(
+            company=normalized_company(company_id=company.id),
+            jobs=(record,),
+            filings=(),
+        ),
+        run_id=uuid4(),
+    )
+
+    session.refresh(existing)
+    assert existing.job_type.value == "full_time"

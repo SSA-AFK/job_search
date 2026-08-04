@@ -7,7 +7,8 @@ from html.parser import HTMLParser
 from typing import TypeVar
 from uuid import UUID
 
-from sqlalchemy import Select, select
+from pydantic import ValidationError
+from sqlalchemy import Select, select, update
 from sqlalchemy.exc import DataError, IntegrityError, StatementError
 from sqlalchemy.orm import Session
 
@@ -22,8 +23,11 @@ from app.ingestion.persistence.contracts import (
 )
 from app.ingestion.persistence.result import PersistenceResult
 from app.models import (
+    CollectionRequest,
+    CollectionStatus,
     Company,
     CompanySource,
+    CrawlRun,
     JobPosting,
     JobSource,
     RegulatoryFiling,
@@ -98,11 +102,27 @@ class PersistenceService:
         self.session = session
         self.cache = cache
 
-    def persist(self, batch: NormalizedBatch, run_id: UUID) -> PersistenceResult:
+    def persist(
+        self,
+        batch: NormalizedBatch,
+        run_id: UUID,
+        *,
+        expected_claim_token: str | None = None,
+    ) -> PersistenceResult:
+        try:
+            batch = NormalizedBatch.model_validate(batch.model_dump(mode="python"))
+        except ValidationError as exc:
+            raise PersistenceError(
+                run_id=run_id,
+                constraint="persistence_dto",
+                detail="invalid persistence boundary data",
+            ) from exc
         self._require_clean_entry(run_id)
         try:
             with self.session.begin():
                 self._materialize_outer_transaction()
+                if expected_claim_token is not None:
+                    self._lock_claim(run_id, expected_claim_token)
                 documents = self._upsert_documents(batch.documents, run_id)
                 company = self._upsert_company(batch.company, run_id)
                 self._upsert_company_evidence(company, batch.company, documents, run_id)
@@ -152,6 +172,37 @@ class PersistenceService:
         connection = self.session.connection()
         if connection.dialect.name == "sqlite":
             connection.exec_driver_sql("BEGIN")
+
+    def _lock_claim(self, run_id: UUID, expected_claim_token: str) -> None:
+        run_update = self.session.execute(
+            update(CrawlRun)
+            .where(
+                CrawlRun.id == run_id,
+                CrawlRun.status == CollectionStatus.RUNNING,
+                CrawlRun.claim_token == expected_claim_token,
+            )
+            .values(claim_token=expected_claim_token)
+            .execution_options(synchronize_session=False)
+        )
+        request_id = select(CrawlRun.collection_request_id).where(
+            CrawlRun.id == run_id,
+            CrawlRun.claim_token == expected_claim_token,
+        )
+        request_update = self.session.execute(
+            update(CollectionRequest)
+            .where(
+                CollectionRequest.id == request_id.scalar_subquery(),
+                CollectionRequest.status == CollectionStatus.RUNNING,
+            )
+            .values(status=CollectionStatus.RUNNING)
+            .execution_options(synchronize_session=False)
+        )
+        if run_update.rowcount != 1 or request_update.rowcount != 1:
+            raise PersistenceError(
+                run_id=run_id,
+                constraint="run_claim",
+                detail="claim ownership lost before persistence",
+            )
 
     def _upsert_documents(
         self, records: tuple[NormalizedDocument, ...], run_id: UUID
@@ -348,8 +399,6 @@ class PersistenceService:
             job = self._resolve_job(company_id, record, source, run_id)
             job_was_created = False
             if job is None:
-                job = self._find_canonical_job(company_id, record)
-            if job is None:
                 description = source_candidate.description or ""
                 job = JobPosting(
                     company_id=company_id,
@@ -368,7 +417,7 @@ class PersistenceService:
                 self.session.flush()
                 job_was_created = True
             else:
-                self._merge_job(job, record)
+                self._merge_job(job, record, run_id)
 
             source_document_id = (
                 documents[record.source_evidence_id].id
@@ -408,7 +457,7 @@ class PersistenceService:
                     if job_was_created:
                         self.session.delete(job)
                     job = winner_job
-                    self._merge_job(job, record)
+                    self._merge_job(job, record, run_id)
             source.job_posting_id = job.id
             source.source_document_id = source_document_id
             source.apply_url = str(record.apply_url)
@@ -466,22 +515,22 @@ class PersistenceService:
             )
         return job
 
-    def _find_canonical_job(
-        self, company_id: UUID, record: NormalizedJobRecord
-    ) -> JobPosting | None:
-        return self.session.scalar(
-            select(JobPosting).where(
-                JobPosting.company_id == company_id,
-                JobPosting.normalized_title == record.candidate.normalized_title,
-                JobPosting.city == record.candidate.normalized_city,
-            )
-        )
-
     @staticmethod
-    def _merge_job(job: JobPosting, record: NormalizedJobRecord) -> None:
+    def _merge_job(
+        job: JobPosting, record: NormalizedJobRecord, run_id: UUID
+    ) -> None:
         candidate = record.candidate.candidate
         job.title = candidate.title
-        job.job_type = record.candidate.job_type
+        incoming_type = record.candidate.job_type
+        if incoming_type.value != "unknown":
+            existing_type = getattr(job.job_type, "value", str(job.job_type))
+            if existing_type not in {"unknown", incoming_type.value}:
+                raise PersistenceError(
+                    run_id=run_id,
+                    constraint="job_type",
+                    detail="incompatible canonical job type",
+                )
+            job.job_type = incoming_type
         incoming_description = candidate.description or ""
         if len(incoming_description) > len(job.description):
             job.description = incoming_description

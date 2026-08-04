@@ -33,6 +33,10 @@ celery_app.conf.update(
             "task": "app.tasks.expiration.expire_stale_job_sources",
             "schedule": crontab(hour=2, minute=0),
         },
+        "redispatch-stale-queued-runs": {
+            "task": "app.tasks.schedule.redispatch_stale_queued_runs",
+            "schedule": crontab(minute="*/1"),
+        },
     },
 )
 celery_app.loader.import_default_modules()

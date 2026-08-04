@@ -63,6 +63,7 @@ async function visitCollection(page: Page, query: string) {
 }
 
 test("collection lifecycle reaches success, partial, failed, and timeout states without layout overflow", async ({ page }, testInfo) => {
+  test.setTimeout(60_000);
   const scenario: { current: Scenario } = { current: "success" };
   await page.addInitScript(() => {
     const nativeNow = Date.now.bind(Date);

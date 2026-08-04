@@ -344,6 +344,35 @@ async def test_does_not_retry_non_retryable_status(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_maps_auth_statuses_to_stable_code(
+    provider: ZhihuGlobalSearchProvider,
+    respx_mock: respx.MockRouter,
+    status_code: int,
+) -> None:
+    route = respx_mock.get(ENDPOINT).mock(return_value=httpx.Response(status_code))
+
+    with pytest.raises(ProviderError, match="provider_auth_failed") as caught:
+        await provider.search(ProviderQuery(query="Example Company"))
+
+    assert caught.value.retryable is False
+    assert route.call_count == 1
+
+
+@pytest.mark.anyio
+async def test_maps_exhausted_429_to_stable_rate_limit_code(
+    provider: ZhihuGlobalSearchProvider, respx_mock: respx.MockRouter
+) -> None:
+    route = respx_mock.get(ENDPOINT).mock(return_value=httpx.Response(429))
+
+    with pytest.raises(ProviderError, match="provider_rate_limited") as caught:
+        await provider.search(ProviderQuery(query="Example Company"))
+
+    assert caught.value.retryable is True
+    assert route.call_count == 4
+
+
+@pytest.mark.anyio
 async def test_reports_invalid_json(
     provider: ZhihuGlobalSearchProvider, respx_mock: respx.MockRouter
 ) -> None:

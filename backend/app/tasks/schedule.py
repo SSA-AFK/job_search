@@ -4,9 +4,11 @@ from datetime import timedelta
 from uuid import uuid4
 
 import kombu.exceptions as kombu_exceptions  # type: ignore[import-untyped]
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 
+from app.collection.repository import CollectionRepository
+from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models import CollectionRequest, CollectionStatus, Company, CrawlRun, RunType
 from app.models.base import utc_now
@@ -82,19 +84,73 @@ def enqueue_stale_companies() -> dict[str, int]:
             try:
                 task_result = run_ingestion.delay(str(run.id))
             except (ConnectionError, OSError, KombuOperationalError):
-                completed_at = utc_now()
-                request.status = CollectionStatus.FAILED
-                request.error_code = "collection_unavailable"
-                request.completed_at = completed_at
-                run.status = CollectionStatus.FAILED
-                run.error_code = "collection_unavailable"
-                run.completed_at = completed_at
-                session.commit()
+                CollectionRepository(session).fail_queued_dispatch(
+                    run.id, failed_at=utc_now()
+                )
                 continue
             run.celery_task_id = str(task_result.id)
             session.commit()
             enqueued += 1
         return {"enqueued": enqueued, "skipped_active": skipped_active}
+    finally:
+        session.close()
+
+
+@celery_app.task(name="app.tasks.schedule.redispatch_stale_queued_runs")
+def redispatch_stale_queued_runs() -> dict[str, int]:
+    """Recover worker/broker crash gaps without creating new crawl runs."""
+    now = utc_now()
+    queued_cutoff = now - timedelta(seconds=settings.collection_stale_queued_seconds)
+    running_cutoff = now - timedelta(seconds=settings.collection_stale_running_seconds)
+    session = SessionLocal()
+    try:
+        repository = CollectionRepository(session)
+        stale_running = session.scalars(
+            select(CrawlRun)
+            .where(
+                CrawlRun.status == CollectionStatus.RUNNING,
+                CrawlRun.started_at < running_cutoff,
+            )
+            .order_by(CrawlRun.created_at, CrawlRun.id)
+        ).all()
+        requeued = 0
+        for run in stale_running:
+            if run.claim_token is None:
+                continue
+            recovered = repository.requeue_for_retry(
+                run.id, expected_claim_token=run.claim_token
+            )
+            if recovered is not None and recovered.status is CollectionStatus.QUEUED:
+                requeued += 1
+
+        stale_queued = session.scalars(
+            select(CrawlRun)
+            .where(
+                CrawlRun.status == CollectionStatus.QUEUED,
+                CrawlRun.celery_task_id.is_(None),
+                CrawlRun.created_at < queued_cutoff,
+            )
+            .order_by(CrawlRun.created_at, CrawlRun.id)
+        ).all()
+        redispatched = 0
+        for run in stale_queued:
+            try:
+                task_result = run_ingestion.delay(str(run.id))
+            except (ConnectionError, OSError, KombuOperationalError):
+                continue
+            result = session.execute(
+                update(CrawlRun)
+                .where(
+                    CrawlRun.id == run.id,
+                    CrawlRun.status == CollectionStatus.QUEUED,
+                    CrawlRun.celery_task_id.is_(None),
+                )
+                .values(celery_task_id=str(task_result.id))
+            )
+            session.commit()
+            if result.rowcount == 1:
+                redispatched += 1
+        return {"redispatched": redispatched, "requeued": requeued}
     finally:
         session.close()
 

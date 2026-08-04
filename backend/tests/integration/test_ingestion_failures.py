@@ -84,11 +84,11 @@ def test_zhihu_429_exhaustion_terminalizes_without_pagination(
     terminal = submit_and_get(integration_harness)
 
     assert terminal["status"] == "failed"
-    assert terminal["error_code"] == "http_status"
+    assert terminal["error_code"] == "provider_rate_limited"
     assert route.call_count == 4
     assert [call.request.url.params["Count"] for call in route.calls] == ["10"] * 4
     assert row_count(integration_harness, SourceDocument) == 0
-    assert_synchronized_failure(integration_harness, "http_status")
+    assert_synchronized_failure(integration_harness, "provider_rate_limited")
 
 
 def test_provider_timeout_preserves_existing_search_rows(

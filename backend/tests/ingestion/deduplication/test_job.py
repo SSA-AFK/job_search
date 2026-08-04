@@ -133,6 +133,9 @@ def test_job_similarity_boundaries_choose_semantic_or_automatic_decision(
     assert match.kind == expected_kind
     assert match.job_posting_id == EXISTING_JOB_ID
     assert len(semantic_judge.calls) == semantic_calls
+    if semantic_calls:
+        assert semantic_judge.calls[0][0].job_posting_id is None
+        assert semantic_judge.calls[0][1].job_posting_id == EXISTING_JOB_ID
 
 
 def test_incompatible_job_type_is_not_merged(
@@ -200,6 +203,7 @@ def test_jobs_are_only_compared_within_the_requested_company(
 
 def job_candidate(**overrides: object) -> JobCandidate:
     values: dict[str, object] = {
+        "company_name": "Example",
         "title": "software engineer",
         "employment_type": EmploymentType.FULL_TIME,
         "location": "shanghai",

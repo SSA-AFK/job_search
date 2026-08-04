@@ -9,8 +9,7 @@ from app.collection.repository import CollectionRepository
 from app.collection.schemas import CollectionRequestRead
 from app.core.errors import DomainError
 from app.core.normalization import normalize_name
-from app.models import CollectionRequest, CollectionStatus
-from app.models.base import utc_now
+from app.models import CollectionRequest
 
 ACTIVE_REQUEST_INDEX = "uq_collection_requests_active_query"
 
@@ -41,22 +40,11 @@ class CollectionService:
 
         try:
             task_id = self.dispatch_collection(run.id)
-        except Exception:  # The task never started, so queued may become failed here.
+        except Exception:  # Publish outcome may be ambiguous; only queued work can fail here.
+            failed_run = self.repository.fail_queued_dispatch(run.id)
             persisted_request = self.repository.get_request(request.id)
-            failed_run = (
-                self.repository.get_run_for_request(persisted_request.id)
-                if persisted_request
-                else None
-            )
-            if persisted_request is None or failed_run is None:
+            if failed_run is None or persisted_request is None:
                 raise
-            persisted_request.status = CollectionStatus.FAILED
-            persisted_request.error_code = "collection_unavailable"
-            persisted_request.completed_at = utc_now()
-            failed_run.status = CollectionStatus.FAILED
-            failed_run.error_code = "collection_unavailable"
-            failed_run.completed_at = utc_now()
-            self.session.commit()
             return self._read(persisted_request)
 
         persisted_run = self.session.get(type(run), run.id)
