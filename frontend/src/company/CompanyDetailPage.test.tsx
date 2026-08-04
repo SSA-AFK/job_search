@@ -69,6 +69,21 @@ const job: JobListItem = {
   updated_at: "2026-07-21T00:00:00Z",
 };
 
+const firstClassEmploymentJobs: JobListItem[] = [
+  {
+    ...job,
+    id: "33333333-3333-4333-8333-333333333333",
+    title: "Part-time Researcher",
+    job_type: "part_time",
+  },
+  {
+    ...job,
+    id: "44444444-4444-4444-8444-444444444444",
+    title: "Temporary Researcher",
+    job_type: "temporary",
+  },
+];
+
 function response(body: unknown, status = 200) {
   return Promise.resolve(new Response(JSON.stringify(body), {
     status,
@@ -128,6 +143,16 @@ describe("CompanyDetailPage", () => {
     expect(screen.getByText("DeepSeek registry record")).toBeInTheDocument();
     expect(screen.getByText("Large Model Algorithm Engineer")).toBeInTheDocument();
     expect(screen.getByText(/30,000-60,000 元\/月 · 16 薪/)).toBeInTheDocument();
+  });
+
+  it("renders first-class part-time and temporary job labels", async () => {
+    renderCompanyDetail((input) => String(input).includes("/jobs")
+      ? response(jobsPage(firstClassEmploymentJobs))
+      : response(company));
+
+    await screen.findByText("Part-time Researcher");
+    expect(screen.getByText(/兼职 · Hangzhou/)).toBeInTheDocument();
+    expect(screen.getByText(/临时 · Hangzhou/)).toBeInTheDocument();
   });
 
   it("falls back instead of rendering a non-HTTP company logo", async () => {

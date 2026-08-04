@@ -1,13 +1,14 @@
 import runpy
 from io import StringIO
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 
@@ -225,6 +226,96 @@ def test_job_type_extension_migration_round_trip(tmp_path: Path) -> None:
         )
 
     command.upgrade(config, "head")
+
+
+def test_job_type_extension_preserves_sqlite_foreign_key_dependents(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "job-type-dependent-migration.sqlite3"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config(Path(__file__).parents[2] / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "0004_crawl_run_claim_token")
+    engine = create_engine(database_url)
+
+    @event.listens_for(engine, "connect")
+    def enable_foreign_keys(
+        dbapi_connection: Any, _connection_record: object
+    ) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    company_id = str(uuid4())
+    job_id = str(uuid4())
+    source_id = str(uuid4())
+    created_at = "2026-08-04 00:00:00+00:00"
+    with engine.begin() as connection:
+        assert connection.scalar(text("PRAGMA foreign_keys")) == 1
+        dependent_tables = {
+            table_name
+            for table_name in inspect(connection).get_table_names()
+            for foreign_key in inspect(connection).get_foreign_keys(table_name)
+            if foreign_key["referred_table"] == "job_postings"
+        }
+        assert dependent_tables == {"job_sources"}
+        connection.execute(
+            text(
+                "INSERT INTO companies "
+                "(id, canonical_name, normalized_name, funding_stage, scale, "
+                "created_at, updated_at) VALUES "
+                "(:id, 'Example', 'example', 'unknown', 'unknown', "
+                ":created_at, :created_at)"
+            ),
+            {"id": company_id, "created_at": created_at},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO job_postings "
+                "(id, company_id, title, normalized_title, job_type, city, "
+                "description, is_active, created_at, updated_at) VALUES "
+                "(:id, :company_id, 'Engineer', 'engineer', 'full_time', '', '', 1, "
+                ":created_at, :created_at)"
+            ),
+            {"id": job_id, "company_id": company_id, "created_at": created_at},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO job_sources "
+                "(id, job_posting_id, provider, source_raw_id, apply_url, "
+                "first_seen_at, last_seen_at, is_active) VALUES "
+                "(:id, :job_id, 'official', 'job-1', 'https://example.com/job-1', "
+                ":created_at, :created_at, 1)"
+            ),
+            {"id": source_id, "job_id": job_id, "created_at": created_at},
+        )
+
+    migration_path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "0005_extend_job_type_values.py"
+    )
+    migration = runpy.run_path(str(migration_path))
+    with engine.connect() as connection:
+        context = MigrationContext.configure(connection)
+        migration["upgrade"].__globals__["op"] = Operations(context)
+
+        migration["upgrade"]()
+
+        assert connection.scalar(text("SELECT count(*) FROM job_postings")) == 1
+        assert connection.scalar(text("SELECT count(*) FROM job_sources")) == 1
+        assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
+        connection.execute(
+            text("UPDATE job_postings SET job_type = 'part_time' WHERE id = :id"),
+            {"id": job_id},
+        )
+
+        migration["downgrade"]()
+
+        assert connection.scalar(text("SELECT job_type FROM job_postings")) == "unknown"
+        assert connection.scalar(text("SELECT count(*) FROM job_sources")) == 1
+        assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
 
 
 def test_job_type_extension_emits_postgresql_constraint_ddl() -> None:

@@ -100,7 +100,14 @@ export type JobListItem = {
   id: string;
   company_id: string;
   title: string;
-  job_type: "full_time" | "internship" | "campus" | "experienced" | "unknown";
+  job_type:
+    | "full_time"
+    | "part_time"
+    | "internship"
+    | "temporary"
+    | "campus"
+    | "experienced"
+    | "unknown";
   city: string;
   salary_min_monthly: number | null;
   salary_max_monthly: number | null;

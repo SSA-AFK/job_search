@@ -5,7 +5,9 @@ import type { JobListItem, Page } from "../api/types";
 
 const jobTypeLabels: Record<JobListItem["job_type"], string> = {
   full_time: "全职",
+  part_time: "兼职",
   internship: "实习",
+  temporary: "临时",
   campus: "校招",
   experienced: "社招",
   unknown: "类型待确认",

@@ -407,8 +407,8 @@ def test_stale_running_reconciliation_cannot_requeue_a_new_claim_generation(
         )
 
 
-def test_retry_recovery_cannot_fail_work_requeued_between_legacy_row_reads(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+def test_retry_recovery_lost_cas_preserves_work_requeued_between_pair_locks(
+    tmp_path,
 ) -> None:
     engine = create_engine(f"sqlite:///{tmp_path / 'paired-recovery-race.sqlite3'}")
     Base.metadata.create_all(engine)
@@ -423,13 +423,25 @@ def test_retry_recovery_cannot_fail_work_requeued_between_legacy_row_reads(
 
     with Session(engine, expire_on_commit=False) as first_recovery:
         repository = CollectionRepository(first_recovery)
-        get_run = repository.get_run
         raced = False
 
-        def get_run_then_requeue(received_run_id):
+        @event.listens_for(first_recovery, "do_orm_execute", retval=True)
+        def requeue_after_run_lock(state):
             nonlocal raced
-            observed = get_run(received_run_id)
-            if not raced:
+            result = state.invoke_statement()
+            if not state.is_select:
+                return result
+            sql = " ".join(
+                str(state.statement.compile(dialect=postgresql.dialect())).split()
+            )
+            if (
+                not raced
+                and state.is_select
+                and "FROM crawl_runs" in sql
+                and "JOIN" not in sql
+                and "FOR UPDATE" in sql
+            ):
+                frozen = result.freeze()
                 raced = True
                 with Session(engine, expire_on_commit=False) as second_recovery:
                     second = CollectionRepository(second_recovery).requeue_for_retry(
@@ -437,9 +449,8 @@ def test_retry_recovery_cannot_fail_work_requeued_between_legacy_row_reads(
                     )
                     assert second is not None
                     assert second.status is CollectionStatus.QUEUED
-            return observed
-
-        monkeypatch.setattr(repository, "get_run", get_run_then_requeue)
+                return frozen()
+            return result
 
         observed = repository.requeue_for_retry(
             run_id, expected_claim_token=claim_token
@@ -458,7 +469,7 @@ def test_retry_recovery_cannot_fail_work_requeued_between_legacy_row_reads(
         assert stored_request.error_code is None
 
 
-def test_retry_recovery_locks_the_linked_pair_in_one_postgresql_statement(
+def test_retry_recovery_locks_run_then_request_in_postgresql_order(
     tmp_path,
 ) -> None:
     engine = create_engine(f"sqlite:///{tmp_path / 'paired-recovery-lock.sqlite3'}")
@@ -486,15 +497,10 @@ def test_retry_recovery_locks_the_linked_pair_in_one_postgresql_statement(
         " ".join(str(statement.compile(dialect=postgresql.dialect())).split())
         for statement in statements
     ]
-    paired_lock = next(
-        (
-            sql
-            for sql in compiled
-            if "JOIN crawl_runs" in sql
-            and "FOR UPDATE OF crawl_runs, collection_requests" in sql
-        ),
-        None,
-    )
+    lock_statements = [sql for sql in compiled if "FOR UPDATE" in sql]
 
-    assert paired_lock is not None
-    assert "ORDER BY crawl_runs.id, collection_requests.id" in paired_lock
+    assert len(lock_statements) == 2
+    assert "FROM crawl_runs" in lock_statements[0]
+    assert "JOIN" not in lock_statements[0]
+    assert "FROM collection_requests" in lock_statements[1]
+    assert "JOIN" not in lock_statements[1]

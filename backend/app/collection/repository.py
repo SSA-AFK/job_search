@@ -71,21 +71,22 @@ class CollectionRepository:
     ) -> tuple[CrawlRun, CollectionRequest] | None:
         self.session.rollback()
         self.session.expire_all()
-        statement = (
-            select(CollectionRequest, CrawlRun)
-            .join(
-                CrawlRun,
-                CrawlRun.collection_request_id == CollectionRequest.id,
-            )
+        run = self.session.scalar(
+            select(CrawlRun)
             .where(CrawlRun.id == run_id)
-            .order_by(CrawlRun.id, CollectionRequest.id)
-            .with_for_update(of=(CrawlRun.id, CollectionRequest.id))
+            .with_for_update()
             .execution_options(populate_existing=True)
         )
-        row = self.session.execute(statement).one_or_none()
-        if row is None:
+        if run is None or run.collection_request_id is None:
             return None
-        request, run = row
+        request = self.session.scalar(
+            select(CollectionRequest)
+            .where(CollectionRequest.id == run.collection_request_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if request is None:
+            return None
         return run, request
 
     def _reload_run(self, run_id: UUID, *, commit: bool = False) -> CrawlRun | None:
