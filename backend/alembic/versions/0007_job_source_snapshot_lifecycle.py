@@ -10,7 +10,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 
 from alembic import context, op
-from app.models.base import GUID
+from app.models.base import GUID, UTCDateTime
 
 revision: str = "0007_job_source_snapshot_lifecycle"
 down_revision: str | None = "0006_job_entries_and_snapshots"
@@ -21,14 +21,87 @@ ENTRY_FK_NAME = "fk_job_sources_job_entry_id"
 SNAPSHOT_FK_NAME = "fk_job_sources_last_seen_snapshot_id"
 ENTRY_ACTIVE_INDEX_NAME = "ix_job_sources_entry_active"
 
+_JOB_SOURCES_PRE_LIFECYCLE_METADATA = sa.MetaData()
+_JOB_SOURCES_PRE_LIFECYCLE = sa.Table(
+    "job_sources",
+    _JOB_SOURCES_PRE_LIFECYCLE_METADATA,
+    sa.Column("id", GUID(), primary_key=True, nullable=False),
+    sa.Column("job_posting_id", GUID(), nullable=False),
+    sa.Column("source_document_id", GUID(), nullable=True),
+    sa.Column("provider", sa.String(50), nullable=False),
+    sa.Column("source_raw_id", sa.String(255), nullable=False),
+    sa.Column("apply_url", sa.String(2000), nullable=False),
+    sa.Column("first_seen_at", UTCDateTime(), nullable=False),
+    sa.Column("last_seen_at", UTCDateTime(), nullable=False),
+    sa.Column("is_active", sa.Boolean(), nullable=False),
+    sa.ForeignKeyConstraint(["job_posting_id"], ["job_postings.id"], ondelete="CASCADE"),
+    sa.ForeignKeyConstraint(
+        ["source_document_id"], ["source_documents.id"], ondelete="SET NULL"
+    ),
+    sa.UniqueConstraint("provider", "source_raw_id", name="uq_job_source_provider_raw_id"),
+)
 
-def _is_sqlite_online() -> bool:
-    return op.get_context().dialect.name == "sqlite" and not context.is_offline_mode()
+_JOB_SOURCES_POST_LIFECYCLE_METADATA = sa.MetaData()
+_JOB_SOURCES_POST_LIFECYCLE = sa.Table(
+    "job_sources",
+    _JOB_SOURCES_POST_LIFECYCLE_METADATA,
+    sa.Column("id", GUID(), primary_key=True, nullable=False),
+    sa.Column("job_posting_id", GUID(), nullable=False),
+    sa.Column("source_document_id", GUID(), nullable=True),
+    sa.Column("job_entry_id", GUID(), nullable=True),
+    sa.Column("last_seen_snapshot_id", GUID(), nullable=True),
+    sa.Column(
+        "missing_complete_snapshots",
+        sa.Integer(),
+        server_default=sa.text("0"),
+        nullable=False,
+    ),
+    sa.Column("provider", sa.String(50), nullable=False),
+    sa.Column("source_raw_id", sa.String(255), nullable=False),
+    sa.Column("apply_url", sa.String(2000), nullable=False),
+    sa.Column("first_seen_at", UTCDateTime(), nullable=False),
+    sa.Column("last_seen_at", UTCDateTime(), nullable=False),
+    sa.Column("is_active", sa.Boolean(), nullable=False),
+    sa.ForeignKeyConstraint(["job_posting_id"], ["job_postings.id"], ondelete="CASCADE"),
+    sa.ForeignKeyConstraint(
+        ["source_document_id"], ["source_documents.id"], ondelete="SET NULL"
+    ),
+    sa.ForeignKeyConstraint(
+        ["job_entry_id"],
+        ["job_entries.id"],
+        name=ENTRY_FK_NAME,
+        ondelete="SET NULL",
+    ),
+    sa.ForeignKeyConstraint(
+        ["last_seen_snapshot_id"],
+        ["job_collection_snapshots.id"],
+        name=SNAPSHOT_FK_NAME,
+        ondelete="SET NULL",
+    ),
+    sa.UniqueConstraint("provider", "source_raw_id", name="uq_job_source_provider_raw_id"),
+)
+sa.Index(
+    ENTRY_ACTIVE_INDEX_NAME,
+    _JOB_SOURCES_POST_LIFECYCLE.c.job_entry_id,
+    _JOB_SOURCES_POST_LIFECYCLE.c.is_active,
+)
+
+
+def _is_sqlite() -> bool:
+    return op.get_context().dialect.name == "sqlite"
+
+
+def _sqlite_batch_options(copy_from: sa.Table) -> dict[str, sa.Table]:
+    return {"copy_from": copy_from} if context.is_offline_mode() else {}
 
 
 def upgrade() -> None:
-    if _is_sqlite_online():
-        with op.batch_alter_table("job_sources", recreate="always") as batch_op:
+    if _is_sqlite():
+        with op.batch_alter_table(
+            "job_sources",
+            recreate="always",
+            **_sqlite_batch_options(_JOB_SOURCES_PRE_LIFECYCLE),
+        ) as batch_op:
             batch_op.add_column(sa.Column("job_entry_id", GUID(), nullable=True))
             batch_op.add_column(sa.Column("last_seen_snapshot_id", GUID(), nullable=True))
             batch_op.add_column(
@@ -94,8 +167,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    if _is_sqlite_online():
-        with op.batch_alter_table("job_sources", recreate="always") as batch_op:
+    if _is_sqlite():
+        with op.batch_alter_table(
+            "job_sources",
+            recreate="always",
+            **_sqlite_batch_options(_JOB_SOURCES_POST_LIFECYCLE),
+        ) as batch_op:
             batch_op.drop_index(ENTRY_ACTIVE_INDEX_NAME)
             batch_op.drop_constraint(SNAPSHOT_FK_NAME, type_="foreignkey")
             batch_op.drop_constraint(ENTRY_FK_NAME, type_="foreignkey")

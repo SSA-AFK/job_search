@@ -664,6 +664,45 @@ def test_job_source_snapshot_lifecycle_emits_named_postgresql_ddl() -> None:
     assert "CREATE INDEX ix_job_sources_entry_active ON job_sources" in sql
 
 
+def test_job_source_snapshot_lifecycle_default_sqlite_offline_upgrade_completes() -> None:
+    output = StringIO()
+    config = Config(Path(__file__).parents[2] / "alembic.ini", output_buffer=output)
+    config.set_main_option("sqlalchemy.url", "sqlite://")
+
+    command.upgrade(config, "head", sql=True)
+
+    sql = " ".join(output.getvalue().split())
+    assert "CREATE TABLE _alembic_tmp_job_sources" in sql
+    assert "job_entry_id CHAR(36)" in sql
+    assert "last_seen_snapshot_id CHAR(36)" in sql
+    assert "missing_complete_snapshots INTEGER DEFAULT 0 NOT NULL" in sql
+    assert "FOREIGN KEY(job_entry_id) REFERENCES job_entries (id) ON DELETE SET NULL" in sql
+    assert (
+        "FOREIGN KEY(last_seen_snapshot_id) REFERENCES job_collection_snapshots (id) "
+        "ON DELETE SET NULL" in sql
+    )
+    assert "CREATE INDEX ix_job_sources_entry_active ON job_sources" in sql
+
+
+def test_job_source_snapshot_lifecycle_default_sqlite_offline_downgrade_completes() -> None:
+    output = StringIO()
+    config = Config(Path(__file__).parents[2] / "alembic.ini", output_buffer=output)
+    config.set_main_option("sqlalchemy.url", "sqlite://")
+
+    command.downgrade(
+        config,
+        "0007_job_source_snapshot_lifecycle:0006_job_entries_and_snapshots",
+        sql=True,
+    )
+
+    sql = " ".join(output.getvalue().split())
+    assert "CREATE TABLE _alembic_tmp_job_sources" in sql
+    assert "FOREIGN KEY(job_posting_id) REFERENCES job_postings (id) ON DELETE CASCADE" in sql
+    assert "FOREIGN KEY(source_document_id) REFERENCES source_documents (id) ON DELETE SET NULL" in sql
+    assert "missing_complete_snapshots" not in sql
+    assert "ix_job_sources_entry_active" not in sql
+
+
 def _quoted_isolated_schema_name(schema_name: str) -> str:
     if not re.fullmatch(r"stage3a_test_[0-9a-f]{32}", schema_name):
         raise ValueError("invalid isolated PostgreSQL schema name")
