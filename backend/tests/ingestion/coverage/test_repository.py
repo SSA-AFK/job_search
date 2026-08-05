@@ -431,6 +431,69 @@ def test_recompute_job_activity_batches_locks_and_queries_for_a_large_expunged_b
     assert active_ids == {posting.id for index, posting in enumerate(postings) if index % 2 == 0}
 
 
+def test_recompute_job_activity_uses_one_exists_query_per_500_posting_batch(
+    repository: CoverageRepository, company: Company, session: Session
+) -> None:
+    postings = [
+        JobPosting(
+            company_id=company.id,
+            title=f"Boundary Engineer {index}",
+            normalized_title=f"boundary engineer {index}",
+            city="Shanghai",
+            description="Build",
+            is_active=False,
+        )
+        for index in range(501)
+    ]
+    session.add_all(postings)
+    session.flush()
+    session.add_all(
+        JobSource(
+            job_posting_id=posting.id,
+            provider="official",
+            source_raw_id=f"exists-boundary-{index}",
+            apply_url=f"https://jobs.example.com/exists-boundary-{index}",
+            is_active=index % 2 == 0,
+        )
+        for index, posting in enumerate(postings)
+    )
+    session.commit()
+    posting_ids = tuple(posting.id for posting in postings)
+    session.expunge_all()
+    statements: list[str] = []
+
+    def capture_statements(
+        _connection, _cursor, statement: str, _parameters, _context, _executemany
+    ) -> None:
+        statements.append(statement)
+
+    assert session.bind is not None
+    event.listen(session.bind, "before_cursor_execute", capture_statements)
+    try:
+        result = repository.recompute_job_activity(reversed(posting_ids))
+    finally:
+        event.remove(session.bind, "before_cursor_execute", capture_statements)
+
+    select_statements = [
+        statement.upper()
+        for statement in statements
+        if statement.lstrip().upper().startswith("SELECT")
+    ]
+    exists_statements = [
+        statement for statement in select_statements if "EXISTS (SELECT" in statement
+    ]
+    assert result == 501
+    assert len(exists_statements) == 2
+    assert all("SELECT DISTINCT" not in statement for statement in select_statements)
+    assert len(statements) <= 5
+    active_ids = set(
+        session.scalars(select(JobPosting.id).where(JobPosting.is_active.is_(True)))
+    )
+    assert active_ids == {
+        posting.id for index, posting in enumerate(postings) if index % 2 == 0
+    }
+
+
 def test_ensure_entry_recovers_from_a_real_sqlite_savepoint_unique_race(
     repository: CoverageRepository,
     company: Company,

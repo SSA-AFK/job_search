@@ -6,7 +6,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
 from pydantic import TypeAdapter
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -157,12 +157,16 @@ class CoverageRepository:
                 )
                 active_job_ids = set(
                     self.session.scalars(
-                        select(JobSource.job_posting_id)
+                        select(JobPosting.id)
                         .where(
-                            JobSource.job_posting_id.in_(batch),
-                            JobSource.is_active.is_(True),
+                            JobPosting.id.in_(batch),
+                            exists(
+                                select(JobSource.id).where(
+                                    JobSource.job_posting_id == JobPosting.id,
+                                    JobSource.is_active.is_(True),
+                                )
+                            ),
                         )
-                        .distinct()
                     )
                 )
                 for posting in postings:

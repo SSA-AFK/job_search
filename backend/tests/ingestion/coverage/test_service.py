@@ -140,8 +140,12 @@ def test_two_complete_absences_deactivate_source_and_posting(
 ) -> None:
     first = service.record(snapshot_command(session, rows, completed_at=NOW))
 
+    assert first.created is True
+    assert first.sources_reactivated == 0
     assert first.sources_missing_incremented == 1
     assert first.sources_deactivated == 0
+    assert first.jobs_recomputed == 1
+    assert session.get(JobCollectionSnapshot, first.snapshot_id) is not None
     assert rows.source.missing_complete_snapshots == 1
     assert rows.source.is_active is True
 
@@ -149,8 +153,13 @@ def test_two_complete_absences_deactivate_source_and_posting(
         snapshot_command(session, rows, completed_at=NOW + timedelta(hours=1))
     )
 
+    assert second.created is True
+    assert second.sources_reactivated == 0
     assert second.sources_missing_incremented == 1
     assert second.sources_deactivated == 1
+    assert second.jobs_recomputed == 1
+    assert second.snapshot_id != first.snapshot_id
+    assert session.get(JobCollectionSnapshot, second.snapshot_id) is not None
     assert rows.source.missing_complete_snapshots == 2
     assert rows.source.is_active is False
     assert rows.posting.is_active is False
@@ -230,7 +239,12 @@ def test_another_active_source_keeps_posting_active(
         snapshot_command(session, rows, seen_source_ids={survivor.id})
     )
 
+    assert result.created is True
+    assert result.sources_reactivated == 0
+    assert result.sources_missing_incremented == 1
     assert result.sources_deactivated == 1
+    assert result.jobs_recomputed == 1
+    assert session.get(JobCollectionSnapshot, result.snapshot_id) is not None
     assert rows.source.is_active is False
     assert survivor.is_active is True
     assert rows.posting.is_active is True
@@ -368,6 +382,11 @@ def test_identical_replay_returns_existing_snapshot_without_reapplying_lifecycle
 
     replayed = service.record(command)
 
+    assert created.created is True
+    assert created.sources_reactivated == 0
+    assert created.sources_missing_incremented == 1
+    assert created.sources_deactivated == 0
+    assert created.jobs_recomputed == 1
     assert replayed.snapshot_id == created.snapshot_id
     assert replayed.created is False
     assert replayed.sources_reactivated == 0
@@ -461,7 +480,7 @@ def test_record_locks_entry_before_uuid_ordered_sources_and_commits_once(
     assert not session.in_transaction()
 
 
-def test_flush_failure_rolls_back_snapshot_source_posting_and_entry_health(
+def test_flush_failure_rolls_back_mixed_source_posting_and_entry_lifecycle(
     session: Session,
     service: JobCoverageService,
     company: Company,
@@ -470,38 +489,145 @@ def test_flush_failure_rolls_back_snapshot_source_posting_and_entry_health(
     rows = seed_coverage_rows(
         session,
         company,
-        source_active=True,
-        source_missing=1,
+        source_active=False,
+        source_missing=3,
         entry_status=JobEntryStatus.STALE,
         failure_count=5,
     )
-    command = snapshot_command(session, rows)
+    unseen_posting = JobPosting(
+        company_id=company.id,
+        title="Designer",
+        normalized_title="designer",
+        city="Shanghai",
+        description="Design",
+        is_active=True,
+    )
+    session.add(unseen_posting)
+    session.flush()
+    unseen_source = JobSource(
+        job_posting_id=unseen_posting.id,
+        job_entry_id=rows.entry.id,
+        provider="official",
+        source_raw_id=str(uuid4()),
+        apply_url="https://jobs.example.com/unseen",
+        first_seen_at=NOW - timedelta(days=8),
+        last_seen_at=NOW - timedelta(days=3),
+        is_active=True,
+        missing_complete_snapshots=1,
+    )
+    session.add(unseen_source)
+    session.commit()
+    seen_source_id = rows.source.id
+    unseen_source_id = unseen_source.id
+    seen_posting_id = rows.posting.id
+    unseen_posting_id = unseen_posting.id
+    entry_id = rows.entry.id
+    original_seen_at = rows.source.last_seen_at
+    original_unseen_at = unseen_source.last_seen_at
+    command = snapshot_command(session, rows, seen_source_ids={rows.source.id})
     original_flush = session.flush
-    unrestricted_flushes = 0
+    failure_injected = False
+    before_rollback: dict[str, object] = {}
 
     def fail_after_final_flush(objects=None) -> None:
-        nonlocal unrestricted_flushes
+        nonlocal failure_injected
         original_flush(objects)
-        if objects is None:
-            unrestricted_flushes += 1
-            if unrestricted_flushes == 2:
-                raise RuntimeError("injected flush failure")
+        if (
+            objects is None
+            and not failure_injected
+            and rows.source.is_active
+            and not unseen_source.is_active
+            and rows.posting.is_active
+            and not unseen_posting.is_active
+        ):
+            failure_injected = True
+            connection = session.connection()
+            snapshot_ids = tuple(
+                connection.execute(select(JobCollectionSnapshot.id)).scalars()
+            )
+            source_rows = {
+                row.source_id: (
+                    row.is_active,
+                    row.missing_complete_snapshots,
+                    row.last_seen_snapshot_id,
+                    row.last_seen_at,
+                )
+                for row in connection.execute(
+                    select(
+                        JobSource.id.label("source_id"),
+                        JobSource.is_active,
+                        JobSource.missing_complete_snapshots,
+                        JobSource.last_seen_snapshot_id,
+                        JobSource.last_seen_at,
+                    ).where(JobSource.id.in_((seen_source_id, unseen_source_id)))
+                )
+            }
+            posting_rows = {
+                row.posting_id: row.is_active
+                for row in connection.execute(
+                    select(
+                        JobPosting.id.label("posting_id"), JobPosting.is_active
+                    ).where(
+                        JobPosting.id.in_((seen_posting_id, unseen_posting_id))
+                    )
+                )
+            }
+            entry_row = connection.execute(
+                select(
+                    JobEntry.status,
+                    JobEntry.failure_count,
+                    JobEntry.last_checked_at,
+                    JobEntry.last_success_at,
+                ).where(JobEntry.id == entry_id)
+            ).one()
+            before_rollback.update(
+                snapshot_ids=snapshot_ids,
+                sources=source_rows,
+                postings=posting_rows,
+                entry=tuple(entry_row),
+            )
+            raise RuntimeError("injected flush failure")
 
     monkeypatch.setattr(session, "flush", fail_after_final_flush)
 
     with pytest.raises(RuntimeError, match="injected flush failure"):
         service.record(command)
 
+    monkeypatch.setattr(session, "flush", original_flush)
     assert not session.in_transaction()
+    assert failure_injected is True
+    snapshot_ids = before_rollback["snapshot_ids"]
+    assert isinstance(snapshot_ids, tuple) and len(snapshot_ids) == 1
+    snapshot_id = snapshot_ids[0]
+    assert before_rollback["sources"] == {
+        seen_source_id: (True, 0, snapshot_id, NOW),
+        unseen_source_id: (False, 2, None, original_unseen_at),
+    }
+    assert before_rollback["postings"] == {
+        seen_posting_id: True,
+        unseen_posting_id: False,
+    }
+    assert before_rollback["entry"] == (JobEntryStatus.ACTIVE, 0, NOW, NOW)
     assert session.scalar(select(func.count()).select_from(JobCollectionSnapshot)) == 0
-    persisted_source = session.get(JobSource, rows.source.id)
-    persisted_posting = session.get(JobPosting, rows.posting.id)
-    persisted_entry = session.get(JobEntry, rows.entry.id)
-    assert persisted_source is not None
-    assert persisted_source.missing_complete_snapshots == 1
-    assert persisted_source.is_active is True
-    assert persisted_source.last_seen_snapshot_id is None
-    assert persisted_posting is not None and persisted_posting.is_active is True
+    persisted_seen = session.get(JobSource, seen_source_id)
+    persisted_unseen = session.get(JobSource, unseen_source_id)
+    persisted_seen_posting = session.get(JobPosting, seen_posting_id)
+    persisted_unseen_posting = session.get(JobPosting, unseen_posting_id)
+    persisted_entry = session.get(JobEntry, entry_id)
+    assert persisted_seen is not None
+    assert persisted_seen.missing_complete_snapshots == 3
+    assert persisted_seen.is_active is False
+    assert persisted_seen.last_seen_snapshot_id is None
+    assert persisted_seen.last_seen_at == original_seen_at
+    assert persisted_unseen is not None
+    assert persisted_unseen.missing_complete_snapshots == 1
+    assert persisted_unseen.is_active is True
+    assert persisted_unseen.last_seen_snapshot_id is None
+    assert persisted_unseen.last_seen_at == original_unseen_at
+    assert persisted_seen_posting is not None
+    assert persisted_seen_posting.is_active is False
+    assert persisted_unseen_posting is not None
+    assert persisted_unseen_posting.is_active is True
     assert persisted_entry is not None
     assert persisted_entry.status is JobEntryStatus.STALE
     assert persisted_entry.failure_count == 5
