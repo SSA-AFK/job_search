@@ -1,8 +1,10 @@
 """Daily expiration of stale job sources and derived posting activity."""
 
 from datetime import timedelta
+from typing import Any, cast
 
 from sqlalchemy import exists, select, update
+from sqlalchemy.engine import CursorResult
 
 from app.core.database import SessionLocal
 from app.models import JobPosting, JobSource
@@ -42,6 +44,9 @@ def expire_stale_job_sources() -> dict[str, int]:
             .values(is_active=active_source)
         )
         session.commit()
-        return {"sources_expired": source_result.rowcount, "jobs_updated": len(unique_job_ids)}
+        return {
+            "sources_expired": cast(CursorResult[Any], source_result).rowcount,
+            "jobs_updated": len(unique_job_ids),
+        }
     finally:
         session.close()

@@ -73,6 +73,14 @@ crawl_run_status = sa.Enum(
 
 
 def upgrade() -> None:
+    if op.get_bind().dialect.name == "postgresql":
+        op.alter_column(
+            "alembic_version",
+            "version_num",
+            existing_type=sa.String(length=32),
+            type_=sa.String(length=128),
+            existing_nullable=False,
+        )
     op.create_table(
         "companies",
         sa.Column("id", GUID(), nullable=False),
@@ -274,3 +282,11 @@ def downgrade() -> None:
     op.drop_index("ix_companies_industry", table_name="companies")
     op.drop_index("ix_companies_normalized_name", table_name="companies")
     op.drop_table("companies")
+    if op.get_bind().dialect.name == "postgresql":
+        op.alter_column(
+            "alembic_version",
+            "version_num",
+            existing_type=sa.String(length=128),
+            type_=sa.String(length=32),
+            existing_nullable=False,
+        )

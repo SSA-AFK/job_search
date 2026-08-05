@@ -32,6 +32,30 @@ EXPECTED_TABLES = {
 }
 
 
+def test_initial_migration_widens_postgresql_alembic_revision_column() -> None:
+    migration_path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "0001_initial_schema.py"
+    )
+    migration = runpy.run_path(str(migration_path))
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect=postgresql.dialect(),
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    migration["upgrade"].__globals__["op"] = Operations(context)
+
+    migration["upgrade"]()
+
+    sql = " ".join(output.getvalue().split())
+    assert (
+        "ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(128)"
+        in sql
+    )
+
+
 def test_claim_token_backfill_compiles_uuid_cast_for_postgresql() -> None:
     migration_path = (
         Path(__file__).parents[2]
@@ -823,6 +847,17 @@ def test_job_entries_postgresql_schema_round_trip() -> None:
         schema_created = True
 
         command.upgrade(config, "0005_extend_job_type_values")
+        legacy_schema_engine = create_engine(schema_url)
+        try:
+            with legacy_schema_engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "ALTER TABLE alembic_version ALTER COLUMN version_num "
+                        "TYPE VARCHAR(32)"
+                    )
+                )
+        finally:
+            legacy_schema_engine.dispose()
         command.upgrade(config, "head")
         schema_engine = create_engine(schema_url)
         try:

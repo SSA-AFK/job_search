@@ -16,22 +16,26 @@ This is the living delivery document for the AI Company Search project. It is th
 |----------|---------|--------|
 | [`specs/2026-07-31-ai-company-search-agent-design.md`](specs/2026-07-31-ai-company-search-agent-design.md) | Product, architecture, contracts, data model, and acceptance criteria | Approved |
 | [`plans/2026-07-31-company-search-web-foundation.md`](plans/2026-07-31-company-search-web-foundation.md) | Stage one implementation plan | Executed and integrated locally into `main` |
-| [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31-company-search-ingestion-pipeline.md) | Stage two implementation plan | All 12 tasks complete; whole-branch review pending |
+| [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31-company-search-ingestion-pipeline.md) | Stage two implementation plan | Executed and integrated locally into `main` |
+| [`../dev/job-coverage-at-scale-plan.md`](../dev/job-coverage-at-scale-plan.md) | Stage 3 coverage design and scale gates | Stage 3A implemented; Task 7/final review pending |
+| [`../dev/migration-master-plan.md`](../dev/migration-master-plan.md) | Stage 3 migration and approval sequence | Stage 3A implemented; later stages awaiting separate plans |
+| [`plans/2026-08-05-company-search-stage3a-coverage-observability.md`](plans/2026-08-05-company-search-stage3a-coverage-observability.md) | Stage 3A detailed implementation plan | Tasks 1–6 reviewed; Task 7/final review pending |
 | [`../zhihu.md`](../../zhihu.md) | Supplied Zhihu Global Search API contract | Reference |
 
 ## Current Snapshot
 
 | Field | Value |
 |-------|-------|
-| Overall status | Stage one complete; stage two complete; locally integrated into `main` |
-| Current stage | Post-stage-two integrated baseline |
-| Current task | Select the next bounded delivery stage |
+| Overall status | Stage one and two complete on `main`; Stage 3A implemented on isolated branch with final reviews pending |
+| Current stage | Stage 3A coverage observability completion gate |
+| Current task | Task 7 independent review, then whole-branch review |
 | Execution method | Subagent-Driven Development |
-| Active branch/worktree | `main`; the stage-two feature branch and worktree have been removed |
+| Active branch/worktree | `codex/company-search-stage3a-coverage-observability` in its isolated worktree; main-workspace WIP untouched |
 | Stage one progress | 8/8 tasks complete; completion gate passed |
 | Stage two progress | 12/12 tasks complete; completion gate passed |
-| Last verified artifact state | Stage-two HEAD `5ff344a` fast-forwarded into `main`; Ruff clean; mypy 71 files; backend 414 passed/2 deselected; integration 12 passed; migration/seed 24 passed; performance 2 passed; frontend 55 unit and 9 E2E tests passed; production build passed |
-| Next action | Define and approve the next bounded stage against the design spec before implementation |
+| Stage 3A progress | Tasks 1–6 reviewed; Task 7 implemented and current matrix passed; Task 7/final reviews pending |
+| Last verified artifact state | Stage 3A branch: Ruff clean; mypy 79 files; backend 513 passed/1 skipped/2 deselected; integration 13; migration/seed 34 passed/1 skipped; performance 2 passed at 13.0 ms p95; live PostgreSQL marker 1 passed with no schema residue |
+| Next action | Complete Task 7 and whole-branch reviews; Stage 3B awaits a separate implementation plan and approval |
 
 ## Delivery Sequence
 
@@ -44,6 +48,9 @@ Approved design
   -> Whole-product verification
   -> Integration decision
   -> Local integration into main
+  -> Stage 3A: coverage observability foundation
+  -> Stage 3A completion gate and integration decision
+  -> Separate Stage 3B plan and approval
 ```
 
 Stage two must not begin until every stage one gate in the plan passes. Within a stage, tasks run sequentially because later task briefs consume interfaces and commits from earlier tasks.
@@ -104,6 +111,31 @@ Plan: [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31
 - [x] Search remains readable when Redis, Celery, the LLM, or any Provider is unavailable.
 - [x] Every enabled Provider declares credentials, compliance limits, timeouts, rate limits, and mock coverage.
 
+## Stage 3A Tracker
+
+Plan: [`plans/2026-08-05-company-search-stage3a-coverage-observability.md`](plans/2026-08-05-company-search-stage3a-coverage-observability.md)
+
+| Task | Deliverable | Status | Commit(s) | Review |
+|------|-------------|--------|-----------|--------|
+| 1 | Coverage enums and immutable commands | Complete | `758078b`, `2bc5a45`, `1d15f46` | Approved after fix rounds 1–2 |
+| 2 | Migration `0006` | Complete | `5067b4c`, `218fffd`, `11a4a11` | Approved after fix rounds 1–2 |
+| 3 | Migration `0007` | Complete | `c4f090b`, `f778ec1` | Approved after fix round 1 |
+| 4 | Transaction-neutral coverage repository | Complete | `b1fea8e`, `bd4f5ec`, `b7ffe3d`, `a0e5b65` | Approved after fix rounds 1–3 |
+| 5 | Atomic snapshot/source lifecycle | Complete | `2d3f166`, `5936b41`, `eae6055` | Approved after fix rounds 1–2 |
+| 6 | Coverage reports and JSON CLI | Complete | `809bafa`, `3b208ae`, `5c30753` | Approved after fix rounds 1–2 |
+| 7 | Integration acceptance and completion gate | Review pending | Current gate commit | Controller review pending |
+
+### Stage 3A Gate
+
+- [x] Empty, failed, partial, complete, replay and source/posting lifecycle behavior has database-backed coverage.
+- [x] SQLite migrations cover empty database, `0005`, downgrade and legacy-source preservation.
+- [x] Live PostgreSQL upgrades through head and cleans its isolated schema without `CASCADE`.
+- [x] Internal JSON reports distinguish confirmed empty companies from failures with bounded query count.
+- [x] Current Providers do not write false complete-list snapshots; default tests use no live network, browser, Redis or LLM.
+- [ ] Task 7 independent specification and quality review.
+- [ ] Final whole-branch review and current-HEAD matrix after review findings.
+- [ ] Integration decision. Stage 3B remains unapproved.
+
 ## Quality Gates Per Task
 
 Every task follows this sequence:
@@ -149,7 +181,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | Risk | Impact | Mitigation | State |
 |------|--------|------------|-------|
 | External Provider credentials or authorization unavailable | Some data sources cannot ship | Providers default off; stage one uses versioned seed data; stage two starts with supplied Zhihu contract | Controlled |
-| SQLite/PostgreSQL behavior diverges | Later production migration may fail | Use SQLAlchemy types, named constraints, Alembic, and dialect-aware index tests | Open |
+| SQLite/PostgreSQL behavior diverges | Later production migration may fail | Live PostgreSQL marker plus SQLAlchemy types, named constraints, Alembic, and dialect-aware tests | Controlled through `0007`; reopen for later migrations |
 | LLM output is malformed or follows hostile page text | Incorrect or unsafe data could be written | Bounded plain-text evidence, fixed roles, no tools, Pydantic validation, evidence-id checks | Open until stage two |
 | Duplicate task delivery or source replay | Duplicate entities and unstable status | Database unique constraints, run idempotency, repeated-delivery integration tests | Open until stage two |
 | Search performance degrades at target volume | User-visible latency exceeds target | Indexed query paths and a 10k/100k p95 gate in stage one | Controlled at 20.5 ms p95 in final verification |
@@ -179,6 +211,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-08-04 | Stage two Task 12 | End-to-end failure verification, runbook, and two scoped fix re-reviews | PASS: Ruff clean; mypy 69 files; full pytest 347 passed/2 deselected; integration 12 passed; performance 2 passed; migrations/seed 19 passed; Vitest 54 passed; build passed; Playwright 9 passed; opt-in collection, deterministic conflicts, bounded Zhihu responses, two-phase company-site collection, and operator-owned host authorization verified; two Minors deferred |
 | 2026-08-04 | Stage two final review fix wave | Ten Important findings plus scoped concurrency/security follow-ups | BLOCKED: implementation gates pass (Ruff, mypy 71 files, backend 398 passed/2 deselected, integration 12, performance 2, migrations/seed 21, Vitest 54, build, Playwright 9), but official scoped review found a reconciliation race and employment-type loss |
 | 2026-08-04 | Stage two authorized targeted repair | Atomic reconciliation, employment-type preservation, and two scoped review rounds | PASS: Ruff clean; mypy 71 files; backend 414 passed/2 deselected; integration 12; performance 2; migrations/seed 24; Vitest 55; build passed; Playwright 9; official scoped re-review found no Critical/Important |
+| 2026-08-05 | Stage 3A Tasks 1–7 implementation matrix | Coverage contracts, migrations, lifecycle, reports, integration acceptance, Provider audit, and live PostgreSQL round trip | PASS before final reviews: Ruff clean; mypy 79 files; backend 513 passed/1 skipped/2 deselected; integration 13; migration/seed 34 passed/1 skipped; performance 2 at 13.0 ms p95; PostgreSQL 1 passed and zero residual schemas; one known Pydantic negative-test warning |
 
 ## Iteration History
 
@@ -215,6 +248,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-08-04 | Stage two whole-branch review | Implemented the single approved final fix wave and passed all current-HEAD verification; official scoped re-review closed nine original findings but retained one reconciliation atomicity defect and found employment-type loss in production deduplication | Await authorization for an additional targeted repair; do not merge `5152155` as-is |
 | 2026-08-04 | Stage two authorized targeted repair | Added atomic run-to-request reconciliation locking and first-class part-time/temporary job types; the second scoped round corrected SQLite FK-preserving migration, PostgreSQL lock order, and frontend contracts | Completion review approved; run final current-HEAD verification and choose integration path |
 | 2026-08-05 | Stage two local integration | Fast-forwarded approved stage-two HEAD `5ff344a` into `main`, repeated merged-result verification, restored and hash-verified pre-existing user work, and removed the merged feature branch/worktree using validated per-file cleanup | Define and approve the next bounded stage before implementation |
+| 2026-08-05 | Stage 3A Tasks 1–7 implementation | Added formal entry/snapshot facts, replay-safe lifecycle, safe two-absence source deactivation, bounded internal coverage reporting, real database acceptance, and PostgreSQL revision-column compatibility; Tasks 1–6 reviews passed | Run Task 7 independent review and final whole-branch review; do not begin Stage 3B without a separate approved plan |
 
 ## Update Template
 

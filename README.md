@@ -79,6 +79,27 @@ Set-Location backend
 python -m pytest -m performance tests/performance/test_company_queries.py -q
 ```
 
+## Stage 3A coverage operations
+
+Upgrade the configured database and print the internal 24-hour coverage report as JSON:
+
+```powershell
+Set-Location backend
+.\.venv\Scripts\Activate.ps1
+python -m alembic upgrade head
+python -m app.coverage.cli --refresh-hours 24
+```
+
+The report is an offline database read. Current Providers do not write Stage 3A complete-list snapshots; ATS and complete-list ingestion remain disabled until Stage 3B has a separate implementation plan and approval.
+
+The Stage 3A rollback target is migration `0005_extend_job_type_values`:
+
+```powershell
+python -m alembic downgrade 0005_extend_job_type_values
+```
+
+This downgrade is allowed only before Stage 3B writes production sources linked to job entries or collection snapshots. Back up the database and stop writers before any production migration. `TEST_POSTGRES_URL` is an opt-in test-runner input for the PostgreSQL migration gate, not an application setting; do not add it to application configuration or `.env.example`.
+
 ## Test matrix
 
 | Command | Coverage |

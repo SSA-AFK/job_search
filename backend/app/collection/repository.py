@@ -1,8 +1,10 @@
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -137,7 +139,10 @@ class CollectionRepository:
             )
             .values(status=CollectionStatus.RUNNING)
         )
-        if run_update.rowcount != 1 or request_update.rowcount != 1:
+        if (
+            cast(CursorResult[Any], run_update).rowcount != 1
+            or cast(CursorResult[Any], request_update).rowcount != 1
+        ):
             self.session.rollback()
             self.session.expire_all()
             current = self.get_run(run_id)
@@ -222,7 +227,10 @@ class CollectionRepository:
                 completed_at=now,
             )
         )
-        if run_update.rowcount != 1 or request_update.rowcount != 1:
+        if (
+            cast(CursorResult[Any], run_update).rowcount != 1
+            or cast(CursorResult[Any], request_update).rowcount != 1
+        ):
             return self._reload_run(run_id)
         return self._reload_run(run_id, commit=True)
 
@@ -266,7 +274,10 @@ class CollectionRepository:
                 completed_at=now,
             )
         )
-        if run_update.rowcount != 1 or request_update.rowcount != 1:
+        if (
+            cast(CursorResult[Any], run_update).rowcount != 1
+            or cast(CursorResult[Any], request_update).rowcount != 1
+        ):
             return self._reload_run(run.id)
         return self._reload_run(run.id, commit=True)
 
@@ -315,7 +326,10 @@ class CollectionRepository:
             )
             .values(status=CollectionStatus.QUEUED)
         )
-        if run_update.rowcount != 1 or request_update.rowcount != 1:
+        if (
+            cast(CursorResult[Any], run_update).rowcount != 1
+            or cast(CursorResult[Any], request_update).rowcount != 1
+        ):
             return self._reload_run(run_id)
         return self._reload_run(run_id, commit=True)
 
@@ -367,7 +381,10 @@ class CollectionRepository:
                 completed_at=now,
             )
         )
-        if run_update.rowcount != 1 or request_update.rowcount != 1:
+        if (
+            cast(CursorResult[Any], run_update).rowcount != 1
+            or cast(CursorResult[Any], request_update).rowcount != 1
+        ):
             return self._reload_run(run_id)
         return self._reload_run(run_id, commit=True)
 
@@ -425,7 +442,10 @@ class CollectionRepository:
                 completed_at=now,
             )
         )
-        if run_update.rowcount != 1 or request_update.rowcount != 1:
+        if (
+            cast(CursorResult[Any], run_update).rowcount != 1
+            or cast(CursorResult[Any], request_update).rowcount != 1
+        ):
             self.session.rollback()
             self.session.expire_all()
             current = self.get_run(run_id)

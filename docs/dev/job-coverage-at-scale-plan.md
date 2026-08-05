@@ -1,10 +1,10 @@
 # 万级公司职位覆盖设计
 
-> **状态：待审批**
+> **状态：Stage 3A 已实施，待 Task 7 独立审阅与全分支审阅**
 > **修订日期：2026-08-05**
 > **定位：** Stage 3 的产品与技术设计，定义万级公司下职位覆盖、完整性、新鲜度和成本边界。
 > **实施入口：** [migration-master-plan.md](migration-master-plan.md)
-> **当前基线：** Stage 1、Stage 2 已合并到 `main`；本文不表示 Stage 3 已实施。
+> **当前基线：** Stage 1、Stage 2 已合并到 `main`；Stage 3A 在隔离分支完成实现和当前矩阵，尚未集成；Stage 3B 未实施。
 
 ## 1. 结论
 
@@ -240,4 +240,20 @@ Stage 3 建议增加以下模型，最终字段以审批后的 Alembic 计划为
 
 ## 12. 审批门
 
-本文档批准后，才可编写或确认 Stage 3 的逐任务 implementation plan。未经再次明确授权，不创建工作树、不修改生产代码、不运行外部采集，也不扩大数据规模。
+Stage 3A 已按获批的详细 implementation plan 实施。Stage 3B 仍须单独编写 implementation plan 并再次取得用户批准；当前授权不包含 ATS、Playwright、在线 HTTP、外部 LLM、前端看板或规模扩容，也不授权运行外部采集。
+
+## 13. Stage 3A 实施记录
+
+截至 2026-08-05，隔离分支已实现：
+
+- 契约：`758078b`、`2bc5a45`、`1d15f46`；
+- `0006`：`5067b4c`、`218fffd`、`11a4a11`；
+- `0007`：`c4f090b`、`f778ec1`；
+- 覆盖 repository：`b1fea8e`、`bd4f5ec`、`b7ffe3d`、`a0e5b65`；
+- 原子生命周期 service：`2d3f166`、`5936b41`、`eae6055`；
+- 覆盖报告与 JSON CLI：`809bafa`、`3b208ae`、`5c30753`；
+- Task 7 集成验收、PostgreSQL 迁移兼容修复和本文档：当前 gate commit，提交后由 controller 记录 SHA。
+
+Tasks 1–6 的规格与质量审阅均已通过；Task 7 独立审阅和 Stage 3A 全分支审阅待 controller 执行，不能据此提前宣布 Stage 3A 已完成最终 gate。当前验证结果为 Ruff 通过、mypy 79 个源文件通过、backend `513 passed / 1 skipped / 2 deselected`、integration `13 passed`、migration/seed `34 passed / 1 skipped`、performance `2 passed / 514 deselected`，10k/100k 搜索 p95 为 13.0 ms。live PostgreSQL 从空 schema 经 `0005` 升到 head、写入并 downgrade 通过，结束后没有 `stage3a_test_*` schema 残留。
+
+当前 Provider 测试与静态引用审计证明 Provider 不调用 `RecordJobSnapshot` 或 `JobCoverageService`，因此不会伪造完整列表或可信空列表。默认测试不访问真实网络、浏览器、Redis 或 LLM。唯一 warning 来自既有的非整数 `salary_months` 负向测试，已如实保留在 gate 证据中。

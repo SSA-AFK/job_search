@@ -39,6 +39,14 @@ job_snapshot_status = sa.Enum(
 
 
 def upgrade() -> None:
+    if op.get_bind().dialect.name == "postgresql":
+        op.alter_column(
+            "alembic_version",
+            "version_num",
+            existing_type=sa.String(length=32),
+            type_=sa.String(length=128),
+            existing_nullable=False,
+        )
     op.create_table(
         "job_entries",
         sa.Column("id", GUID(), nullable=False),

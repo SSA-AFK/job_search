@@ -4,11 +4,12 @@ from collections import defaultdict
 from decimal import Decimal
 from hashlib import sha256
 from html.parser import HTMLParser
-from typing import TypeVar
+from typing import Any, TypeVar, cast
 from uuid import UUID
 
 from pydantic import ValidationError
 from sqlalchemy import Select, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import DataError, IntegrityError, StatementError
 from sqlalchemy.orm import Session
 
@@ -197,7 +198,10 @@ class PersistenceService:
             .values(status=CollectionStatus.RUNNING)
             .execution_options(synchronize_session=False)
         )
-        if run_update.rowcount != 1 or request_update.rowcount != 1:
+        if (
+            cast(CursorResult[Any], run_update).rowcount != 1
+            or cast(CursorResult[Any], request_update).rowcount != 1
+        ):
             raise PersistenceError(
                 run_id=run_id,
                 constraint="run_claim",

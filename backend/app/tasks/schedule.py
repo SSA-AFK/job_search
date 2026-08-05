@@ -1,10 +1,12 @@
 """Daily scheduling of stale company collection runs."""
 
 from datetime import timedelta
+from typing import Any, cast
 from uuid import uuid4
 
 import kombu.exceptions as kombu_exceptions  # type: ignore[import-untyped]
 from sqlalchemy import or_, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 
 from app.collection.repository import CollectionRepository
@@ -148,7 +150,7 @@ def redispatch_stale_queued_runs() -> dict[str, int]:
                 .values(celery_task_id=str(task_result.id))
             )
             session.commit()
-            if result.rowcount == 1:
+            if cast(CursorResult[Any], result).rowcount == 1:
                 redispatched += 1
         return {"redispatched": redispatched, "requeued": requeued}
     finally:

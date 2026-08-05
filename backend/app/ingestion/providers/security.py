@@ -4,6 +4,7 @@ import asyncio
 import socket
 from collections.abc import Awaitable, Callable, Sequence
 from ipaddress import ip_address
+from typing import cast
 
 from app.ingestion.errors import ProviderError
 
@@ -35,4 +36,4 @@ async def resolve_host(host: str) -> Sequence[str]:
     except socket.gaierror as error:
         raise ProviderError(code="dns_failure", retryable=True, detail=str(error)) from error
 
-    return tuple(record[4][0] for record in records)
+    return tuple(cast(str, record[4][0]) for record in records)

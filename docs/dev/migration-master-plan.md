@@ -1,8 +1,8 @@
 # Stage 3 万级职位覆盖迁移总计划
 
-> **状态：待审批**
+> **状态：Stage 3A 已实施，待 Task 7 独立审阅与全分支审阅**
 > **修订日期：2026-08-05**
-> **定位：** 基于已完成 Stage 2 的 Stage 3 执行路线，不是可直接开工的逐任务 implementation plan。
+> **定位：** 基于已完成 Stage 2 的 Stage 3 执行路线；Stage 3A 已按获批详细计划实施，后续阶段仍不是可直接开工的 implementation plan。
 > **设计依据：** [job-coverage-at-scale-plan.md](job-coverage-at-scale-plan.md)
 > **审批规则：** 本文批准后仍需生成详细 implementation plan，并再次获得执行授权。
 
@@ -11,7 +11,7 @@
 ### 1.1 已进入正式基线
 
 - FastAPI 搜索与公司详情 API；
-- SQLAlchemy 模型和 Alembic `0001`–`0005`；
+- SQLAlchemy 模型和 Alembic `0001`–`0007`；
 - 公司、职位、来源、证据、备案、采集请求和运行模型；
 - 幂等持久化、规范化和确定性优先去重；
 - SSRF 安全 HTTP、知乎和公司官网 Provider；
@@ -19,6 +19,7 @@
 - 24 小时公司刷新、任务重派和 30 天职位来源失效；
 - Redis 降级缓存和前端采集轮询；
 - 10k 公司/100k 职位的查询性能门。
+- 招聘入口、完整性快照、安全来源生命周期和内部覆盖 JSON 报告。
 
 ### 1.2 可复用但未正式集成
 
@@ -33,14 +34,13 @@
 
 ### 1.3 当前关键缺口
 
-1. 缺少招聘入口和列表快照的正式数据模型；
-2. ATS 原型未注册到生产运行时；
-3. 没有可证明分页完整性的统一契约；
-4. 当前日调度逐公司提交和派发，缺少批处理与背压；
-5. 限流仅为单进程 Provider 级；
-6. 常规职位抽取仍可能依赖 LLM；
-7. 没有覆盖率、队列滞后和误关闭保护看板；
-8. 尚无真实 1k、3k、10k 端到端采集基准。
+1. ATS 原型未注册到生产运行时；
+2. 当前 Provider 尚未产出可证明分页完整性的快照；
+3. 当前日调度逐公司提交和派发，缺少批处理与背压；
+4. 限流仅为单进程 Provider 级；
+5. 常规职位抽取仍可能依赖 LLM；
+6. 尚无队列滞后和误关闭保护前端看板；
+7. 尚无真实 1k、3k、10k 端到端采集基准。
 
 ## 2. 迁移原则
 
@@ -148,6 +148,14 @@ backend/app/
 ### 停止条件
 
 若现有职位无法无损迁移，或关闭规则可能因失败快照误删职位，停止进入 Stage 3B。
+
+### 实施状态（2026-08-05）
+
+Tasks 1–6 已实现并通过逐任务规格/质量审阅，提交序列为 `758078b..5c30753`。Task 7 当前 gate commit 增加真实 Alembic-backed 生命周期验收，并修复 PostgreSQL 默认 32 字符 Alembic revision 列无法容纳既有长 revision id 的问题；该 commit SHA 将在提交后由 controller 记录。
+
+当前矩阵：Ruff 通过；mypy 79 个源文件通过；backend `513 passed / 1 skipped / 2 deselected`；integration `13 passed`；migration/seed `34 passed / 1 skipped`；performance `2 passed / 514 deselected`，10k/100k 搜索 p95 13.0 ms；live PostgreSQL marker `1 passed / 16 deselected` 且清理后无隔离 schema 残留。Provider 目录没有 Stage 3A 快照写入调用，默认 suite 不依赖网络、浏览器、Redis 或 LLM。
+
+Task 7 独立审阅和 Stage 3A 全分支审阅仍待 controller 完成。Stage 3B 状态为“等待单独 implementation plan 与审批”，不得在本 gate 中开始。
 
 ## 6. Stage 3B：ATS 正式接入
 
