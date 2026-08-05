@@ -6,6 +6,8 @@ from app.models.enums import (
     CompanyScale,
     FilingType,
     FundingStage,
+    JobEntryStatus,
+    JobSnapshotStatus,
     JobType,
     RunType,
 )
@@ -26,6 +28,8 @@ __all__ = [
     "FilingType",
     "FundingStage",
     "JobPosting",
+    "JobEntryStatus",
+    "JobSnapshotStatus",
     "JobSource",
     "JobType",
     "RegulatoryFiling",

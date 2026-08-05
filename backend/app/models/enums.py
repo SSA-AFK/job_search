@@ -46,6 +46,19 @@ class JobType(StrEnum):
     UNKNOWN = "unknown"
 
 
+class JobEntryStatus(StrEnum):
+    UNKNOWN = "unknown"
+    ACTIVE = "active"
+    STALE = "stale"
+    DISABLED = "disabled"
+
+
+class JobSnapshotStatus(StrEnum):
+    SUCCEEDED = "succeeded"
+    PARTIAL = "partial"
+    FAILED = "failed"
+
+
 class FilingType(StrEnum):
     ICP = "icp"
     ALGORITHM = "algorithm"
