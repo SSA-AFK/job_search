@@ -3,7 +3,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.ingestion.coverage.contracts import CoverageReport
@@ -24,9 +24,10 @@ class CoverageReportService:
         as_of: datetime,
         refresh_window: timedelta = timedelta(hours=24),
     ) -> CoverageReport:
-        as_of_utc = _require_aware_utc(as_of)
-        refresh_window_hours = _whole_positive_hours(refresh_window)
-        window_start = as_of_utc - refresh_window
+        as_of_utc, refresh_window_hours, window_start = validate_coverage_window(
+            as_of,
+            refresh_window,
+        )
 
         qualifying_snapshots = (
             select(
@@ -51,7 +52,7 @@ class CoverageReportService:
                 JobCollectionSnapshot.completed_at >= window_start,
                 JobCollectionSnapshot.completed_at <= as_of_utc,
             )
-            .subquery("qualifying_snapshots")
+            .cte("qualifying_snapshots")
         )
         latest_qualifying = (
             select(
@@ -59,7 +60,7 @@ class CoverageReportService:
                 qualifying_snapshots.c.empty_confirmed,
             )
             .where(qualifying_snapshots.c.snapshot_rank == 1)
-            .subquery("latest_qualifying")
+            .cte("latest_qualifying")
         )
 
         target_count = select(func.count(Company.id)).scalar_subquery()
@@ -68,23 +69,31 @@ class CoverageReportService:
             .where(JobEntry.status == JobEntryStatus.ACTIVE)
             .scalar_subquery()
         )
-        enumerated_count = select(
-            func.count(func.distinct(latest_qualifying.c.company_id))
-        ).scalar_subquery()
-        empty_count = (
-            select(func.count(func.distinct(latest_qualifying.c.company_id)))
-            .where(latest_qualifying.c.empty_confirmed.is_(True))
-            .scalar_subquery()
-        )
-        row = self.session.execute(
-            select(
-                target_count.label("target_companies"),
-                active_entry_count.label("active_entry_companies"),
-                enumerated_count.label("recently_enumerated_companies"),
-                enumerated_count.label("complete_list_companies"),
-                empty_count.label("confirmed_empty_companies"),
-            )
-        ).one()
+        snapshot_counts = select(
+            func.count(func.distinct(latest_qualifying.c.company_id)).label(
+                "enumerated_companies"
+            ),
+            func.count(
+                func.distinct(
+                    case(
+                        (
+                            latest_qualifying.c.empty_confirmed.is_(True),
+                            latest_qualifying.c.company_id,
+                        )
+                    )
+                )
+            ).label("confirmed_empty_companies"),
+        ).cte("snapshot_counts")
+        report_statement = select(
+            target_count.label("target_companies"),
+            active_entry_count.label("active_entry_companies"),
+            snapshot_counts.c.enumerated_companies.label(
+                "recently_enumerated_companies"
+            ),
+            snapshot_counts.c.enumerated_companies.label("complete_list_companies"),
+            snapshot_counts.c.confirmed_empty_companies,
+        ).select_from(snapshot_counts)
+        row = self.session.execute(report_statement).one()
 
         return CoverageReport(
             as_of=as_of_utc,
@@ -103,6 +112,21 @@ class CoverageReportService:
             ),
             refresh_slo_rate=_rate(row.recently_enumerated_companies, row.target_companies),
         )
+
+
+def validate_coverage_window(
+    as_of: datetime,
+    refresh_window: timedelta,
+) -> tuple[datetime, int, datetime]:
+    """Validate and normalize report bounds before any database access."""
+
+    as_of_utc = _require_aware_utc(as_of)
+    refresh_window_hours = _whole_positive_hours(refresh_window)
+    try:
+        window_start = as_of_utc - refresh_window
+    except OverflowError:
+        raise ValueError("refresh window is outside the supported datetime range") from None
+    return as_of_utc, refresh_window_hours, window_start
 
 
 def _require_aware_utc(value: datetime) -> datetime:

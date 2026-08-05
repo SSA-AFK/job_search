@@ -1,10 +1,12 @@
+import re
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 from sqlalchemy import Engine, create_engine, event
-from sqlalchemy.orm import Session
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.orm import ORMExecuteState, Session
 
 from app.coverage.service import CoverageReportService
 from app.models import (
@@ -245,6 +247,70 @@ def test_build_rejects_refresh_windows_that_cannot_be_reported(
 def test_build_rejects_naive_as_of(session: Session) -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         CoverageReportService(session).build(as_of=AS_OF.replace(tzinfo=None))
+
+
+@pytest.mark.parametrize(
+    ("as_of", "refresh_window"),
+    [
+        (datetime.min.replace(tzinfo=UTC), timedelta(hours=24)),
+        (AS_OF, timedelta(hours=2_147_483_647)),
+    ],
+)
+def test_build_rejects_unrepresentable_window_before_executing_sql(
+    engine: Engine,
+    session: Session,
+    as_of: datetime,
+    refresh_window: timedelta,
+) -> None:
+    statements = 0
+
+    def count_statement(
+        _connection: object,
+        _cursor: object,
+        _statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        nonlocal statements
+        statements += 1
+
+    event.listen(engine, "before_cursor_execute", count_statement)
+    try:
+        with pytest.raises(ValueError, match="outside the supported datetime range"):
+            CoverageReportService(session).build(
+                as_of=as_of,
+                refresh_window=refresh_window,
+            )
+    finally:
+        event.remove(engine, "before_cursor_execute", count_statement)
+
+    assert statements == 0
+
+
+def test_build_compiles_one_snapshot_window_scan_for_postgresql(session: Session) -> None:
+    compiled_statements: list[str] = []
+
+    def capture_statement(orm_execute_state: ORMExecuteState) -> None:
+        compiled_statements.append(
+            str(
+                orm_execute_state.statement.compile(
+                    dialect=postgresql.dialect(),
+                    compile_kwargs={"literal_binds": True},
+                )
+            ).lower()
+        )
+
+    event.listen(session, "do_orm_execute", capture_statement)
+    try:
+        CoverageReportService(session).build(as_of=AS_OF)
+    finally:
+        event.remove(session, "do_orm_execute", capture_statement)
+
+    assert len(compiled_statements) == 1
+    compiled_sql = compiled_statements[0]
+    assert compiled_sql.count("row_number() over") == 1
+    assert len(re.findall(r"\bfrom\s+job_collection_snapshots\b", compiled_sql)) == 1
 
 
 def test_build_statement_count_is_bounded_independent_of_company_count(

@@ -125,3 +125,30 @@ def test_cli_sanitizes_database_failures(tmp_path: Path) -> None:
     assert result.stderr == "coverage report failed: database unavailable\n"
     assert secret not in result.stderr
     assert "SELECT" not in result.stderr.upper()
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ("--as-of", "0001-01-01T00:00:00Z"),
+        ("--refresh-hours", "2147483647"),
+        ("--refresh-hours", "999999999999999"),
+    ],
+)
+def test_cli_rejects_unrepresentable_windows_before_database_access(
+    arguments: tuple[str, ...],
+) -> None:
+    secret = "super-secret-password"
+    environment = {
+        **os.environ,
+        "DATABASE_URL": f"missing-driver://user:{secret}@database.example/coverage",
+    }
+
+    result = _run_cli(*arguments, environment=environment)
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert result.stderr == "coverage report failed: invalid refresh window\n"
+    assert secret not in result.stderr
+    assert "TRACEBACK" not in result.stderr.upper()
+    assert "SELECT" not in result.stderr.upper()

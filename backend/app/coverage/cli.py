@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.coverage.service import CoverageReportService
+from app.coverage.service import CoverageReportService, validate_coverage_window
 
 
 def _aware_datetime(value: str) -> datetime:
@@ -41,12 +41,19 @@ def main() -> int:
     args = _parser().parse_args()
     as_of = args.as_of if args.as_of is not None else datetime.now(UTC)
     try:
+        refresh_window = timedelta(hours=args.refresh_hours)
+        validate_coverage_window(as_of, refresh_window)
+    except (OverflowError, ValueError):
+        print("coverage report failed: invalid refresh window", file=sys.stderr)
+        return 2
+
+    try:
         from app.core.database import SessionLocal
 
         with SessionLocal() as session:
             report = CoverageReportService(session).build(
                 as_of=as_of,
-                refresh_window=timedelta(hours=args.refresh_hours),
+                refresh_window=refresh_window,
             )
     except (ImportError, OSError, SQLAlchemyError):
         print("coverage report failed: database unavailable", file=sys.stderr)
