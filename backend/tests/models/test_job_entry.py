@@ -2,7 +2,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import create_engine, event, func, select
+from sqlalchemy import create_engine, event, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -59,17 +59,23 @@ def create_entry(company: Company) -> JobEntry:
     )
 
 
-def create_snapshot(entry: JobEntry, crawl_run: CrawlRun) -> JobCollectionSnapshot:
+def create_snapshot(
+    entry: JobEntry,
+    crawl_run: CrawlRun | None,
+    *,
+    status: JobSnapshotStatus = JobSnapshotStatus.SUCCEEDED,
+    command_hash: str = "b" * 64,
+) -> JobCollectionSnapshot:
     now = datetime.now(UTC)
     return JobCollectionSnapshot(
         job_entry_id=entry.id,
-        crawl_run_id=crawl_run.id,
-        status=JobSnapshotStatus.SUCCEEDED,
-        pagination_complete=True,
-        empty_confirmed=True,
-        reported_total=0,
+        crawl_run_id=crawl_run.id if crawl_run is not None else None,
+        status=status,
+        pagination_complete=status is JobSnapshotStatus.SUCCEEDED,
+        empty_confirmed=status is JobSnapshotStatus.SUCCEEDED,
+        reported_total=0 if status is JobSnapshotStatus.SUCCEEDED else None,
         content_fingerprint="a" * 64,
-        command_hash="b" * 64,
+        command_hash=command_hash,
         started_at=now,
         completed_at=now,
     )
@@ -116,6 +122,121 @@ def test_entry_and_snapshot_defaults_match_coverage_contract(
         assert JobEntry.__table__.c[column_name].server_default is not None
     for column_name in ("observed_count", "pages_fetched"):
         assert JobCollectionSnapshot.__table__.c[column_name].server_default is not None
+
+
+def test_snapshot_identity_rejects_duplicate_non_null_crawl_run(
+    session: Session, company: Company, crawl_run: CrawlRun
+) -> None:
+    entry = create_entry(company)
+    session.add(entry)
+    session.flush()
+    session.add(create_snapshot(entry, crawl_run))
+    session.commit()
+    session.add(create_snapshot(entry, crawl_run, command_hash="c" * 64))
+
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+
+def test_snapshot_identity_allows_multiple_null_crawl_runs(
+    session: Session, company: Company
+) -> None:
+    entry = create_entry(company)
+    session.add(entry)
+    session.flush()
+    session.add_all(
+        [
+            create_snapshot(entry, None, command_hash="c" * 64),
+            create_snapshot(entry, None, command_hash="d" * 64),
+        ]
+    )
+
+    session.commit()
+
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(JobCollectionSnapshot)
+            .where(JobCollectionSnapshot.job_entry_id == entry.id)
+        )
+        == 2
+    )
+
+
+def test_coverage_status_enums_persist_each_documented_value(
+    session: Session, company: Company
+) -> None:
+    entry_statuses = list(JobEntryStatus)
+    snapshot_statuses = list(JobSnapshotStatus)
+    entries = [
+        JobEntry(
+            company_id=company.id,
+            url=f"https://careers.example.com/jobs/{status.value}",
+            normalized_url=f"https://careers.example.com/jobs/{status.value}",
+            provider="official",
+            platform="custom",
+            status=status,
+        )
+        for status in entry_statuses
+    ]
+    crawl_runs = [
+        CrawlRun(run_type=RunType.COMPANY_REFRESH, providers_attempted=[])
+        for _ in snapshot_statuses
+    ]
+    session.add_all(entries + crawl_runs)
+    session.flush()
+    session.add_all(
+        [
+            create_snapshot(
+                entries[0],
+                crawl_run,
+                status=status,
+                command_hash=f"{index:064x}",
+            )
+            for index, (crawl_run, status) in enumerate(
+                zip(crawl_runs, snapshot_statuses), start=1
+            )
+        ]
+    )
+    session.commit()
+
+    assert set(session.scalars(text("SELECT status FROM job_entries"))) == {
+        status.value for status in entry_statuses
+    }
+    assert set(session.scalars(text("SELECT status FROM job_collection_snapshots"))) == {
+        status.value for status in snapshot_statuses
+    }
+    assert JobEntry.__table__.c.status.type.enums == [status.value for status in entry_statuses]
+    assert JobCollectionSnapshot.__table__.c.status.type.enums == [
+        status.value for status in snapshot_statuses
+    ]
+
+
+def test_coverage_status_constraints_reject_undocumented_values(
+    session: Session, company: Company, crawl_run: CrawlRun
+) -> None:
+    session.add(
+        JobEntry(
+            company_id=company.id,
+            url="https://careers.example.com/jobs/invalid",
+            normalized_url="https://careers.example.com/jobs/invalid",
+            provider="official",
+            platform="custom",
+            status="retired",
+        )
+    )
+
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+    session.rollback()
+    entry = create_entry(company)
+    session.add(entry)
+    session.flush()
+    session.add(create_snapshot(entry, crawl_run, status="cancelled"))
+
+    with pytest.raises(IntegrityError):
+        session.commit()
 
 
 def test_deleting_company_cascades_entries_and_snapshots(
