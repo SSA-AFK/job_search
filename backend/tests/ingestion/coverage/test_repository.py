@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -252,10 +252,9 @@ class _PostgresUniqueViolation(Exception):
 @pytest.mark.parametrize(
     "database_error",
     [
-        Exception("UNIQUE constraint failed: job_entries.company_id, job_entries.normalized_url"),
         _PostgresUniqueViolation("uq_job_entry_company_url"),
     ],
-    ids=["sqlite", "postgresql"],
+    ids=["postgresql"],
 )
 def test_ensure_entry_recovers_known_unique_race_and_keeps_outer_transaction(
     repository: CoverageRepository,
@@ -331,13 +330,9 @@ def test_ensure_entry_rechecks_winner_provenance_after_postgresql_unique_race(
 @pytest.mark.parametrize(
     "database_error",
     [
-        Exception(
-            "UNIQUE constraint failed: job_collection_snapshots.job_entry_id, "
-            "job_collection_snapshots.crawl_run_id"
-        ),
         _PostgresUniqueViolation("uq_job_snapshot_entry_run"),
     ],
-    ids=["sqlite", "postgresql"],
+    ids=["postgresql"],
 )
 def test_insert_snapshot_converts_known_unique_race_from_savepoint(
     repository: CoverageRepository,
@@ -386,3 +381,129 @@ def test_insert_snapshot_reraises_unrelated_integrity_error(
     with pytest.raises(IntegrityError) as raised:
         repository.insert_snapshot(make_command(entry.id, run.id))
     assert raised.value is unrelated
+
+
+def test_recompute_job_activity_batches_locks_and_queries_for_a_large_expunged_batch(
+    repository: CoverageRepository, company: Company, session: Session
+) -> None:
+    postings = [
+        JobPosting(
+            company_id=company.id,
+            title=f"Engineer {index}",
+            normalized_title=f"engineer {index}",
+            city="Shanghai",
+            description="Build",
+            is_active=False,
+        )
+        for index in range(25)
+    ]
+    session.add_all(postings)
+    session.flush()
+    session.add_all(
+        JobSource(
+            job_posting_id=posting.id,
+            provider="official",
+            source_raw_id=f"activity-{index}",
+            apply_url=f"https://jobs.example.com/activity-{index}",
+            is_active=index % 2 == 0,
+        )
+        for index, posting in enumerate(postings)
+    )
+    session.commit()
+    posting_ids = [posting.id for posting in postings]
+    session.expunge_all()
+    statement_count = 0
+
+    def count_statements(*_args) -> None:
+        nonlocal statement_count
+        statement_count += 1
+
+    assert session.bind is not None
+    event.listen(session.bind, "before_cursor_execute", count_statements)
+    try:
+        result = repository.recompute_job_activity(reversed((*posting_ids, uuid4())))
+    finally:
+        event.remove(session.bind, "before_cursor_execute", count_statements)
+
+    assert result == len(posting_ids)
+    assert statement_count <= 3
+    active_ids = set(session.scalars(select(JobPosting.id).where(JobPosting.is_active.is_(True))))
+    assert active_ids == {posting.id for index, posting in enumerate(postings) if index % 2 == 0}
+
+
+def test_ensure_entry_recovers_from_a_real_sqlite_savepoint_unique_race(
+    repository: CoverageRepository,
+    company: Company,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    winner = repository.ensure_entry(company.id, SHARED_URL, **ENTRY_FIELDS)
+    session.commit()
+    original_scalar = session.scalar
+    first_lookup = True
+
+    def hide_first_entry_lookup(statement, *args, **kwargs):
+        nonlocal first_lookup
+        if first_lookup:
+            first_lookup = False
+            return None
+        return original_scalar(statement, *args, **kwargs)
+
+    monkeypatch.setattr(session, "scalar", hide_first_entry_lookup)
+    with session.begin():
+        resolved = repository.ensure_entry(company.id, SHARED_URL, **ENTRY_FIELDS)
+        session.add(Company(canonical_name="Recovered", normalized_name="recovered"))
+        session.flush()
+        assert resolved.id == winner.id
+
+    assert session.get(Company, company.id) is not None
+    assert session.scalar(select(Company).where(Company.normalized_name == "recovered")) is not None
+
+
+def test_insert_snapshot_recovers_from_a_real_sqlite_savepoint_unique_race(
+    repository: CoverageRepository,
+    company: Company,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = repository.ensure_entry(company.id, SHARED_URL, **ENTRY_FIELDS)
+    run = make_run(session, company.id)
+    winner = repository.insert_snapshot(make_command(entry.id, run.id))
+    session.commit()
+
+    monkeypatch.setattr(repository, "get_snapshot", lambda *args: None)
+    with session.begin():
+        with pytest.raises(ValueError, match="snapshot already exists"):
+            repository.insert_snapshot(make_command(entry.id, run.id))
+        session.add(Company(canonical_name="Snapshot recovered", normalized_name="snapshot-recovered"))
+        session.flush()
+
+    assert session.get(JobCollectionSnapshot, winner.id) is not None
+    assert session.scalar(
+        select(Company).where(Company.normalized_name == "snapshot-recovered")
+    ) is not None
+
+
+def test_ensure_entry_reraises_constraint_name_suffix_collision(
+    repository: CoverageRepository,
+    company: Company,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_flush = session.flush
+    collision = IntegrityError(
+        None, None, Exception("constraint uq_job_entry_company_url_shadow violated")
+    )
+
+    monkeypatch.setattr(session, "scalar", lambda *args, **kwargs: None)
+
+    def flush(objects=None):
+        if objects is not None:
+            raise collision
+        return original_flush(objects)
+
+    monkeypatch.setattr(session, "flush", flush)
+
+    with pytest.raises(IntegrityError) as raised:
+        repository.ensure_entry(company.id, SHARED_URL, **ENTRY_FIELDS)
+    assert raised.value is collision

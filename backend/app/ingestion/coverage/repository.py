@@ -1,11 +1,12 @@
 """Transaction-neutral persistence helpers for job-list coverage."""
 
+import re
 from collections.abc import Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
 from pydantic import TypeAdapter
-from sqlalchemy import exists, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -19,6 +20,7 @@ _ENTRY_UNIQUE_CONSTRAINT = "uq_job_entry_company_url"
 _ENTRY_UNIQUE_MARKER = "job_entries.company_id, job_entries.normalized_url"
 _SNAPSHOT_UNIQUE_CONSTRAINT = "uq_job_snapshot_entry_run"
 _SNAPSHOT_UNIQUE_MARKER = "job_collection_snapshots.job_entry_id, job_collection_snapshots.crawl_run_id"
+_JOB_ACTIVITY_BATCH_SIZE = 500
 
 
 class CoverageRepository:
@@ -137,20 +139,34 @@ class CoverageRepository:
         return tuple(self.session.scalars(statement))
 
     def recompute_job_activity(self, job_ids: Iterable[UUID]) -> int:
+        """Lock requested postings in UUID order before deriving activity from sources."""
+
+        requested_ids = tuple(sorted(set(job_ids)))
         count = 0
-        for job_id in sorted(set(job_ids)):
-            posting = self.session.get(JobPosting, job_id)
-            if posting is None:
-                continue
-            posting.is_active = self.session.scalar(
-                select(
-                    exists().where(
-                        JobSource.job_posting_id == job_id,
-                        JobSource.is_active.is_(True),
+        with self.session.no_autoflush:
+            for start in range(0, len(requested_ids), _JOB_ACTIVITY_BATCH_SIZE):
+                batch = requested_ids[start : start + _JOB_ACTIVITY_BATCH_SIZE]
+                postings = tuple(
+                    self.session.scalars(
+                        select(JobPosting)
+                        .where(JobPosting.id.in_(batch))
+                        .order_by(JobPosting.id)
+                        .with_for_update()
                     )
                 )
-            ) is True
-            count += 1
+                active_job_ids = set(
+                    self.session.scalars(
+                        select(JobSource.job_posting_id)
+                        .where(
+                            JobSource.job_posting_id.in_(batch),
+                            JobSource.is_active.is_(True),
+                        )
+                        .distinct()
+                    )
+                )
+                for posting in postings:
+                    posting.is_active = posting.id in active_job_ids
+                count += len(postings)
         self.session.flush()
         return count
 
@@ -211,4 +227,5 @@ def _is_known_unique_constraint(
         return reported_name == constraint_name
 
     message = str(error.orig)
-    return constraint_name in message or sqlite_marker in message
+    name_pattern = rf"(?<![A-Za-z0-9_]){re.escape(constraint_name)}(?![A-Za-z0-9_])"
+    return re.search(name_pattern, message) is not None or sqlite_marker in message
