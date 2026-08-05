@@ -1,8 +1,10 @@
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.ingestion.coverage.contracts import RecordJobSnapshot
@@ -12,6 +14,7 @@ from app.models import (
     Company,
     CrawlRun,
     JobCollectionSnapshot,
+    JobEntry,
     JobPosting,
     JobSnapshotStatus,
     JobSource,
@@ -239,3 +242,147 @@ def test_repository_flushes_without_ending_outer_transaction(
         assert session.in_transaction()
         session.add(Company(canonical_name="Later", normalized_name="later"))
         assert entry.id is not None
+
+
+class _PostgresUniqueViolation(Exception):
+    def __init__(self, constraint_name: str) -> None:
+        self.diag = SimpleNamespace(constraint_name=constraint_name)
+
+
+@pytest.mark.parametrize(
+    "database_error",
+    [
+        Exception("UNIQUE constraint failed: job_entries.company_id, job_entries.normalized_url"),
+        _PostgresUniqueViolation("uq_job_entry_company_url"),
+    ],
+    ids=["sqlite", "postgresql"],
+)
+def test_ensure_entry_recovers_known_unique_race_and_keeps_outer_transaction(
+    repository: CoverageRepository,
+    company: Company,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    database_error: Exception,
+) -> None:
+    entry_winner = JobEntry(
+        id=uuid4(),
+        company_id=company.id,
+        url=SHARED_URL,
+        normalized_url=SHARED_URL,
+        **ENTRY_FIELDS,
+    )
+    original_scalar = session.scalar
+    scalar_calls = iter((None, entry_winner))
+    original_flush = session.flush
+
+    def scalar(statement, *args, **kwargs):
+        return next(scalar_calls)
+
+    def flush(objects=None):
+        if objects is not None:
+            raise IntegrityError(None, None, database_error)
+        return original_flush(objects)
+
+    monkeypatch.setattr(session, "scalar", scalar)
+    monkeypatch.setattr(session, "flush", flush)
+    session.commit()
+    with session.begin():
+        resolved = repository.ensure_entry(company.id, SHARED_URL, **ENTRY_FIELDS)
+        assert resolved is entry_winner
+        assert session.in_transaction()
+    monkeypatch.setattr(session, "scalar", original_scalar)
+
+
+def test_ensure_entry_rechecks_winner_provenance_after_postgresql_unique_race(
+    repository: CoverageRepository,
+    company: Company,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry_winner = JobEntry(
+        id=uuid4(),
+        company_id=company.id,
+        url=SHARED_URL,
+        normalized_url=SHARED_URL,
+        provider="board",
+        platform="self_hosted",
+        requires_rendering=False,
+    )
+    scalar_calls = iter((None, entry_winner))
+    original_flush = session.flush
+
+    monkeypatch.setattr(session, "scalar", lambda *args, **kwargs: next(scalar_calls))
+
+    def flush(objects=None):
+        if objects is not None:
+            raise IntegrityError(
+                None,
+                None,
+                _PostgresUniqueViolation("uq_job_entry_company_url"),
+            )
+        return original_flush(objects)
+
+    monkeypatch.setattr(session, "flush", flush)
+
+    with pytest.raises(ValueError, match="job entry provenance conflict"):
+        repository.ensure_entry(company.id, SHARED_URL, **ENTRY_FIELDS)
+
+
+@pytest.mark.parametrize(
+    "database_error",
+    [
+        Exception(
+            "UNIQUE constraint failed: job_collection_snapshots.job_entry_id, "
+            "job_collection_snapshots.crawl_run_id"
+        ),
+        _PostgresUniqueViolation("uq_job_snapshot_entry_run"),
+    ],
+    ids=["sqlite", "postgresql"],
+)
+def test_insert_snapshot_converts_known_unique_race_from_savepoint(
+    repository: CoverageRepository,
+    company: Company,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    database_error: Exception,
+) -> None:
+    entry = repository.ensure_entry(company.id, SHARED_URL, **ENTRY_FIELDS)
+    run = make_run(session, company.id)
+    original_flush = session.flush
+
+    monkeypatch.setattr(repository, "get_snapshot", lambda *args: None)
+
+    def flush(objects=None):
+        if objects is not None:
+            raise IntegrityError(None, None, database_error)
+        return original_flush(objects)
+
+    monkeypatch.setattr(session, "flush", flush)
+
+    with pytest.raises(ValueError, match="snapshot already exists"):
+        repository.insert_snapshot(make_command(entry.id, run.id))
+
+
+def test_insert_snapshot_reraises_unrelated_integrity_error(
+    repository: CoverageRepository,
+    company: Company,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = repository.ensure_entry(company.id, SHARED_URL, **ENTRY_FIELDS)
+    run = make_run(session, company.id)
+    original_flush = session.flush
+    unrelated = IntegrityError(None, None, _PostgresUniqueViolation("some_other_constraint"))
+
+    monkeypatch.setattr(repository, "get_snapshot", lambda *args: None)
+
+    def flush(objects=None):
+        if objects is not None:
+            raise unrelated
+        return original_flush(objects)
+
+    monkeypatch.setattr(session, "flush", flush)
+
+    with pytest.raises(IntegrityError) as raised:
+        repository.insert_snapshot(make_command(entry.id, run.id))
+    assert raised.value is unrelated

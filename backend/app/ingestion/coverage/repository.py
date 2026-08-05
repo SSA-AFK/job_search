@@ -15,7 +15,9 @@ from app.ingestion.coverage.contracts import RecordJobSnapshot
 from app.models import Company, CrawlRun, JobCollectionSnapshot, JobEntry, JobPosting, JobSource
 
 _PUBLIC_URL = TypeAdapter(DocumentUrl)
+_ENTRY_UNIQUE_CONSTRAINT = "uq_job_entry_company_url"
 _ENTRY_UNIQUE_MARKER = "job_entries.company_id, job_entries.normalized_url"
+_SNAPSHOT_UNIQUE_CONSTRAINT = "uq_job_snapshot_entry_run"
 _SNAPSHOT_UNIQUE_MARKER = "job_collection_snapshots.job_entry_id, job_collection_snapshots.crawl_run_id"
 
 
@@ -55,7 +57,9 @@ class CoverageRepository:
                     self.session.add(candidate)
                     self.session.flush([candidate])
             except IntegrityError as exc:
-                if not _is_constraint(exc, _ENTRY_UNIQUE_MARKER):
+                if not _is_known_unique_constraint(
+                    exc, _ENTRY_UNIQUE_CONSTRAINT, _ENTRY_UNIQUE_MARKER
+                ):
                     raise
                 entry = self.session.scalar(statement.execution_options(populate_existing=True))
                 if entry is None:
@@ -116,7 +120,9 @@ class CoverageRepository:
                 self.session.add(snapshot)
                 self.session.flush([snapshot])
         except IntegrityError as exc:
-            if _is_constraint(exc, _SNAPSHOT_UNIQUE_MARKER):
+            if _is_known_unique_constraint(
+                exc, _SNAPSHOT_UNIQUE_CONSTRAINT, _SNAPSHOT_UNIQUE_MARKER
+            ):
                 raise ValueError("snapshot already exists") from exc
             raise
         return snapshot
@@ -196,5 +202,13 @@ def _normalize_entry_url(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, path, query, ""))
 
 
-def _is_constraint(error: IntegrityError, marker: str) -> bool:
-    return marker in str(error.orig)
+def _is_known_unique_constraint(
+    error: IntegrityError, constraint_name: str, sqlite_marker: str
+) -> bool:
+    diagnostic = getattr(error.orig, "diag", None)
+    reported_name = getattr(diagnostic, "constraint_name", None)
+    if isinstance(reported_name, str):
+        return reported_name == constraint_name
+
+    message = str(error.orig)
+    return constraint_name in message or sqlite_marker in message
