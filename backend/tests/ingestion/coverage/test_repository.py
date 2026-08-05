@@ -426,7 +426,7 @@ def test_recompute_job_activity_batches_locks_and_queries_for_a_large_expunged_b
         event.remove(session.bind, "before_cursor_execute", count_statements)
 
     assert result == len(posting_ids)
-    assert statement_count <= 3
+    assert statement_count <= 4
     active_ids = set(session.scalars(select(JobPosting.id).where(JobPosting.is_active.is_(True))))
     assert active_ids == {posting.id for index, posting in enumerate(postings) if index % 2 == 0}
 
@@ -493,6 +493,106 @@ def test_ensure_entry_reraises_constraint_name_suffix_collision(
     original_flush = session.flush
     collision = IntegrityError(
         None, None, Exception("constraint uq_job_entry_company_url_shadow violated")
+    )
+
+    monkeypatch.setattr(session, "scalar", lambda *args, **kwargs: None)
+
+    def flush(objects=None):
+        if objects is not None:
+            raise collision
+        return original_flush(objects)
+
+    monkeypatch.setattr(session, "flush", flush)
+
+    with pytest.raises(IntegrityError) as raised:
+        repository.ensure_entry(company.id, SHARED_URL, **ENTRY_FIELDS)
+    assert raised.value is collision
+
+
+def test_recompute_job_activity_flushes_pending_source_deactivation(
+    repository: CoverageRepository, company: Company, session: Session
+) -> None:
+    posting = JobPosting(
+        company_id=company.id,
+        title="Engineer",
+        normalized_title="engineer",
+        city="Shanghai",
+        description="Build",
+        is_active=True,
+    )
+    session.add(posting)
+    session.flush()
+    source = JobSource(
+        job_posting_id=posting.id,
+        provider="official",
+        source_raw_id="pending-deactivation",
+        apply_url="https://jobs.example.com/pending-deactivation",
+        is_active=True,
+    )
+    session.add(source)
+    session.commit()
+
+    with session.begin():
+        source.is_active = False
+        assert repository.recompute_job_activity({posting.id}) == 1
+        assert posting.is_active is False
+
+    session.expire_all()
+    persisted_source = session.get(JobSource, source.id)
+    persisted_posting = session.get(JobPosting, posting.id)
+    assert persisted_source is not None and persisted_source.is_active is False
+    assert persisted_posting is not None and persisted_posting.is_active is False
+
+
+def test_recompute_job_activity_flushes_pending_source_reactivation(
+    repository: CoverageRepository, company: Company, session: Session
+) -> None:
+    posting = JobPosting(
+        company_id=company.id,
+        title="Engineer",
+        normalized_title="engineer",
+        city="Shanghai",
+        description="Build",
+        is_active=False,
+    )
+    session.add(posting)
+    session.flush()
+    source = JobSource(
+        job_posting_id=posting.id,
+        provider="official",
+        source_raw_id="pending-reactivation",
+        apply_url="https://jobs.example.com/pending-reactivation",
+        is_active=False,
+    )
+    session.add(source)
+    session.commit()
+
+    with session.begin():
+        source.is_active = True
+        assert repository.recompute_job_activity({posting.id}) == 1
+        assert posting.is_active is True
+
+    session.expire_all()
+    persisted_source = session.get(JobSource, source.id)
+    persisted_posting = session.get(JobPosting, posting.id)
+    assert persisted_source is not None and persisted_source.is_active is True
+    assert persisted_posting is not None and persisted_posting.is_active is True
+
+
+def test_ensure_entry_reraises_sqlite_column_marker_suffix_collision(
+    repository: CoverageRepository,
+    company: Company,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_flush = session.flush
+    collision = IntegrityError(
+        None,
+        None,
+        Exception(
+            "UNIQUE constraint failed: job_entries.company_id, "
+            "job_entries.normalized_url_shadow"
+        ),
     )
 
     monkeypatch.setattr(session, "scalar", lambda *args, **kwargs: None)

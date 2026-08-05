@@ -141,6 +141,7 @@ class CoverageRepository:
     def recompute_job_activity(self, job_ids: Iterable[UUID]) -> int:
         """Lock requested postings in UUID order before deriving activity from sources."""
 
+        self.session.flush()
         requested_ids = tuple(sorted(set(job_ids)))
         count = 0
         with self.session.no_autoflush:
@@ -228,4 +229,5 @@ def _is_known_unique_constraint(
 
     message = str(error.orig)
     name_pattern = rf"(?<![A-Za-z0-9_]){re.escape(constraint_name)}(?![A-Za-z0-9_])"
-    return re.search(name_pattern, message) is not None or sqlite_marker in message
+    marker_pattern = rf"(?<![A-Za-z0-9_]){re.escape(sqlite_marker)}(?![A-Za-z0-9_])"
+    return re.search(name_pattern, message) is not None or re.search(marker_pattern, message) is not None
