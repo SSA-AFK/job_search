@@ -23,15 +23,15 @@ This is the living delivery document for the AI Company Search project. It is th
 
 | Field | Value |
 |-------|-------|
-| Overall status | Stage one complete; stage two complete; integration decision pending |
-| Current stage | Stage two - Asynchronous ingestion pipeline |
-| Current task | Integration decision |
+| Overall status | Stage one complete; stage two complete; locally integrated into `main` |
+| Current stage | Post-stage-two integrated baseline |
+| Current task | Select the next bounded delivery stage |
 | Execution method | Subagent-Driven Development |
-| Active branch/worktree | `codex/company-search-ingestion-pipeline` at `.worktrees/codex-company-search-ingestion-pipeline` |
+| Active branch/worktree | `main`; the stage-two feature branch and worktree have been removed |
 | Stage one progress | 8/8 tasks complete; completion gate passed |
 | Stage two progress | 12/12 tasks complete; completion gate passed |
-| Last verified artifact state | Authorized targeted repair through `1060f96`; backend 414 passed/2 deselected; official scoped re-review ready to merge |
-| Next action | Run final current-HEAD verification and choose local merge, pull request, or branch preservation |
+| Last verified artifact state | Stage-two HEAD `5ff344a` fast-forwarded into `main`; Ruff clean; mypy 71 files; backend 414 passed/2 deselected; integration 12 passed; migration/seed 24 passed; performance 2 passed; frontend 55 unit and 9 E2E tests passed; production build passed |
+| Next action | Define and approve the next bounded stage against the design spec before implementation |
 
 ## Delivery Sequence
 
@@ -43,6 +43,7 @@ Approved design
   -> Stage two completion gate
   -> Whole-product verification
   -> Integration decision
+  -> Local integration into main
 ```
 
 Stage two must not begin until every stage one gate in the plan passes. Within a stage, tasks run sequentially because later task briefs consume interfaces and commits from earlier tasks.
@@ -213,6 +214,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-08-04 | Stage two Task 12 | Added real API-to-worker-to-persistence acceptance coverage and operating documentation; two review rounds closed opt-in gating, production company-site reachability, response bounds, deterministic conflict recovery, local URL aliases, and LLM-controlled outbound authorization | Run the stage two whole-branch review and completion gate |
 | 2026-08-04 | Stage two whole-branch review | Implemented the single approved final fix wave and passed all current-HEAD verification; official scoped re-review closed nine original findings but retained one reconciliation atomicity defect and found employment-type loss in production deduplication | Await authorization for an additional targeted repair; do not merge `5152155` as-is |
 | 2026-08-04 | Stage two authorized targeted repair | Added atomic run-to-request reconciliation locking and first-class part-time/temporary job types; the second scoped round corrected SQLite FK-preserving migration, PostgreSQL lock order, and frontend contracts | Completion review approved; run final current-HEAD verification and choose integration path |
+| 2026-08-05 | Stage two local integration | Fast-forwarded approved stage-two HEAD `5ff344a` into `main`, repeated merged-result verification, restored and hash-verified pre-existing user work, and removed the merged feature branch/worktree using validated per-file cleanup | Define and approve the next bounded stage before implementation |
 
 ## Update Template
 
