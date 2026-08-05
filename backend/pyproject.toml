@@ -37,6 +37,7 @@ filterwarnings = [
 ]
 markers = [
     "performance: representative-dataset performance acceptance tests",
+    "postgresql: isolated PostgreSQL migration verification",
 ]
 
 [tool.ruff]

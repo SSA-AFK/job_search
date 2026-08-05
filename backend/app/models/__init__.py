@@ -13,6 +13,7 @@ from app.models.enums import (
 )
 from app.models.filing import RegulatoryFiling
 from app.models.job import JobPosting, JobSource
+from app.models.job_entry import JobCollectionSnapshot, JobEntry
 from app.models.source import CompanySource, SourceDocument
 
 __all__ = [
@@ -27,8 +28,10 @@ __all__ = [
     "CrawlRun",
     "FilingType",
     "FundingStage",
-    "JobPosting",
+    "JobCollectionSnapshot",
+    "JobEntry",
     "JobEntryStatus",
+    "JobPosting",
     "JobSnapshotStatus",
     "JobSource",
     "JobType",

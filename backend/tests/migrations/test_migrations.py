@@ -1,3 +1,5 @@
+import os
+import re
 import runpy
 from io import StringIO
 from pathlib import Path
@@ -9,7 +11,8 @@ from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import create_engine, event, inspect, text
-from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import IntegrityError
 
 from alembic import command
@@ -24,6 +27,8 @@ EXPECTED_TABLES = {
     "regulatory_filings",
     "collection_requests",
     "crawl_runs",
+    "job_entries",
+    "job_collection_snapshots",
 }
 
 
@@ -57,6 +62,40 @@ def test_initial_migration_round_trip(tmp_path: Path) -> None:
     assert set(inspector.get_table_names()) == EXPECTED_TABLES | {"alembic_version"}
     assert "claim_token" in {
         column["name"] for column in inspector.get_columns("crawl_runs")
+    }
+    assert {column["name"] for column in inspector.get_columns("job_entries")} >= {
+        "id",
+        "company_id",
+        "url",
+        "normalized_url",
+        "provider",
+        "platform",
+        "requires_rendering",
+        "status",
+        "failure_count",
+        "last_checked_at",
+        "last_success_at",
+        "created_at",
+        "updated_at",
+    }
+    assert {
+        column["name"] for column in inspector.get_columns("job_collection_snapshots")
+    } >= {
+        "id",
+        "job_entry_id",
+        "crawl_run_id",
+        "status",
+        "pagination_complete",
+        "empty_confirmed",
+        "reported_total",
+        "observed_count",
+        "pages_fetched",
+        "content_fingerprint",
+        "command_hash",
+        "error_code",
+        "started_at",
+        "completed_at",
+        "created_at",
     }
     assert {index["name"] for index in inspector.get_indexes("companies")} >= {
         "ix_companies_normalized_name",
@@ -340,3 +379,221 @@ def test_job_type_extension_emits_postgresql_constraint_ddl() -> None:
     assert "ALTER TABLE job_postings ADD CONSTRAINT job_type CHECK" in sql
     assert "'part_time'" in sql
     assert "'temporary'" in sql
+
+
+def test_job_type_extension_emits_sqlite_offline_ddl() -> None:
+    migration_path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "0005_extend_job_type_values.py"
+    )
+    migration = runpy.run_path(str(migration_path))
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect=sqlite.dialect(),
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    migration["upgrade"].__globals__["op"] = Operations(context)
+
+    migration["upgrade"]()
+
+    sql = " ".join(output.getvalue().split())
+    assert "CREATE TABLE _alembic_tmp_job_postings" in sql
+    assert "'part_time'" in sql
+
+
+def test_job_entries_migration_round_trip_preserves_legacy_rows(tmp_path: Path) -> None:
+    database_path = tmp_path / "job-entry-migration.sqlite3"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config(Path(__file__).parents[2] / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", database_url)
+    engine = create_engine(database_url)
+    company_id = str(uuid4())
+    crawl_run_id = str(uuid4())
+    entry_id = str(uuid4())
+    created_at = "2026-08-05 00:00:00+00:00"
+
+    command.upgrade(config, "0005_extend_job_type_values")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO companies "
+                "(id, canonical_name, normalized_name, funding_stage, scale, "
+                "created_at, updated_at) VALUES "
+                "(:id, 'Example', 'example', 'unknown', 'unknown', :created_at, :created_at)"
+            ),
+            {"id": company_id, "created_at": created_at},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO crawl_runs "
+                "(id, company_id, run_type, status, providers_attempted, created_at) "
+                "VALUES (:id, :company_id, 'company_refresh', 'queued', '[]', :created_at)"
+            ),
+            {"id": crawl_run_id, "company_id": company_id, "created_at": created_at},
+        )
+
+    command.upgrade(config, "0006_job_entries_and_snapshots")
+    engine.dispose()
+    with engine.connect() as connection:
+        entry_foreign_keys = {
+            row[2]: row[6]
+            for row in connection.execute(text("PRAGMA foreign_key_list(job_entries)"))
+        }
+        snapshot_foreign_keys = {
+            row[2]: row[6]
+            for row in connection.execute(
+                text("PRAGMA foreign_key_list(job_collection_snapshots)")
+            )
+        }
+    assert entry_foreign_keys == {"companies": "CASCADE"}
+    assert snapshot_foreign_keys == {"crawl_runs": "SET NULL", "job_entries": "CASCADE"}
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO job_entries "
+                "(id, company_id, url, normalized_url, provider, platform, requires_rendering, "
+                "status, failure_count, created_at, updated_at) VALUES "
+                "(:id, :company_id, 'https://example.com/jobs', 'https://example.com/jobs', "
+                "'official', 'custom', 0, 'unknown', 0, :created_at, :created_at)"
+            ),
+            {"id": entry_id, "company_id": company_id, "created_at": created_at},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO job_collection_snapshots "
+                "(id, job_entry_id, crawl_run_id, status, pagination_complete, empty_confirmed, "
+                "observed_count, pages_fetched, command_hash, started_at, completed_at, created_at) "
+                "VALUES (:id, :entry_id, :crawl_run_id, 'succeeded', 1, 1, 0, 0, :command_hash, "
+                ":created_at, :created_at, :created_at)"
+            ),
+            {
+                "id": str(uuid4()),
+                "entry_id": entry_id,
+                "crawl_run_id": crawl_run_id,
+                "command_hash": "a" * 64,
+                "created_at": created_at,
+            },
+        )
+        with pytest.raises(IntegrityError):
+            connection.execute(
+                text(
+                    "INSERT INTO job_entries "
+                    "(id, company_id, url, normalized_url, provider, platform, requires_rendering, "
+                    "status, failure_count, created_at, updated_at) VALUES "
+                    "(:id, :company_id, 'https://other.example/jobs', 'https://example.com/jobs', "
+                    "'official', 'custom', 0, 'unknown', 0, :created_at, :created_at)"
+                ),
+                {"id": str(uuid4()), "company_id": company_id, "created_at": created_at},
+            )
+
+    command.downgrade(config, "0005_extend_job_type_values")
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM companies")) == 1
+        assert connection.scalar(text("SELECT count(*) FROM crawl_runs")) == 1
+        assert set(inspect(connection).get_table_names()).isdisjoint(
+            {"job_entries", "job_collection_snapshots"}
+        )
+
+
+def _isolated_postgresql_url(database_url: str, schema_name: str) -> URL:
+    assert re.fullmatch(r"stage3a_test_[0-9a-f]{32}", schema_name)
+    return make_url(database_url).update_query_dict(
+        {"options": f"-csearch_path={schema_name}"}
+    )
+
+
+def _set_alembic_sqlalchemy_url(config: Config, database_url: URL) -> None:
+    config.set_main_option("sqlalchemy.url", str(database_url).replace("%", "%%"))
+
+
+def test_isolated_postgresql_url_is_safe_for_alembic_config() -> None:
+    schema_name = "stage3a_test_0123456789abcdef0123456789abcdef"
+    schema_url = _isolated_postgresql_url("postgresql://localhost/test", schema_name)
+    config = Config()
+
+    _set_alembic_sqlalchemy_url(config, schema_url)
+
+    assert config.get_main_option("sqlalchemy.url") == str(schema_url)
+
+
+@pytest.mark.postgresql
+def test_job_entries_postgresql_schema_round_trip() -> None:
+    database_url = os.getenv("TEST_POSTGRES_URL")
+    if database_url is None:
+        pytest.skip("TEST_POSTGRES_URL is not configured")
+
+    schema_name = f"stage3a_test_{uuid4().hex}"
+    quoted_schema_name = f'"{schema_name}"'
+    schema_url = _isolated_postgresql_url(database_url, schema_name)
+    config = Config(Path(__file__).parents[2] / "alembic.ini")
+    _set_alembic_sqlalchemy_url(config, schema_url)
+    admin_engine = create_engine(database_url)
+    schema_created = False
+
+    try:
+        with admin_engine.begin() as connection:
+            connection.execute(text(f"CREATE SCHEMA {quoted_schema_name}"))
+        schema_created = True
+
+        command.upgrade(config, "0005_extend_job_type_values")
+        command.upgrade(config, "head")
+        schema_engine = create_engine(schema_url)
+        try:
+            with schema_engine.begin() as connection:
+                company_id = str(uuid4())
+                entry_id = str(uuid4())
+                created_at = "2026-08-05 00:00:00+00:00"
+                connection.execute(
+                    text(
+                        "INSERT INTO companies "
+                        "(id, canonical_name, normalized_name, funding_stage, scale, "
+                        "created_at, updated_at) VALUES "
+                        "(:id, 'Postgres Example', 'postgres example', 'unknown', 'unknown', "
+                        ":created_at, :created_at)"
+                    ),
+                    {"id": company_id, "created_at": created_at},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO job_entries "
+                        "(id, company_id, url, normalized_url, provider, platform, requires_rendering, "
+                        "status, failure_count, created_at, updated_at) VALUES "
+                        "(:id, :company_id, 'https://example.com/jobs', 'https://example.com/jobs', "
+                        "'official', 'custom', false, 'unknown', 0, :created_at, :created_at)"
+                    ),
+                    {"id": entry_id, "company_id": company_id, "created_at": created_at},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO job_collection_snapshots "
+                        "(id, job_entry_id, status, pagination_complete, empty_confirmed, "
+                        "observed_count, pages_fetched, command_hash, started_at, completed_at, created_at) "
+                        "VALUES (:id, :entry_id, 'succeeded', true, true, 0, 0, :command_hash, "
+                        ":created_at, :created_at, :created_at)"
+                    ),
+                    {
+                        "id": str(uuid4()),
+                        "entry_id": entry_id,
+                        "command_hash": "b" * 64,
+                        "created_at": created_at,
+                    },
+                )
+                assert connection.scalar(text("SELECT count(*) FROM job_entries")) == 1
+                assert connection.scalar(text("SELECT count(*) FROM job_collection_snapshots")) == 1
+        finally:
+            schema_engine.dispose()
+
+        command.downgrade(config, "base")
+        with admin_engine.connect() as connection:
+            assert inspect(connection).get_table_names(schema=schema_name) == []
+            connection.execute(text(f"DROP SCHEMA {quoted_schema_name}"))
+        schema_created = False
+    finally:
+        if schema_created:
+            command.downgrade(config, "base")
+            with admin_engine.connect() as connection:
+                assert inspect(connection).get_table_names(schema=schema_name) == []
+                connection.execute(text(f"DROP SCHEMA {quoted_schema_name}"))
+        admin_engine.dispose()

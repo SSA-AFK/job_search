@@ -11,6 +11,7 @@ import sqlalchemy as sa
 from sqlalchemy.engine import Connection
 
 from alembic import op
+from app.models.base import GUID, UTCDateTime
 
 revision: str = "0005_extend_job_type_values"
 down_revision: str | None = "0004_crawl_run_claim_token"
@@ -36,6 +37,35 @@ _NEW_JOB_TYPES = (
 _JOB_POSTINGS = sa.table(
     "job_postings",
     sa.column("job_type", sa.String(50)),
+)
+_JOB_POSTINGS_OFFLINE_METADATA = sa.MetaData()
+_JOB_POSTINGS_OFFLINE = sa.Table(
+    "job_postings",
+    _JOB_POSTINGS_OFFLINE_METADATA,
+    sa.Column("id", GUID(), primary_key=True, nullable=False),
+    sa.Column("company_id", GUID(), nullable=False),
+    sa.Column("title", sa.String(255), nullable=False),
+    sa.Column("normalized_title", sa.String(255), nullable=False),
+    sa.Column("job_type", sa.String(50), nullable=False),
+    sa.Column("city", sa.String(50), nullable=False),
+    sa.Column("salary_min_monthly", sa.Integer(), nullable=True),
+    sa.Column("salary_max_monthly", sa.Integer(), nullable=True),
+    sa.Column("salary_months", sa.SmallInteger(), nullable=True),
+    sa.Column("description", sa.Text(), nullable=False),
+    sa.Column("posted_at", sa.Date(), nullable=True),
+    sa.Column("is_active", sa.Boolean(), nullable=False),
+    sa.Column("created_at", UTCDateTime(), nullable=False),
+    sa.Column("updated_at", UTCDateTime(), nullable=False),
+    sa.CheckConstraint(
+        "job_type IN ('full_time', 'internship', 'campus', 'experienced', 'unknown')",
+        name="job_type",
+    ),
+    sa.ForeignKeyConstraint(["company_id"], ["companies.id"], ondelete="CASCADE"),
+)
+sa.Index(
+    "ix_job_postings_company_active",
+    _JOB_POSTINGS_OFFLINE.c.company_id,
+    _JOB_POSTINGS_OFFLINE.c.is_active,
 )
 _SQLITE_DEPENDENT_COLUMNS = {
     "job_sources": (
@@ -106,12 +136,14 @@ def _restore_sqlite_dependents(
 
 def _replace_job_type_constraint(values: tuple[str, ...]) -> None:
     connection = op.get_bind()
+    offline = op.get_context().as_sql
     backups = (
         _backup_sqlite_dependents(connection)
-        if connection.dialect.name == "sqlite"
+        if connection.dialect.name == "sqlite" and not offline
         else ()
     )
-    with op.batch_alter_table("job_postings") as batch_op:
+    batch_options = {"copy_from": _JOB_POSTINGS_OFFLINE} if offline else {}
+    with op.batch_alter_table("job_postings", **batch_options) as batch_op:
         batch_op.drop_constraint("job_type", type_="check")
         batch_op.create_check_constraint("job_type", _check_constraint(values))
     if backups:
