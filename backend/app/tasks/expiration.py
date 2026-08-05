@@ -18,17 +18,20 @@ def expire_stale_job_sources() -> dict[str, int]:
     cutoff = utc_now() - timedelta(days=30)
     session = SessionLocal()
     try:
+        stale_legacy_source = (
+            JobSource.is_active.is_(True),
+            JobSource.job_entry_id.is_(None),
+            JobSource.last_seen_at < cutoff,
+        )
         affected_job_ids = session.scalars(
-            select(JobSource.job_posting_id).where(
-                JobSource.is_active.is_(True), JobSource.last_seen_at < cutoff
-            )
+            select(JobSource.job_posting_id).where(*stale_legacy_source)
         ).all()
         if not affected_job_ids:
             return {"sources_expired": 0, "jobs_updated": 0}
 
         source_result = session.execute(
             update(JobSource)
-            .where(JobSource.is_active.is_(True), JobSource.last_seen_at < cutoff)
+            .where(*stale_legacy_source)
             .values(is_active=False)
         )
         active_source = exists(

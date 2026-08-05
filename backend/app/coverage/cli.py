@@ -5,6 +5,7 @@ import json
 import sys
 from datetime import UTC, datetime, timedelta
 
+from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.coverage.service import (
@@ -64,7 +65,7 @@ def main() -> int:
                 as_of=as_of,
                 refresh_window=refresh_window,
             )
-    except (ImportError, OSError, SQLAlchemyError):
+    except (ImportError, OSError, SQLAlchemyError, ValidationError):
         print("coverage report failed: database unavailable", file=sys.stderr)
         return 1
 

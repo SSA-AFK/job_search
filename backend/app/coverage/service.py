@@ -36,6 +36,7 @@ class CoverageReportService:
         qualifying_snapshots = (
             select(
                 JobEntry.company_id.label("company_id"),
+                JobEntry.id.label("entry_id"),
                 JobCollectionSnapshot.empty_confirmed.label("empty_confirmed"),
                 func.row_number()
                 .over(
@@ -61,33 +62,71 @@ class CoverageReportService:
         latest_qualifying = (
             select(
                 qualifying_snapshots.c.company_id,
+                qualifying_snapshots.c.entry_id,
                 qualifying_snapshots.c.empty_confirmed,
             )
             .where(qualifying_snapshots.c.snapshot_rank == 1)
             .cte("latest_qualifying")
         )
+        active_entries = (
+            select(
+                JobEntry.company_id.label("company_id"),
+                func.count(JobEntry.id).label("active_entry_count"),
+            )
+            .where(JobEntry.status == JobEntryStatus.ACTIVE)
+            .group_by(JobEntry.company_id)
+            .cte("active_entries")
+        )
+        company_qualifying = (
+            select(
+                latest_qualifying.c.company_id,
+                func.count(latest_qualifying.c.entry_id).label(
+                    "qualified_entry_count"
+                ),
+                func.count(
+                    case(
+                        (
+                            latest_qualifying.c.empty_confirmed.is_(False),
+                            latest_qualifying.c.entry_id,
+                        )
+                    )
+                ).label("nonempty_entry_count"),
+            )
+            .group_by(latest_qualifying.c.company_id)
+            .cte("company_qualifying")
+        )
 
         target_count = select(func.count(Company.id)).scalar_subquery()
         active_entry_count = (
-            select(func.count(func.distinct(JobEntry.company_id)))
-            .where(JobEntry.status == JobEntryStatus.ACTIVE)
+            select(func.count(active_entries.c.company_id))
             .scalar_subquery()
         )
-        snapshot_counts = select(
-            func.count(func.distinct(latest_qualifying.c.company_id)).label(
-                "enumerated_companies"
-            ),
-            func.count(
-                func.distinct(
+        snapshot_counts = (
+            select(
+                func.count(company_qualifying.c.company_id).label(
+                    "enumerated_companies"
+                ),
+                func.count(
                     case(
                         (
-                            latest_qualifying.c.empty_confirmed.is_(True),
-                            latest_qualifying.c.company_id,
+                            (
+                                company_qualifying.c.qualified_entry_count
+                                == active_entries.c.active_entry_count
+                            )
+                            & (company_qualifying.c.nonempty_entry_count == 0),
+                            company_qualifying.c.company_id,
                         )
                     )
+                ).label("confirmed_empty_companies"),
+            )
+            .select_from(
+                company_qualifying.join(
+                    active_entries,
+                    active_entries.c.company_id == company_qualifying.c.company_id,
                 )
-            ).label("confirmed_empty_companies"),
-        ).cte("snapshot_counts")
+            )
+            .cte("snapshot_counts")
+        )
         report_statement = select(
             target_count.label("target_companies"),
             active_entry_count.label("active_entry_companies"),

@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 
-from app.ingestion.coverage.contracts import RecordJobSnapshot
+from app.ingestion.coverage.contracts import RecordJobSnapshot, SnapshotRecordResult
 from app.ingestion.coverage.service import CoverageConflict, JobCoverageService
 from app.models import (
     CollectionStatus,
@@ -189,6 +189,184 @@ def test_noncomplete_snapshot_updates_health_without_changing_sources(
     assert rows.entry.status is JobEntryStatus.UNKNOWN
     assert rows.entry.last_checked_at == NOW
     assert rows.entry.last_success_at is None
+
+
+def _assert_historical_noop(result: SnapshotRecordResult) -> None:
+    assert result.created is True
+    assert result.sources_reactivated == 0
+    assert result.sources_missing_incremented == 0
+    assert result.sources_deactivated == 0
+    assert result.jobs_recomputed == 0
+
+
+def test_delayed_absence_is_audited_but_cannot_count_toward_deactivation(
+    session: Session, service: JobCoverageService, rows: CoverageRows
+) -> None:
+    seen = service.record(
+        snapshot_command(session, rows, seen_source_ids={rows.source.id}, completed_at=NOW)
+    )
+    delayed_absence = service.record(
+        snapshot_command(session, rows, completed_at=NOW - timedelta(hours=1))
+    )
+
+    _assert_historical_noop(delayed_absence)
+    assert session.get(JobCollectionSnapshot, delayed_absence.snapshot_id) is not None
+    assert rows.entry.last_checked_at == NOW
+    assert rows.source.last_seen_at == NOW
+    assert rows.source.last_seen_snapshot_id == seen.snapshot_id
+    assert rows.source.missing_complete_snapshots == 0
+    assert rows.source.is_active is True
+
+    current_absence = service.record(
+        snapshot_command(session, rows, completed_at=NOW + timedelta(hours=1))
+    )
+
+    assert current_absence.sources_missing_incremented == 1
+    assert current_absence.sources_deactivated == 0
+    assert rows.source.missing_complete_snapshots == 1
+    assert rows.source.is_active is True
+    assert rows.posting.is_active is True
+
+
+def test_delayed_seen_snapshot_cannot_regress_last_seen_or_reset_missing_count(
+    session: Session, service: JobCoverageService, rows: CoverageRows
+) -> None:
+    latest_seen = service.record(
+        snapshot_command(
+            session,
+            rows,
+            seen_source_ids={rows.source.id},
+            completed_at=NOW + timedelta(hours=1),
+        )
+    )
+    service.record(
+        snapshot_command(session, rows, completed_at=NOW + timedelta(hours=2))
+    )
+
+    delayed_seen = service.record(
+        snapshot_command(
+            session,
+            rows,
+            seen_source_ids={rows.source.id},
+            completed_at=NOW + timedelta(minutes=30),
+        )
+    )
+
+    _assert_historical_noop(delayed_seen)
+    assert session.get(JobCollectionSnapshot, delayed_seen.snapshot_id) is not None
+    assert rows.entry.last_checked_at == NOW + timedelta(hours=2)
+    assert rows.source.last_seen_at == NOW + timedelta(hours=1)
+    assert rows.source.last_seen_snapshot_id == latest_seen.snapshot_id
+    assert rows.source.missing_complete_snapshots == 1
+    assert rows.source.is_active is True
+
+
+def test_delayed_failed_and_successful_snapshots_cannot_regress_entry_health(
+    session: Session, service: JobCoverageService, rows: CoverageRows
+) -> None:
+    service.record(
+        snapshot_command(
+            session,
+            rows,
+            seen_source_ids={rows.source.id},
+            completed_at=NOW + timedelta(hours=1),
+        )
+    )
+
+    delayed_failure = service.record(
+        snapshot_command(
+            session,
+            rows,
+            status=JobSnapshotStatus.FAILED,
+            completed_at=NOW,
+        )
+    )
+
+    _assert_historical_noop(delayed_failure)
+    assert rows.entry.status is JobEntryStatus.ACTIVE
+    assert rows.entry.failure_count == 0
+    assert rows.entry.last_checked_at == NOW + timedelta(hours=1)
+    assert rows.entry.last_success_at == NOW + timedelta(hours=1)
+
+    service.record(
+        snapshot_command(
+            session,
+            rows,
+            status=JobSnapshotStatus.FAILED,
+            completed_at=NOW + timedelta(hours=3),
+        )
+    )
+    delayed_success = service.record(
+        snapshot_command(
+            session,
+            rows,
+            seen_source_ids={rows.source.id},
+            completed_at=NOW + timedelta(hours=2),
+        )
+    )
+
+    _assert_historical_noop(delayed_success)
+    assert rows.entry.status is JobEntryStatus.ACTIVE
+    assert rows.entry.failure_count == 1
+    assert rows.entry.last_checked_at == NOW + timedelta(hours=3)
+    assert rows.entry.last_success_at == NOW + timedelta(hours=1)
+
+
+def test_equal_time_new_snapshots_are_audited_with_first_writer_wins(
+    session: Session, service: JobCoverageService, rows: CoverageRows
+) -> None:
+    first = service.record(snapshot_command(session, rows, completed_at=NOW))
+    equal_absence = service.record(snapshot_command(session, rows, completed_at=NOW))
+    equal_failure = service.record(
+        snapshot_command(
+            session,
+            rows,
+            status=JobSnapshotStatus.FAILED,
+            completed_at=NOW,
+        )
+    )
+
+    assert first.sources_missing_incremented == 1
+    _assert_historical_noop(equal_absence)
+    _assert_historical_noop(equal_failure)
+    assert session.scalar(select(func.count()).select_from(JobCollectionSnapshot)) == 3
+    assert rows.entry.last_checked_at == NOW
+    assert rows.entry.status is JobEntryStatus.ACTIVE
+    assert rows.entry.failure_count == 0
+    assert rows.source.missing_complete_snapshots == 1
+    assert rows.source.is_active is True
+    assert rows.posting.is_active is True
+
+
+def test_entry_lock_refreshes_stale_identity_before_comparing_watermark(
+    session: Session, rows: CoverageRows
+) -> None:
+    newer = snapshot_command(
+        session,
+        rows,
+        seen_source_ids={rows.source.id},
+        completed_at=NOW,
+    )
+    delayed = snapshot_command(
+        session,
+        rows,
+        status=JobSnapshotStatus.FAILED,
+        completed_at=NOW - timedelta(hours=1),
+    )
+    assert session.bind is not None
+
+    with Session(session.bind, expire_on_commit=False) as delayed_session:
+        stale_entry = delayed_session.get(JobEntry, rows.entry.id)
+        assert stale_entry is not None
+        assert stale_entry.last_checked_at is None
+        delayed_session.commit()
+
+        JobCoverageService(session).record(newer)
+        result = JobCoverageService(delayed_session).record(delayed)
+
+        _assert_historical_noop(result)
+        assert stale_entry.last_checked_at == NOW
+        assert stale_entry.failure_count == 0
 
 
 def test_seen_source_reactivates_resets_counter_and_updates_last_seen(

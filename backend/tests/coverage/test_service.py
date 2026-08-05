@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy import Engine, create_engine, event
-from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.orm import ORMExecuteState, Session
 
 from app.coverage.service import CoverageReportService
@@ -233,6 +233,94 @@ def test_build_uses_latest_qualifying_snapshot_per_entry(session: Session) -> No
     assert report.confirmed_empty_companies == 1
 
 
+def test_build_does_not_confirm_empty_when_another_active_entry_is_nonempty(
+    session: Session,
+) -> None:
+    company = _company(session, "Mixed Entries")
+    empty_entry = _entry(session, company, "mixed-empty")
+    nonempty_entry = _entry(session, company, "mixed-nonempty")
+    _snapshot(
+        session,
+        empty_entry,
+        completed_at=AS_OF - timedelta(hours=2),
+        empty=True,
+        command_digit=1,
+    )
+    _snapshot(
+        session,
+        nonempty_entry,
+        completed_at=AS_OF - timedelta(hours=1),
+        empty=False,
+        command_digit=2,
+    )
+    session.commit()
+
+    report = CoverageReportService(session).build(as_of=AS_OF)
+
+    assert report.recently_enumerated_companies == 1
+    assert report.complete_list_companies == 1
+    assert report.confirmed_empty_companies == 0
+
+
+def test_build_confirms_empty_when_all_active_entries_have_recent_empty_snapshots(
+    session: Session,
+) -> None:
+    company = _company(session, "All Empty Entries")
+    first_entry = _entry(session, company, "all-empty-first")
+    second_entry = _entry(session, company, "all-empty-second")
+    _snapshot(
+        session,
+        first_entry,
+        completed_at=AS_OF - timedelta(hours=2),
+        empty=True,
+        command_digit=1,
+    )
+    _snapshot(
+        session,
+        second_entry,
+        completed_at=AS_OF - timedelta(hours=1),
+        empty=True,
+        command_digit=2,
+    )
+    session.commit()
+
+    report = CoverageReportService(session).build(as_of=AS_OF)
+
+    assert report.recently_enumerated_companies == 1
+    assert report.complete_list_companies == 1
+    assert report.confirmed_empty_companies == 1
+
+
+def test_build_does_not_confirm_empty_when_an_active_entry_lacks_recent_qualification(
+    session: Session,
+) -> None:
+    company = _company(session, "Missing Qualification")
+    empty_entry = _entry(session, company, "qualified-empty")
+    missing_entry = _entry(session, company, "missing-recent")
+    _snapshot(
+        session,
+        empty_entry,
+        completed_at=AS_OF - timedelta(hours=1),
+        empty=True,
+        command_digit=1,
+    )
+    _snapshot(
+        session,
+        missing_entry,
+        completed_at=AS_OF - timedelta(hours=1),
+        status=JobSnapshotStatus.FAILED,
+        complete=False,
+        command_digit=2,
+    )
+    session.commit()
+
+    report = CoverageReportService(session).build(as_of=AS_OF)
+
+    assert report.recently_enumerated_companies == 1
+    assert report.complete_list_companies == 1
+    assert report.confirmed_empty_companies == 0
+
+
 @pytest.mark.parametrize(
     "refresh_window",
     [timedelta(0), -timedelta(hours=1), timedelta(minutes=90)],
@@ -323,14 +411,21 @@ def test_build_rejects_unrepresentable_window_before_executing_sql(
     assert statements == 0
 
 
-def test_build_compiles_one_snapshot_window_scan_for_postgresql(session: Session) -> None:
+@pytest.mark.parametrize(
+    "sql_dialect",
+    (postgresql.dialect(), sqlite.dialect()),
+    ids=("postgresql", "sqlite"),
+)
+def test_build_compiles_one_snapshot_window_scan_for_supported_dialects(
+    session: Session, sql_dialect: object
+) -> None:
     compiled_statements: list[str] = []
 
     def capture_statement(orm_execute_state: ORMExecuteState) -> None:
         compiled_statements.append(
             str(
                 orm_execute_state.statement.compile(
-                    dialect=postgresql.dialect(),
+                    dialect=sql_dialect,
                     compile_kwargs={"literal_binds": True},
                 )
             ).lower()

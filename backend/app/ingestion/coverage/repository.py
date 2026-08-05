@@ -78,7 +78,12 @@ class CoverageRepository:
         return entry
 
     def lock_entry(self, entry_id: UUID) -> JobEntry:
-        statement = select(JobEntry).where(JobEntry.id == entry_id).with_for_update()
+        statement = (
+            select(JobEntry)
+            .where(JobEntry.id == entry_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         entry = self.session.scalar(statement)
         if entry is None:
             raise ValueError("unknown job_entry_id")

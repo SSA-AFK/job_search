@@ -127,6 +127,27 @@ def test_cli_sanitizes_database_failures(tmp_path: Path) -> None:
     assert "SELECT" not in result.stderr.upper()
 
 
+def test_cli_sanitizes_unrelated_settings_validation_failures(
+    cli_environment: dict[str, str],
+) -> None:
+    secret = "settings-secret-sentinel"
+    environment = {
+        **cli_environment,
+        "COLLECTION_ENABLED": f"not-a-boolean-{secret}",
+    }
+
+    result = _run_cli(environment=environment)
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert result.stderr == "coverage report failed: database unavailable\n"
+    assert secret not in result.stderr
+    assert "INPUT_VALUE" not in result.stderr.upper()
+    assert "TRACEBACK" not in result.stderr.upper()
+    assert environment["DATABASE_URL"] not in result.stderr
+    assert "SELECT" not in result.stderr.upper()
+
+
 @pytest.mark.parametrize(
     "arguments",
     [

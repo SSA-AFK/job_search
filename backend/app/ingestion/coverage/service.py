@@ -57,17 +57,24 @@ class JobCoverageService:
                 snapshot = self.repository.insert_snapshot(command)
                 snapshot_id = snapshot.id
                 created = True
-                self._update_entry_health(entry, command)
                 if (
-                    command.status is JobSnapshotStatus.SUCCEEDED
-                    and command.pagination_complete
+                    entry.last_checked_at is not None
+                    and command.completed_at <= entry.last_checked_at
                 ):
-                    counters = self._apply_complete_snapshot(snapshot, command)
-                else:
                     counters = _LifecycleCounters()
-                jobs_recomputed = self.repository.recompute_job_activity(
-                    counters.affected_job_ids
-                )
+                    jobs_recomputed = 0
+                else:
+                    self._update_entry_health(entry, command)
+                    if (
+                        command.status is JobSnapshotStatus.SUCCEEDED
+                        and command.pagination_complete
+                    ):
+                        counters = self._apply_complete_snapshot(snapshot, command)
+                    else:
+                        counters = _LifecycleCounters()
+                    jobs_recomputed = self.repository.recompute_job_activity(
+                        counters.affected_job_ids
+                    )
 
         return SnapshotRecordResult(
             snapshot_id=snapshot_id,
