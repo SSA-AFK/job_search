@@ -140,6 +140,8 @@ class CoverageReport(_FrozenDTO):
         for rate_field, rate, denominator in rate_denominators:
             if denominator == 0 and rate is not None:
                 raise ValueError(f"{rate_field} requires a nonzero denominator")
+            if denominator != 0 and rate is None:
+                raise ValueError(f"{rate_field} requires a defined rate")
         return self
 
 

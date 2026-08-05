@@ -208,8 +208,49 @@ def test_coverage_report_rejects_defined_rate_with_zero_denominator(
         "recently_enumerated_companies": report_values["recently_enumerated_companies"],
         "complete_list_companies": 0,
         "confirmed_empty_companies": 0,
-        rate_field: Decimal(0),
+        "entry_coverage_rate": (
+            Decimal("0.1") if report_values["target_companies"] else None
+        ),
+        "enumeration_rate": (
+            Decimal("0.2") if report_values["active_entry_companies"] else None
+        ),
+        "completeness_rate": (
+            Decimal("0.3") if report_values["recently_enumerated_companies"] else None
+        ),
+        "refresh_slo_rate": (
+            Decimal("0.4") if report_values["target_companies"] else None
+        ),
     }
+    values[rate_field] = Decimal(0)
 
     with pytest.raises(ValidationError, match=f"{rate_field} requires a nonzero denominator"):
+        CoverageReport(**values)
+
+
+@pytest.mark.parametrize(
+    "rate_field",
+    [
+        "entry_coverage_rate",
+        "enumeration_rate",
+        "completeness_rate",
+        "refresh_slo_rate",
+    ],
+)
+def test_coverage_report_requires_defined_rate_with_nonzero_denominator(
+    rate_field: str,
+) -> None:
+    values: dict[str, object] = {
+        "target_companies": 1,
+        "active_entry_companies": 1,
+        "recently_enumerated_companies": 1,
+        "complete_list_companies": 0,
+        "confirmed_empty_companies": 0,
+        "entry_coverage_rate": Decimal("0.1"),
+        "enumeration_rate": Decimal("0.2"),
+        "completeness_rate": Decimal("0.3"),
+        "refresh_slo_rate": Decimal("0.4"),
+    }
+    values[rate_field] = None
+
+    with pytest.raises(ValidationError, match=f"{rate_field} requires a defined rate"):
         CoverageReport(**values)
