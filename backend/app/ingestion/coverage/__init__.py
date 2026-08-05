@@ -5,5 +5,12 @@ from app.ingestion.coverage.contracts import (
     RecordJobSnapshot,
     SnapshotRecordResult,
 )
+from app.ingestion.coverage.service import CoverageConflict, JobCoverageService
 
-__all__ = ["CoverageReport", "RecordJobSnapshot", "SnapshotRecordResult"]
+__all__ = [
+    "CoverageConflict",
+    "CoverageReport",
+    "JobCoverageService",
+    "RecordJobSnapshot",
+    "SnapshotRecordResult",
+]
