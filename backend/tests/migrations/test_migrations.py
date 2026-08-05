@@ -775,13 +775,31 @@ def _isolated_schema_cleanup_sql(schema_name: str) -> tuple[str, str]:
     )
 
 
+def _isolated_revision_widen_sql(schema_name: str) -> str:
+    quoted_schema_name = _quoted_isolated_schema_name(schema_name)
+    return (
+        f"ALTER TABLE {quoted_schema_name}.\"alembic_version\" "
+        "ALTER COLUMN version_num TYPE VARCHAR(128)"
+    )
+
+
 def _cleanup_isolated_postgresql_schema(
     admin_engine: Any, config: Config, schema_name: str
 ) -> None:
+    widen_revision_sql = _isolated_revision_widen_sql(schema_name)
+    with admin_engine.begin() as connection:
+        inspector = inspect(connection)
+        if not inspector.has_schema(schema_name):
+            return
+        if inspector.has_table("alembic_version", schema=schema_name):
+            connection.execute(text(widen_revision_sql))
+
     command.downgrade(config, "base")
     drop_version_sql, drop_schema_sql = _isolated_schema_cleanup_sql(schema_name)
     with admin_engine.begin() as connection:
-        connection.execute(text(drop_version_sql))
+        inspector = inspect(connection)
+        if inspector.has_table("alembic_version", schema=schema_name):
+            connection.execute(text(drop_version_sql))
         assert inspect(connection).get_table_names(schema=schema_name) == []
         connection.execute(text(drop_schema_sql))
 
@@ -819,12 +837,91 @@ def test_isolated_schema_cleanup_sql_is_validated_and_non_cascading() -> None:
     schema_name = "stage3a_test_0123456789abcdef0123456789abcdef"
 
     drop_version_sql, drop_schema_sql = _isolated_schema_cleanup_sql(schema_name)
+    widen_revision_sql = _isolated_revision_widen_sql(schema_name)
 
     assert drop_version_sql == f'DROP TABLE "{schema_name}"."alembic_version"'
     assert drop_schema_sql == f'DROP SCHEMA "{schema_name}"'
-    assert "CASCADE" not in f"{drop_version_sql} {drop_schema_sql}"
+    assert widen_revision_sql == (
+        f'ALTER TABLE "{schema_name}"."alembic_version" '
+        "ALTER COLUMN version_num TYPE VARCHAR(128)"
+    )
+    assert "CASCADE" not in (
+        f"{widen_revision_sql} {drop_version_sql} {drop_schema_sql}"
+    )
     with pytest.raises(ValueError, match="invalid isolated PostgreSQL schema name"):
         _isolated_schema_cleanup_sql("public")
+    with pytest.raises(ValueError, match="invalid isolated PostgreSQL schema name"):
+        _isolated_revision_widen_sql("public")
+
+
+@pytest.mark.postgresql
+def test_cleanup_widens_legacy_revision_column_before_downgrade() -> None:
+    database_url = os.getenv("TEST_POSTGRES_URL")
+    if database_url is None:
+        pytest.skip("TEST_POSTGRES_URL is not configured")
+
+    schema_name = f"stage3a_test_{uuid4().hex}"
+    quoted_schema_name = _quoted_isolated_schema_name(schema_name)
+    schema_url = _isolated_postgresql_url(database_url, schema_name)
+    config = Config(Path(__file__).parents[2] / "alembic.ini")
+    _set_alembic_sqlalchemy_url(config, schema_url)
+    admin_engine = create_engine(database_url)
+    schema_created = False
+    primary_error: BaseException | None = None
+
+    try:
+        with admin_engine.begin() as connection:
+            connection.execute(text(f"CREATE SCHEMA {quoted_schema_name}"))
+        schema_created = True
+        command.upgrade(config, "0005_extend_job_type_values")
+        schema_engine = create_engine(schema_url)
+        try:
+            with schema_engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "ALTER TABLE alembic_version ALTER COLUMN version_num "
+                        "TYPE VARCHAR(32)"
+                    )
+                )
+        finally:
+            schema_engine.dispose()
+
+        _cleanup_isolated_postgresql_schema(admin_engine, config, schema_name)
+        schema_created = False
+        with admin_engine.connect() as connection:
+            assert inspect(connection).has_schema(schema_name) is False
+        _cleanup_isolated_postgresql_schema(admin_engine, config, schema_name)
+
+        with admin_engine.begin() as connection:
+            connection.execute(text(f"CREATE SCHEMA {quoted_schema_name}"))
+        schema_created = True
+        _cleanup_isolated_postgresql_schema(admin_engine, config, schema_name)
+        schema_created = False
+        with admin_engine.connect() as connection:
+            assert inspect(connection).has_schema(schema_name) is False
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        if schema_created:
+            try:
+                with admin_engine.begin() as connection:
+                    inspector = inspect(connection)
+                    if inspector.has_table("alembic_version", schema=schema_name):
+                        connection.execute(
+                            text(_isolated_revision_widen_sql(schema_name))
+                        )
+                _cleanup_isolated_postgresql_schema(
+                    admin_engine, config, schema_name
+                )
+            except BaseException as cleanup_error:
+                if primary_error is None:
+                    raise
+                primary_error.add_note(
+                    "isolated PostgreSQL test rescue also failed: "
+                    f"{cleanup_error!r}"
+                )
+        admin_engine.dispose()
 
 
 @pytest.mark.postgresql
@@ -840,6 +937,7 @@ def test_job_entries_postgresql_schema_round_trip() -> None:
     _set_alembic_sqlalchemy_url(config, schema_url)
     admin_engine = create_engine(database_url)
     schema_created = False
+    primary_error: BaseException | None = None
 
     try:
         with admin_engine.begin() as connection:
@@ -905,9 +1003,18 @@ def test_job_entries_postgresql_schema_round_trip() -> None:
         finally:
             schema_engine.dispose()
 
-        _cleanup_isolated_postgresql_schema(admin_engine, config, schema_name)
-        schema_created = False
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
         if schema_created:
-            _cleanup_isolated_postgresql_schema(admin_engine, config, schema_name)
+            try:
+                _cleanup_isolated_postgresql_schema(admin_engine, config, schema_name)
+            except BaseException as cleanup_error:
+                if primary_error is None:
+                    raise
+                primary_error.add_note(
+                    "isolated PostgreSQL cleanup also failed: "
+                    f"{cleanup_error!r}"
+                )
         admin_engine.dispose()

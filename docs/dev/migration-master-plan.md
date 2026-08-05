@@ -1,6 +1,6 @@
 # Stage 3 万级职位覆盖迁移总计划
 
-> **状态：Stage 3A 已实施，待 Task 7 独立审阅与全分支审阅**
+> **状态：Stage 3A 已实施，Task 7 质量修复轮 1 完成、待复审与全分支审阅**
 > **修订日期：2026-08-05**
 > **定位：** 基于已完成 Stage 2 的 Stage 3 执行路线；Stage 3A 已按获批详细计划实施，后续阶段仍不是可直接开工的 implementation plan。
 > **设计依据：** [job-coverage-at-scale-plan.md](job-coverage-at-scale-plan.md)
@@ -151,11 +151,11 @@ backend/app/
 
 ### 实施状态（2026-08-05）
 
-Tasks 1–6 已实现并通过逐任务规格/质量审阅，提交序列为 `758078b..5c30753`。Task 7 当前 gate commit 增加真实 Alembic-backed 生命周期验收，并修复 PostgreSQL 默认 32 字符 Alembic revision 列无法容纳既有长 revision id 的问题；该 commit SHA 将在提交后由 controller 记录。
+Tasks 1–6 已实现并通过逐任务规格/质量审阅，提交序列为 `758078b..5c30753`。Task 7 gate commit `b9eb888` 增加真实 Alembic-backed 生命周期验收，并修复 PostgreSQL 默认 32 字符 Alembic revision 列无法容纳既有长 revision id 的问题。质量审阅修复轮 1 又覆盖迁移失败后的标准清理 helper；当前 fix commit SHA 将在提交后由 controller 记录。
 
-当前矩阵：Ruff 通过；mypy 79 个源文件通过；backend `513 passed / 1 skipped / 2 deselected`；integration `13 passed`；migration/seed `34 passed / 1 skipped`；performance `2 passed / 514 deselected`，10k/100k 搜索 p95 13.0 ms；live PostgreSQL marker `1 passed / 16 deselected` 且清理后无隔离 schema 残留。Provider 目录没有 Stage 3A 快照写入调用，默认 suite 不依赖网络、浏览器、Redis 或 LLM。
+当前矩阵：Ruff 通过；mypy 79 个源文件通过；backend `513 passed / 2 skipped / 2 deselected`；integration `13 passed`；migration/seed `34 passed / 2 skipped`；performance `2 passed / 514 deselected`，10k/100k 搜索 p95 13.0 ms；live PostgreSQL markers `2 passed / 16 deselected` 且清理后无隔离 schema 残留。Provider 目录没有 Stage 3A 快照写入调用，默认 suite 不依赖网络、浏览器、Redis 或 LLM。
 
-Task 7 独立审阅和 Stage 3A 全分支审阅仍待 controller 完成。Stage 3B 状态为“等待单独 implementation plan 与审批”，不得在本 gate 中开始。
+Task 7 质量修复轮 1 已完成，复审和 Stage 3A 全分支审阅仍待 controller 完成。Stage 3B 状态为“等待单独 implementation plan 与审批”，不得在本 gate 中开始。
 
 ## 6. Stage 3B：ATS 正式接入
 

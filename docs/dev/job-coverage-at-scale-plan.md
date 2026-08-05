@@ -1,6 +1,6 @@
 # 万级公司职位覆盖设计
 
-> **状态：Stage 3A 已实施，待 Task 7 独立审阅与全分支审阅**
+> **状态：Stage 3A 已实施，Task 7 质量修复轮 1 完成、待复审与全分支审阅**
 > **修订日期：2026-08-05**
 > **定位：** Stage 3 的产品与技术设计，定义万级公司下职位覆盖、完整性、新鲜度和成本边界。
 > **实施入口：** [migration-master-plan.md](migration-master-plan.md)
@@ -252,8 +252,8 @@ Stage 3A 已按获批的详细 implementation plan 实施。Stage 3B 仍须单�
 - 覆盖 repository：`b1fea8e`、`bd4f5ec`、`b7ffe3d`、`a0e5b65`；
 - 原子生命周期 service：`2d3f166`、`5936b41`、`eae6055`；
 - 覆盖报告与 JSON CLI：`809bafa`、`3b208ae`、`5c30753`；
-- Task 7 集成验收、PostgreSQL 迁移兼容修复和本文档：当前 gate commit，提交后由 controller 记录 SHA。
+- Task 7 集成验收、PostgreSQL 迁移兼容修复和本文档：`b9eb888`；质量审阅修复轮 1 为当前 fix commit，提交后由 controller 记录 SHA。
 
-Tasks 1–6 的规格与质量审阅均已通过；Task 7 独立审阅和 Stage 3A 全分支审阅待 controller 执行，不能据此提前宣布 Stage 3A 已完成最终 gate。当前验证结果为 Ruff 通过、mypy 79 个源文件通过、backend `513 passed / 1 skipped / 2 deselected`、integration `13 passed`、migration/seed `34 passed / 1 skipped`、performance `2 passed / 514 deselected`，10k/100k 搜索 p95 为 13.0 ms。live PostgreSQL 从空 schema 经 `0005` 升到 head、写入并 downgrade 通过，结束后没有 `stage3a_test_*` schema 残留。
+Tasks 1–6 的规格与质量审阅均已通过；Task 7 质量审阅发现 legacy `VARCHAR(32)` 迁移失败时清理也会失败，修复轮 1 已让标准 helper 在严格 schema 校验后全限定扩宽隔离版本列，并保留原始迁移异常。Task 7 复审和 Stage 3A 全分支审阅待 controller 执行，不能据此提前宣布 Stage 3A 已完成最终 gate。当前验证结果为 Ruff 通过、mypy 79 个源文件通过、backend `513 passed / 2 skipped / 2 deselected`、integration `13 passed`、migration/seed `34 passed / 2 skipped`、performance `2 passed / 514 deselected`，10k/100k 搜索 p95 为 13.0 ms。live PostgreSQL 两个 marker 通过，覆盖正常 round trip 与 legacy 失败清理，结束后没有 `stage3a_test_*` schema 残留。
 
 当前 Provider 测试与静态引用审计证明 Provider 不调用 `RecordJobSnapshot` 或 `JobCoverageService`，因此不会伪造完整列表或可信空列表。默认测试不访问真实网络、浏览器、Redis 或 LLM。唯一 warning 来自既有的非整数 `salary_months` 负向测试，已如实保留在 gate 证据中。
