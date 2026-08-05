@@ -160,3 +160,56 @@ def test_contract_results_are_immutable_and_report_rates_are_quantized() -> None
     assert report.enumeration_rate == Decimal("0.6667")
     assert report.completeness_rate == Decimal("1.0000")
     assert report.refresh_slo_rate == Decimal("0.4000")
+
+
+@pytest.mark.parametrize(
+    ("rate_field", "report_values"),
+    [
+        (
+            "entry_coverage_rate",
+            {
+                "target_companies": 0,
+                "active_entry_companies": 1,
+                "recently_enumerated_companies": 1,
+            },
+        ),
+        (
+            "enumeration_rate",
+            {
+                "target_companies": 1,
+                "active_entry_companies": 0,
+                "recently_enumerated_companies": 1,
+            },
+        ),
+        (
+            "completeness_rate",
+            {
+                "target_companies": 1,
+                "active_entry_companies": 1,
+                "recently_enumerated_companies": 0,
+            },
+        ),
+        (
+            "refresh_slo_rate",
+            {
+                "target_companies": 0,
+                "active_entry_companies": 1,
+                "recently_enumerated_companies": 1,
+            },
+        ),
+    ],
+)
+def test_coverage_report_rejects_defined_rate_with_zero_denominator(
+    rate_field: str, report_values: dict[str, int]
+) -> None:
+    values = {
+        "target_companies": report_values["target_companies"],
+        "active_entry_companies": report_values["active_entry_companies"],
+        "recently_enumerated_companies": report_values["recently_enumerated_companies"],
+        "complete_list_companies": 0,
+        "confirmed_empty_companies": 0,
+        rate_field: Decimal(0),
+    }
+
+    with pytest.raises(ValidationError, match=f"{rate_field} requires a nonzero denominator"):
+        CoverageReport(**values)

@@ -125,6 +125,23 @@ class CoverageReport(_FrozenDTO):
             raise ValueError("coverage rate must be between zero and one")
         return value.quantize(_RATE_QUANTUM, rounding=ROUND_HALF_UP)
 
+    @model_validator(mode="after")
+    def validate_undefined_rates(self) -> "CoverageReport":
+        rate_denominators = (
+            ("entry_coverage_rate", self.entry_coverage_rate, self.target_companies),
+            ("enumeration_rate", self.enumeration_rate, self.active_entry_companies),
+            (
+                "completeness_rate",
+                self.completeness_rate,
+                self.recently_enumerated_companies,
+            ),
+            ("refresh_slo_rate", self.refresh_slo_rate, self.target_companies),
+        )
+        for rate_field, rate, denominator in rate_denominators:
+            if denominator == 0 and rate is not None:
+                raise ValueError(f"{rate_field} requires a nonzero denominator")
+        return self
+
 
 def _utc_timestamp(value: datetime) -> str:
     return value.astimezone(UTC).isoformat()
