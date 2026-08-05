@@ -53,6 +53,7 @@ class JobSource(Base):
     __tablename__ = "job_sources"
     __table_args__ = (
         UniqueConstraint("provider", "source_raw_id", name="uq_job_source_provider_raw_id"),
+        Index("ix_job_sources_entry_active", "job_entry_id", "is_active"),
     )
 
     id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
@@ -61,6 +62,12 @@ class JobSource(Base):
     )
     source_document_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("source_documents.id", ondelete="SET NULL")
+    )
+    job_entry_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("job_entries.id", ondelete="SET NULL")
+    )
+    last_seen_snapshot_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("job_collection_snapshots.id", ondelete="SET NULL")
     )
     provider: Mapped[str] = mapped_column(String(50))
     source_raw_id: Mapped[str] = mapped_column(String(255))
@@ -72,3 +79,6 @@ class JobSource(Base):
         UTCDateTime(), default=utc_now, nullable=False
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    missing_complete_snapshots: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )

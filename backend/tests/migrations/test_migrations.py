@@ -97,6 +97,11 @@ def test_initial_migration_round_trip(tmp_path: Path) -> None:
         "completed_at",
         "created_at",
     }
+    assert {column["name"] for column in inspector.get_columns("job_sources")} >= {
+        "job_entry_id",
+        "last_seen_snapshot_id",
+        "missing_complete_snapshots",
+    }
     assert {index["name"] for index in inspector.get_indexes("companies")} >= {
         "ix_companies_normalized_name",
         "ix_companies_industry",
@@ -495,6 +500,168 @@ def test_job_entries_migration_round_trip_preserves_legacy_rows(tmp_path: Path) 
         assert set(inspect(connection).get_table_names()).isdisjoint(
             {"job_entries", "job_collection_snapshots"}
         )
+
+
+def test_job_source_snapshot_lifecycle_round_trip_preserves_legacy_rows(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "job-source-snapshot-lifecycle.sqlite3"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config(Path(__file__).parents[2] / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", database_url)
+    engine = create_engine(database_url)
+    company_id = str(uuid4())
+    job_id = str(uuid4())
+    source_id = str(uuid4())
+    entry_id = str(uuid4())
+    snapshot_id = str(uuid4())
+    created_at = "2026-08-05 00:00:00+00:00"
+
+    @event.listens_for(engine, "connect")
+    def enable_foreign_keys(
+        dbapi_connection: Any, _connection_record: object
+    ) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    command.upgrade(config, "0006_job_entries_and_snapshots")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO companies "
+                "(id, canonical_name, normalized_name, funding_stage, scale, "
+                "created_at, updated_at) VALUES "
+                "(:id, 'Example', 'example', 'unknown', 'unknown', :created_at, :created_at)"
+            ),
+            {"id": company_id, "created_at": created_at},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO job_postings "
+                "(id, company_id, title, normalized_title, job_type, city, "
+                "description, is_active, created_at, updated_at) VALUES "
+                "(:id, :company_id, 'Engineer', 'engineer', 'full_time', '', '', 1, "
+                ":created_at, :created_at)"
+            ),
+            {"id": job_id, "company_id": company_id, "created_at": created_at},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO job_sources "
+                "(id, job_posting_id, provider, source_raw_id, apply_url, "
+                "first_seen_at, last_seen_at, is_active) VALUES "
+                "(:id, :job_id, 'official', 'job-1', 'https://example.com/job-1', "
+                ":created_at, :created_at, 1)"
+            ),
+            {"id": source_id, "job_id": job_id, "created_at": created_at},
+        )
+
+    command.upgrade(config, "0007_job_source_snapshot_lifecycle")
+    with engine.begin() as connection:
+        assert connection.execute(
+            text(
+                "SELECT job_entry_id, last_seen_snapshot_id, missing_complete_snapshots "
+                "FROM job_sources WHERE id = :id"
+            ),
+            {"id": source_id},
+        ).one() == (None, None, 0)
+        assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
+        connection.execute(
+            text(
+                "INSERT INTO job_entries "
+                "(id, company_id, url, normalized_url, provider, platform, requires_rendering, "
+                "status, failure_count, created_at, updated_at) VALUES "
+                "(:id, :company_id, 'https://example.com/jobs', 'https://example.com/jobs', "
+                "'official', 'custom', 0, 'unknown', 0, :created_at, :created_at)"
+            ),
+            {"id": entry_id, "company_id": company_id, "created_at": created_at},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO job_collection_snapshots "
+                "(id, job_entry_id, status, pagination_complete, empty_confirmed, "
+                "observed_count, pages_fetched, command_hash, started_at, completed_at, created_at) "
+                "VALUES (:id, :entry_id, 'succeeded', 1, 1, 0, 0, :command_hash, "
+                ":created_at, :created_at, :created_at)"
+            ),
+            {
+                "id": snapshot_id,
+                "entry_id": entry_id,
+                "command_hash": "b" * 64,
+                "created_at": created_at,
+            },
+        )
+        connection.execute(
+            text(
+                "UPDATE job_sources SET job_entry_id = :entry_id, "
+                "last_seen_snapshot_id = :snapshot_id, missing_complete_snapshots = 2 "
+                "WHERE id = :source_id"
+            ),
+            {"entry_id": entry_id, "snapshot_id": snapshot_id, "source_id": source_id},
+        )
+        with pytest.raises(IntegrityError):
+            connection.execute(
+                text("UPDATE job_sources SET job_entry_id = :id WHERE id = :source_id"),
+                {"id": str(uuid4()), "source_id": source_id},
+            )
+        with pytest.raises(IntegrityError):
+            connection.execute(
+                text(
+                    "UPDATE job_sources SET last_seen_snapshot_id = :id "
+                    "WHERE id = :source_id"
+                ),
+                {"id": str(uuid4()), "source_id": source_id},
+            )
+
+    command.downgrade(config, "0006_job_entries_and_snapshots")
+    with engine.connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT id, job_posting_id, source_document_id, provider, source_raw_id, "
+                "apply_url, first_seen_at, last_seen_at, is_active FROM job_sources WHERE id = :id"
+            ),
+            {"id": source_id},
+        ).one()
+        assert row[:6] == (
+            source_id,
+            job_id,
+            None,
+            "official",
+            "job-1",
+            "https://example.com/job-1",
+        )
+        assert row[8] == 1
+        assert row[6:8] == (created_at, created_at)
+        assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
+
+
+def test_job_source_snapshot_lifecycle_emits_named_postgresql_ddl() -> None:
+    migration_path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "0007_job_source_snapshot_lifecycle.py"
+    )
+    migration = runpy.run_path(str(migration_path))
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect=postgresql.dialect(),
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    migration["upgrade"].__globals__["op"] = Operations(context)
+
+    migration["upgrade"]()
+
+    sql = " ".join(output.getvalue().split())
+    assert "ADD CONSTRAINT fk_job_sources_job_entry_id FOREIGN KEY(job_entry_id)" in sql
+    assert "REFERENCES job_entries (id) ON DELETE SET NULL" in sql
+    assert (
+        "ADD CONSTRAINT fk_job_sources_last_seen_snapshot_id "
+        "FOREIGN KEY(last_seen_snapshot_id)" in sql
+    )
+    assert "REFERENCES job_collection_snapshots (id) ON DELETE SET NULL" in sql
+    assert "CREATE INDEX ix_job_sources_entry_active ON job_sources" in sql
 
 
 def _quoted_isolated_schema_name(schema_name: str) -> str:
