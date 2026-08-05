@@ -13,6 +13,10 @@ _SECONDS_PER_HOUR = 3_600
 _MAX_SQL_INTEGER = 2_147_483_647
 
 
+class CoverageWindowError(ValueError):
+    """A report time boundary cannot be represented safely."""
+
+
 class CoverageReportService:
     """Build internal company-level job-list coverage metrics."""
 
@@ -120,26 +124,35 @@ def validate_coverage_window(
 ) -> tuple[datetime, int, datetime]:
     """Validate and normalize report bounds before any database access."""
 
-    as_of_utc = _require_aware_utc(as_of)
+    as_of_utc = normalize_aware_utc(as_of)
     refresh_window_hours = _whole_positive_hours(refresh_window)
     try:
         window_start = as_of_utc - refresh_window
     except OverflowError:
-        raise ValueError("refresh window is outside the supported datetime range") from None
+        raise CoverageWindowError(
+            "refresh window is outside the supported datetime range"
+        ) from None
     return as_of_utc, refresh_window_hours, window_start
 
 
-def _require_aware_utc(value: datetime) -> datetime:
+def normalize_aware_utc(value: datetime) -> datetime:
+    """Return an aware datetime in UTC without leaking arithmetic overflow."""
+
     if value.utcoffset() is None:
-        raise ValueError("as_of must be timezone-aware")
-    return value.astimezone(UTC)
+        raise CoverageWindowError("as_of must be timezone-aware")
+    try:
+        return value.astimezone(UTC)
+    except OverflowError:
+        raise CoverageWindowError("as_of is outside the supported datetime range") from None
 
 
 def _whole_positive_hours(value: timedelta) -> int:
     total_seconds = value.total_seconds()
     hours, remainder = divmod(total_seconds, _SECONDS_PER_HOUR)
     if remainder != 0 or hours < 1 or hours > _MAX_SQL_INTEGER:
-        raise ValueError("refresh_window must be a positive whole number of hours")
+        raise CoverageWindowError(
+            "refresh_window must be a positive whole number of hours"
+        )
     return int(hours)
 
 

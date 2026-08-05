@@ -7,7 +7,11 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.coverage.service import CoverageReportService, validate_coverage_window
+from app.coverage.service import (
+    CoverageReportService,
+    CoverageWindowError,
+    validate_coverage_window,
+)
 
 
 def _aware_datetime(value: str) -> datetime:
@@ -17,7 +21,7 @@ def _aware_datetime(value: str) -> datetime:
         raise argparse.ArgumentTypeError("--as-of must be valid ISO-8601") from error
     if parsed.utcoffset() is None:
         raise argparse.ArgumentTypeError("--as-of must be timezone-aware")
-    return parsed.astimezone(UTC)
+    return parsed
 
 
 def _positive_hours(value: str) -> int:
@@ -41,10 +45,15 @@ def main() -> int:
     args = _parser().parse_args()
     as_of = args.as_of if args.as_of is not None else datetime.now(UTC)
     try:
-        refresh_window = timedelta(hours=args.refresh_hours)
+        try:
+            refresh_window = timedelta(hours=args.refresh_hours)
+        except OverflowError:
+            raise CoverageWindowError(
+                "refresh window is outside the supported datetime range"
+            ) from None
         validate_coverage_window(as_of, refresh_window)
-    except (OverflowError, ValueError):
-        print("coverage report failed: invalid refresh window", file=sys.stderr)
+    except CoverageWindowError as error:
+        print(f"coverage report failed: {error}", file=sys.stderr)
         return 2
 
     try:

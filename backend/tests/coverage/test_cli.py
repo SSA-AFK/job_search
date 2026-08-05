@@ -148,7 +148,37 @@ def test_cli_rejects_unrepresentable_windows_before_database_access(
 
     assert result.returncode != 0
     assert result.stdout == ""
-    assert result.stderr == "coverage report failed: invalid refresh window\n"
+    assert result.stderr == (
+        "coverage report failed: refresh window is outside the supported datetime range\n"
+    )
+    assert secret not in result.stderr
+    assert "TRACEBACK" not in result.stderr.upper()
+    assert "SELECT" not in result.stderr.upper()
+
+
+@pytest.mark.parametrize(
+    "as_of",
+    [
+        "0001-01-01T00:00:00+14:00",
+        "9999-12-31T23:59:59.999999-14:00",
+    ],
+)
+def test_cli_rejects_as_of_values_that_overflow_utc_normalization_before_database_access(
+    as_of: str,
+) -> None:
+    secret = "super-secret-password"
+    environment = {
+        **os.environ,
+        "DATABASE_URL": f"missing-driver://user:{secret}@database.example/coverage",
+    }
+
+    result = _run_cli("--as-of", as_of, environment=environment)
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert result.stderr == (
+        "coverage report failed: as_of is outside the supported datetime range\n"
+    )
     assert secret not in result.stderr
     assert "TRACEBACK" not in result.stderr.upper()
     assert "SELECT" not in result.stderr.upper()

@@ -1,6 +1,6 @@
 import re
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -247,6 +247,41 @@ def test_build_rejects_refresh_windows_that_cannot_be_reported(
 def test_build_rejects_naive_as_of(session: Session) -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         CoverageReportService(session).build(as_of=AS_OF.replace(tzinfo=None))
+
+
+@pytest.mark.parametrize(
+    "as_of",
+    [
+        datetime.min.replace(tzinfo=timezone(timedelta(hours=14))),
+        datetime.max.replace(tzinfo=timezone(-timedelta(hours=14))),
+    ],
+)
+def test_build_rejects_as_of_values_that_overflow_during_utc_normalization(
+    engine: Engine,
+    session: Session,
+    as_of: datetime,
+) -> None:
+    statements = 0
+
+    def count_statement(
+        _connection: object,
+        _cursor: object,
+        _statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        nonlocal statements
+        statements += 1
+
+    event.listen(engine, "before_cursor_execute", count_statement)
+    try:
+        with pytest.raises(ValueError, match="as_of is outside the supported datetime range"):
+            CoverageReportService(session).build(as_of=as_of)
+    finally:
+        event.remove(engine, "before_cursor_execute", count_statement)
+
+    assert statements == 0
 
 
 @pytest.mark.parametrize(
