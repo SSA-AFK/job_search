@@ -1,5 +1,6 @@
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, event, func, select, text
@@ -122,6 +123,60 @@ def test_entry_and_snapshot_defaults_match_coverage_contract(
         assert JobEntry.__table__.c[column_name].server_default is not None
     for column_name in ("observed_count", "pages_fetched"):
         assert JobCollectionSnapshot.__table__.c[column_name].server_default is not None
+
+
+def test_boolean_server_defaults_are_false_for_direct_inserts(
+    session: Session, company: Company
+) -> None:
+    entry_id = uuid4()
+    snapshot_id = uuid4()
+    now = datetime.now(UTC).isoformat()
+    session.execute(
+        text(
+            "INSERT INTO job_entries "
+            "(id, company_id, url, normalized_url, provider, platform, created_at, updated_at) "
+            "VALUES (:id, :company_id, :url, :url, 'official', 'custom', :now, :now)"
+        ),
+        {
+            "id": str(entry_id),
+            "company_id": str(company.id),
+            "url": "https://careers.example.com/jobs/direct",
+            "now": now,
+        },
+    )
+    session.execute(
+        text(
+            "INSERT INTO job_collection_snapshots "
+            "(id, job_entry_id, status, command_hash, started_at, completed_at, created_at) "
+            "VALUES (:id, :entry_id, 'succeeded', :command_hash, :now, :now, :now)"
+        ),
+        {
+            "id": str(snapshot_id),
+            "entry_id": str(entry_id),
+            "command_hash": "a" * 64,
+            "now": now,
+        },
+    )
+    session.commit()
+
+    assert session.scalar(
+        text("SELECT requires_rendering FROM job_entries WHERE id = :id"),
+        {"id": str(entry_id)},
+    ) == 0
+    assert session.execute(
+        text(
+            "SELECT pagination_complete, empty_confirmed "
+            "FROM job_collection_snapshots WHERE id = :id"
+        ),
+        {"id": str(snapshot_id)},
+    ).one() == (0, 0)
+    entry = session.get(JobEntry, entry_id)
+    snapshot = session.get(JobCollectionSnapshot, snapshot_id)
+    assert entry is not None
+    assert snapshot is not None
+    assert entry.requires_rendering is False
+    assert snapshot.pagination_complete is False
+    assert snapshot.empty_confirmed is False
 
 
 def test_snapshot_identity_rejects_duplicate_non_null_crawl_run(

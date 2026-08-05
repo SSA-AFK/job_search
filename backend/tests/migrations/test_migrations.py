@@ -497,15 +497,43 @@ def test_job_entries_migration_round_trip_preserves_legacy_rows(tmp_path: Path) 
         )
 
 
+def _quoted_isolated_schema_name(schema_name: str) -> str:
+    if not re.fullmatch(r"stage3a_test_[0-9a-f]{32}", schema_name):
+        raise ValueError("invalid isolated PostgreSQL schema name")
+    return f'"{schema_name}"'
+
+
 def _isolated_postgresql_url(database_url: str, schema_name: str) -> URL:
-    assert re.fullmatch(r"stage3a_test_[0-9a-f]{32}", schema_name)
+    _quoted_isolated_schema_name(schema_name)
     return make_url(database_url).update_query_dict(
         {"options": f"-csearch_path={schema_name}"}
     )
 
 
 def _set_alembic_sqlalchemy_url(config: Config, database_url: URL) -> None:
-    config.set_main_option("sqlalchemy.url", str(database_url).replace("%", "%%"))
+    config.set_main_option(
+        "sqlalchemy.url",
+        database_url.render_as_string(hide_password=False).replace("%", "%%"),
+    )
+
+
+def _isolated_schema_cleanup_sql(schema_name: str) -> tuple[str, str]:
+    quoted_schema_name = _quoted_isolated_schema_name(schema_name)
+    return (
+        f"DROP TABLE {quoted_schema_name}.\"alembic_version\"",
+        f"DROP SCHEMA {quoted_schema_name}",
+    )
+
+
+def _cleanup_isolated_postgresql_schema(
+    admin_engine: Any, config: Config, schema_name: str
+) -> None:
+    command.downgrade(config, "base")
+    drop_version_sql, drop_schema_sql = _isolated_schema_cleanup_sql(schema_name)
+    with admin_engine.begin() as connection:
+        connection.execute(text(drop_version_sql))
+        assert inspect(connection).get_table_names(schema=schema_name) == []
+        connection.execute(text(drop_schema_sql))
 
 
 def test_isolated_postgresql_url_is_safe_for_alembic_config() -> None:
@@ -515,7 +543,38 @@ def test_isolated_postgresql_url_is_safe_for_alembic_config() -> None:
 
     _set_alembic_sqlalchemy_url(config, schema_url)
 
-    assert config.get_main_option("sqlalchemy.url") == str(schema_url)
+    assert config.get_main_option("sqlalchemy.url") == schema_url.render_as_string(
+        hide_password=False
+    )
+
+
+def test_credentialed_postgresql_url_preserves_password_for_alembic_config() -> None:
+    database_url = URL.create(
+        "postgresql",
+        username="reader",
+        password="p@ss%word",
+        host="localhost",
+        database="coverage",
+    )
+    config = Config()
+
+    _set_alembic_sqlalchemy_url(config, database_url)
+
+    configured_url = config.get_main_option("sqlalchemy.url")
+    assert configured_url == database_url.render_as_string(hide_password=False)
+    assert "***" not in configured_url
+
+
+def test_isolated_schema_cleanup_sql_is_validated_and_non_cascading() -> None:
+    schema_name = "stage3a_test_0123456789abcdef0123456789abcdef"
+
+    drop_version_sql, drop_schema_sql = _isolated_schema_cleanup_sql(schema_name)
+
+    assert drop_version_sql == f'DROP TABLE "{schema_name}"."alembic_version"'
+    assert drop_schema_sql == f'DROP SCHEMA "{schema_name}"'
+    assert "CASCADE" not in f"{drop_version_sql} {drop_schema_sql}"
+    with pytest.raises(ValueError, match="invalid isolated PostgreSQL schema name"):
+        _isolated_schema_cleanup_sql("public")
 
 
 @pytest.mark.postgresql
@@ -525,7 +584,7 @@ def test_job_entries_postgresql_schema_round_trip() -> None:
         pytest.skip("TEST_POSTGRES_URL is not configured")
 
     schema_name = f"stage3a_test_{uuid4().hex}"
-    quoted_schema_name = f'"{schema_name}"'
+    quoted_schema_name = _quoted_isolated_schema_name(schema_name)
     schema_url = _isolated_postgresql_url(database_url, schema_name)
     config = Config(Path(__file__).parents[2] / "alembic.ini")
     _set_alembic_sqlalchemy_url(config, schema_url)
@@ -585,15 +644,9 @@ def test_job_entries_postgresql_schema_round_trip() -> None:
         finally:
             schema_engine.dispose()
 
-        command.downgrade(config, "base")
-        with admin_engine.connect() as connection:
-            assert inspect(connection).get_table_names(schema=schema_name) == []
-            connection.execute(text(f"DROP SCHEMA {quoted_schema_name}"))
+        _cleanup_isolated_postgresql_schema(admin_engine, config, schema_name)
         schema_created = False
     finally:
         if schema_created:
-            command.downgrade(config, "base")
-            with admin_engine.connect() as connection:
-                assert inspect(connection).get_table_names(schema=schema_name) == []
-                connection.execute(text(f"DROP SCHEMA {quoted_schema_name}"))
+            _cleanup_isolated_postgresql_schema(admin_engine, config, schema_name)
         admin_engine.dispose()

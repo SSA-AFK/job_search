@@ -10,6 +10,7 @@ from sqlalchemy import (
     SmallInteger,
     String,
     UniqueConstraint,
+    false,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -47,7 +48,7 @@ class JobEntry(Base, TimestampMixin):
     provider: Mapped[str] = mapped_column(String(50))
     platform: Mapped[str] = mapped_column(String(50))
     requires_rendering: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default="false", nullable=False
+        Boolean, default=False, server_default=false(), nullable=False
     )
     status: Mapped[JobEntryStatus] = mapped_column(
         _enum_column(JobEntryStatus, "job_entry_status"),
@@ -81,10 +82,10 @@ class JobCollectionSnapshot(Base):
         _enum_column(JobSnapshotStatus, "job_snapshot_status"), nullable=False
     )
     pagination_complete: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default="false", nullable=False
+        Boolean, default=False, server_default=false(), nullable=False
     )
     empty_confirmed: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default="false", nullable=False
+        Boolean, default=False, server_default=false(), nullable=False
     )
     reported_total: Mapped[int | None] = mapped_column(Integer)
     observed_count: Mapped[int] = mapped_column(
