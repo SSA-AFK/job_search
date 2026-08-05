@@ -116,6 +116,10 @@ def test_initial_migration_round_trip(tmp_path: Path) -> None:
     assert {index["name"] for index in inspector.get_indexes("job_postings")} == {
         "ix_job_postings_company_active"
     }
+    assert {index["name"] for index in inspector.get_indexes("job_sources")} >= {
+        "ix_job_sources_entry_active",
+        "ix_job_sources_posting_active",
+    }
     assert {index["name"] for index in inspector.get_indexes("collection_requests")} == {
         "ix_collection_requests_status_query",
         "uq_collection_requests_active_query",
@@ -558,6 +562,10 @@ def test_job_source_snapshot_lifecycle_round_trip_preserves_legacy_rows(
         )
 
     command.upgrade(config, "0007_job_source_snapshot_lifecycle")
+    assert {index["name"] for index in inspect(engine).get_indexes("job_sources")} >= {
+        "ix_job_sources_entry_active",
+        "ix_job_sources_posting_active",
+    }
     with engine.begin() as connection:
         assert connection.execute(
             text(
@@ -615,6 +623,9 @@ def test_job_source_snapshot_lifecycle_round_trip_preserves_legacy_rows(
             )
 
     command.downgrade(config, "0006_job_entries_and_snapshots")
+    assert {
+        index["name"] for index in inspect(engine).get_indexes("job_sources")
+    }.isdisjoint({"ix_job_sources_entry_active", "ix_job_sources_posting_active"})
     with engine.connect() as connection:
         row = connection.execute(
             text(
@@ -662,6 +673,10 @@ def test_job_source_snapshot_lifecycle_emits_named_postgresql_ddl() -> None:
     )
     assert "REFERENCES job_collection_snapshots (id) ON DELETE SET NULL" in sql
     assert "CREATE INDEX ix_job_sources_entry_active ON job_sources" in sql
+    assert (
+        "CREATE INDEX ix_job_sources_posting_active ON job_sources "
+        "(job_posting_id, is_active)" in sql
+    )
 
 
 def test_job_source_snapshot_lifecycle_default_sqlite_offline_upgrade_completes() -> None:
@@ -682,6 +697,10 @@ def test_job_source_snapshot_lifecycle_default_sqlite_offline_upgrade_completes(
         "ON DELETE SET NULL" in sql
     )
     assert "CREATE INDEX ix_job_sources_entry_active ON job_sources" in sql
+    assert (
+        "CREATE INDEX ix_job_sources_posting_active ON job_sources "
+        "(job_posting_id, is_active)" in sql
+    )
 
 
 def test_job_source_snapshot_lifecycle_default_sqlite_offline_downgrade_completes() -> None:
@@ -701,6 +720,7 @@ def test_job_source_snapshot_lifecycle_default_sqlite_offline_downgrade_complete
     assert "FOREIGN KEY(source_document_id) REFERENCES source_documents (id) ON DELETE SET NULL" in sql
     assert "missing_complete_snapshots" not in sql
     assert "ix_job_sources_entry_active" not in sql
+    assert "ix_job_sources_posting_active" not in sql
 
 
 def _quoted_isolated_schema_name(schema_name: str) -> str:

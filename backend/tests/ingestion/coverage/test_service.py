@@ -440,6 +440,72 @@ def test_active_session_is_rejected_without_ending_caller_transaction(
     assert pending in session.new
 
 
+def test_default_expiring_session_stays_clean_across_create_replay_and_second_record(
+    session: Session,
+) -> None:
+    assert session.bind is not None
+    with Session(session.bind) as default_session:
+        company = Company(canonical_name="Default Session", normalized_name="default-session")
+        default_session.add(company)
+        default_session.flush()
+        entry = JobEntry(
+            company_id=company.id,
+            url="https://jobs.example.com/default-session",
+            normalized_url="https://jobs.example.com/default-session",
+            provider="official",
+            platform="self_hosted",
+            requires_rendering=False,
+        )
+        first_run = CrawlRun(
+            company_id=company.id,
+            run_type=RunType.COMPANY_REFRESH,
+            status=CollectionStatus.RUNNING,
+        )
+        second_run = CrawlRun(
+            company_id=company.id,
+            run_type=RunType.COMPANY_REFRESH,
+            status=CollectionStatus.RUNNING,
+        )
+        default_session.add_all((entry, first_run, second_run))
+        default_session.flush()
+        entry_id = entry.id
+        first_run_id = first_run.id
+        second_run_id = second_run.id
+        default_session.commit()
+        first_command = RecordJobSnapshot(
+            entry_id=entry_id,
+            crawl_run_id=first_run_id,
+            status=JobSnapshotStatus.SUCCEEDED,
+            pagination_complete=True,
+            reported_total=0,
+            pages_fetched=1,
+            started_at=NOW - timedelta(minutes=1),
+            completed_at=NOW,
+        )
+        second_command = first_command.model_copy(
+            update={
+                "crawl_run_id": second_run_id,
+                "started_at": NOW + timedelta(minutes=59),
+                "completed_at": NOW + timedelta(hours=1),
+            }
+        )
+        default_service = JobCoverageService(default_session)
+
+        created = default_service.record(first_command)
+        assert created.created is True
+        assert not default_session.in_transaction()
+
+        replayed = default_service.record(first_command)
+        assert replayed.created is False
+        assert replayed.snapshot_id == created.snapshot_id
+        assert not default_session.in_transaction()
+
+        second = default_service.record(second_command)
+        assert second.created is True
+        assert second.snapshot_id != created.snapshot_id
+        assert not default_session.in_transaction()
+
+
 def test_record_locks_entry_before_uuid_ordered_sources_and_commits_once(
     session: Session, service: JobCoverageService, rows: CoverageRows
 ) -> None:

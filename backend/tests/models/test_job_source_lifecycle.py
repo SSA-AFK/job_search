@@ -86,6 +86,11 @@ def test_job_source_lifecycle_references_clear_when_entry_and_snapshot_are_delet
 def test_job_source_lifecycle_index_matches_query_contract() -> None:
     indexes = {index.name: index for index in JobSource.__table__.indexes}
 
-    index = indexes["ix_job_sources_entry_active"]
+    entry_index = indexes["ix_job_sources_entry_active"]
+    posting_index = indexes["ix_job_sources_posting_active"]
 
-    assert [column.name for column in index.columns] == ["job_entry_id", "is_active"]
+    assert [column.name for column in entry_index.columns] == ["job_entry_id", "is_active"]
+    assert [column.name for column in posting_index.columns] == [
+        "job_posting_id",
+        "is_active",
+    ]

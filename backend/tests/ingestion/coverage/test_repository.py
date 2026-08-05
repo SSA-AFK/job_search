@@ -494,6 +494,58 @@ def test_recompute_job_activity_uses_one_exists_query_per_500_posting_batch(
     }
 
 
+def test_active_source_exists_query_uses_posting_activity_index(
+    repository: CoverageRepository, company: Company, session: Session
+) -> None:
+    posting = JobPosting(
+        company_id=company.id,
+        title="Indexed Engineer",
+        normalized_title="indexed engineer",
+        city="Shanghai",
+        description="Build",
+        is_active=False,
+    )
+    session.add(posting)
+    session.flush()
+    session.add(
+        JobSource(
+            job_posting_id=posting.id,
+            provider="official",
+            source_raw_id="indexed-exists-source",
+            apply_url="https://jobs.example.com/indexed-exists-source",
+            is_active=True,
+        )
+    )
+    session.commit()
+    exists_statements: list[tuple[str, object]] = []
+
+    def capture_exists(
+        _connection, _cursor, statement: str, parameters, _context, _executemany
+    ) -> None:
+        if "EXISTS (SELECT" in statement.upper():
+            exists_statements.append((statement, parameters))
+
+    assert session.bind is not None
+    event.listen(session.bind, "before_cursor_execute", capture_exists)
+    try:
+        assert repository.recompute_job_activity({posting.id}) == 1
+    finally:
+        event.remove(session.bind, "before_cursor_execute", capture_exists)
+
+    assert len(exists_statements) == 1
+    exists_sql, exists_parameters = exists_statements[0]
+    plan = session.connection().exec_driver_sql(
+        f"EXPLAIN QUERY PLAN {exists_sql}", exists_parameters
+    ).all()
+    details = " ".join(str(row[3]) for row in plan)
+
+    assert "SEARCH job_sources USING" in details
+    assert (
+        "ix_job_sources_posting_active (job_posting_id=? AND is_active=?)" in details
+    )
+    assert "SCAN job_sources" not in details
+
+
 def test_ensure_entry_recovers_from_a_real_sqlite_savepoint_unique_race(
     repository: CoverageRepository,
     company: Company,

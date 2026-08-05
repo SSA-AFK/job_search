@@ -20,6 +20,7 @@ depends_on: str | Sequence[str] | None = None
 ENTRY_FK_NAME = "fk_job_sources_job_entry_id"
 SNAPSHOT_FK_NAME = "fk_job_sources_last_seen_snapshot_id"
 ENTRY_ACTIVE_INDEX_NAME = "ix_job_sources_entry_active"
+POSTING_ACTIVE_INDEX_NAME = "ix_job_sources_posting_active"
 
 _JOB_SOURCES_PRE_LIFECYCLE_METADATA = sa.MetaData()
 _JOB_SOURCES_PRE_LIFECYCLE = sa.Table(
@@ -85,14 +86,15 @@ sa.Index(
     _JOB_SOURCES_POST_LIFECYCLE.c.job_entry_id,
     _JOB_SOURCES_POST_LIFECYCLE.c.is_active,
 )
+sa.Index(
+    POSTING_ACTIVE_INDEX_NAME,
+    _JOB_SOURCES_POST_LIFECYCLE.c.job_posting_id,
+    _JOB_SOURCES_POST_LIFECYCLE.c.is_active,
+)
 
 
 def _is_sqlite() -> bool:
     return op.get_context().dialect.name == "sqlite"
-
-
-def _sqlite_batch_options(copy_from: sa.Table) -> dict[str, sa.Table]:
-    return {"copy_from": copy_from} if context.is_offline_mode() else {}
 
 
 def upgrade() -> None:
@@ -100,7 +102,9 @@ def upgrade() -> None:
         with op.batch_alter_table(
             "job_sources",
             recreate="always",
-            **_sqlite_batch_options(_JOB_SOURCES_PRE_LIFECYCLE),
+            copy_from=(
+                _JOB_SOURCES_PRE_LIFECYCLE if context.is_offline_mode() else None
+            ),
         ) as batch_op:
             batch_op.add_column(sa.Column("job_entry_id", GUID(), nullable=True))
             batch_op.add_column(sa.Column("last_seen_snapshot_id", GUID(), nullable=True))
@@ -129,6 +133,10 @@ def upgrade() -> None:
             batch_op.create_index(
                 ENTRY_ACTIVE_INDEX_NAME,
                 ["job_entry_id", "is_active"],
+            )
+            batch_op.create_index(
+                POSTING_ACTIVE_INDEX_NAME,
+                ["job_posting_id", "is_active"],
             )
         return
 
@@ -164,6 +172,11 @@ def upgrade() -> None:
         "job_sources",
         ["job_entry_id", "is_active"],
     )
+    op.create_index(
+        POSTING_ACTIVE_INDEX_NAME,
+        "job_sources",
+        ["job_posting_id", "is_active"],
+    )
 
 
 def downgrade() -> None:
@@ -171,8 +184,11 @@ def downgrade() -> None:
         with op.batch_alter_table(
             "job_sources",
             recreate="always",
-            **_sqlite_batch_options(_JOB_SOURCES_POST_LIFECYCLE),
+            copy_from=(
+                _JOB_SOURCES_POST_LIFECYCLE if context.is_offline_mode() else None
+            ),
         ) as batch_op:
+            batch_op.drop_index(POSTING_ACTIVE_INDEX_NAME)
             batch_op.drop_index(ENTRY_ACTIVE_INDEX_NAME)
             batch_op.drop_constraint(SNAPSHOT_FK_NAME, type_="foreignkey")
             batch_op.drop_constraint(ENTRY_FK_NAME, type_="foreignkey")
@@ -181,6 +197,7 @@ def downgrade() -> None:
             batch_op.drop_column("job_entry_id")
         return
 
+    op.drop_index(POSTING_ACTIVE_INDEX_NAME, table_name="job_sources")
     op.drop_index(ENTRY_ACTIVE_INDEX_NAME, table_name="job_sources")
     op.drop_constraint(SNAPSHOT_FK_NAME, "job_sources", type_="foreignkey")
     op.drop_constraint(ENTRY_FK_NAME, "job_sources", type_="foreignkey")

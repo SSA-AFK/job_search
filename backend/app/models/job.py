@@ -54,6 +54,7 @@ class JobSource(Base):
     __table_args__ = (
         UniqueConstraint("provider", "source_raw_id", name="uq_job_source_provider_raw_id"),
         Index("ix_job_sources_entry_active", "job_entry_id", "is_active"),
+        Index("ix_job_sources_posting_active", "job_posting_id", "is_active"),
     )
 
     id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)

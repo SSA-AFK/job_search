@@ -49,24 +49,29 @@ class JobCoverageService:
             entry = self.repository.lock_entry(command.entry_id)
             existing = self.repository.get_snapshot(command.entry_id, command.crawl_run_id)
             if existing is not None:
-                return self._replay(existing, command)
-
-            snapshot = self.repository.insert_snapshot(command)
-            self._update_entry_health(entry, command)
-            if (
-                command.status is JobSnapshotStatus.SUCCEEDED
-                and command.pagination_complete
-            ):
-                counters = self._apply_complete_snapshot(snapshot, command)
-            else:
+                snapshot_id = self._replay_snapshot_id(existing, command)
+                created = False
                 counters = _LifecycleCounters()
-            jobs_recomputed = self.repository.recompute_job_activity(
-                counters.affected_job_ids
-            )
+                jobs_recomputed = 0
+            else:
+                snapshot = self.repository.insert_snapshot(command)
+                snapshot_id = snapshot.id
+                created = True
+                self._update_entry_health(entry, command)
+                if (
+                    command.status is JobSnapshotStatus.SUCCEEDED
+                    and command.pagination_complete
+                ):
+                    counters = self._apply_complete_snapshot(snapshot, command)
+                else:
+                    counters = _LifecycleCounters()
+                jobs_recomputed = self.repository.recompute_job_activity(
+                    counters.affected_job_ids
+                )
 
         return SnapshotRecordResult(
-            snapshot_id=snapshot.id,
-            created=True,
+            snapshot_id=snapshot_id,
+            created=created,
             sources_reactivated=counters.sources_reactivated,
             sources_missing_incremented=counters.sources_missing_incremented,
             sources_deactivated=counters.sources_deactivated,
@@ -79,19 +84,12 @@ class JobCoverageService:
             connection.exec_driver_sql("BEGIN")
 
     @staticmethod
-    def _replay(
+    def _replay_snapshot_id(
         snapshot: JobCollectionSnapshot, command: RecordJobSnapshot
-    ) -> SnapshotRecordResult:
+    ) -> UUID:
         if snapshot.command_hash != command.command_hash():
             raise CoverageConflict(code="snapshot_conflict")
-        return SnapshotRecordResult(
-            snapshot_id=snapshot.id,
-            created=False,
-            sources_reactivated=0,
-            sources_missing_incremented=0,
-            sources_deactivated=0,
-            jobs_recomputed=0,
-        )
+        return snapshot.id
 
     def _apply_complete_snapshot(
         self,
