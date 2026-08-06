@@ -1,10 +1,10 @@
 # 万级公司职位覆盖设计
 
-> **状态：Stage 3A 已实施，Task 7 质量修复轮 1 完成、待复审与全分支审阅**
-> **修订日期：2026-08-05**
+> **状态：Stage 3A 已完成；七项计划任务及 Task 7 审阅全部通过**
+> **修订日期：2026-08-06**
 > **定位：** Stage 3 的产品与技术设计，定义万级公司下职位覆盖、完整性、新鲜度和成本边界。
 > **实施入口：** [migration-master-plan.md](migration-master-plan.md)
-> **当前基线：** Stage 1、Stage 2 已合并到 `main`；Stage 3A 在隔离分支完成实现和当前矩阵，尚未集成；Stage 3B 未实施。
+> **当前基线：** Stage 1、Stage 2 已合并到 `main`；Stage 3A 在隔离分支完成实现、最终审阅和当前矩阵，尚未集成；Stage 3B 等待单独实施计划与审批。
 
 ## 1. 结论
 
@@ -148,7 +148,8 @@ ATS 原型不能直接复制到运行时。正式适配器必须：
 - 只有完整快照可以递增“连续缺失快照”计数；
 - 连续两个完整快照均缺失时，允许关闭该入口对应来源；
 - `partial` 或 `failed` 快照不关闭任何现有来源；
-- 30 天未出现仍作为无法获得完整快照时的最终兜底；
+- `JobSource.lifecycle_managed` 持久记录完整生命周期是否已接管；legacy 和仅有 partial/failed 快照的来源继续使用 30 天兜底；
+- 已由 applied complete 快照接管且入口仍保留的来源只按连续两个完整快照缺失规则关闭；删除入口后，存活来源重新具备 30 天兜底资格；
 - 只要职位仍有一个有效来源，规范职位保持有效。
 
 ## 7. 数据模型方向
@@ -165,7 +166,7 @@ Stage 3 建议增加以下模型，最终字段以审批后的 Alembic 计划为
 
 ### 7.3 `job_sources` 生命周期扩展
 
-增加入口关联、最近出现快照和连续完整快照缺失次数，支持安全关闭与重新激活。
+增加 `job_entry_id`、`last_seen_snapshot_id`、`missing_complete_snapshots` 和默认 false 的 `lifecycle_managed`。前两个可空外键在目标删除时 `SET NULL`；持久 marker 区分 legacy/partial-only 的 30 天兜底与 applied complete 的两次完整缺失生命周期，避免从可空外键反推管理状态。
 
 ### 7.4 `job_details`
 
@@ -240,7 +241,7 @@ Stage 3 建议增加以下模型，最终字段以审批后的 Alembic 计划为
 
 ## 12. 审批门
 
-Stage 3A 已按获批的详细 implementation plan 实施。Stage 3B 仍须单独编写 implementation plan 并再次取得用户批准；当前授权不包含 ATS、Playwright、在线 HTTP、外部 LLM、前端看板或规模扩容，也不授权运行外部采集。
+Stage 3A 已按获批的详细 implementation plan 完成，七项计划任务及 Task 7 审阅全部通过。Stage 3B 状态为“等待单独实施计划与审批”；当前授权不包含 ATS、Playwright、在线 HTTP、外部 LLM、前端看板或规模扩容，也不授权运行外部采集。
 
 ## 13. Stage 3A 实施记录
 
@@ -252,8 +253,8 @@ Stage 3A 已按获批的详细 implementation plan 实施。Stage 3B 仍须单�
 - 覆盖 repository：`b1fea8e`、`bd4f5ec`、`b7ffe3d`、`a0e5b65`；
 - 原子生命周期 service：`2d3f166`、`5936b41`、`eae6055`；
 - 覆盖报告与 JSON CLI：`809bafa`、`3b208ae`、`5c30753`；
-- Task 7 集成验收、PostgreSQL 迁移兼容修复和本文档：`b9eb888`；质量审阅修复轮 1 为当前 fix commit，提交后由 controller 记录 SHA。
+- Task 7 gate 与最终修复：`b9eb888`（集成验收与 gate）、`eb55e77`（PostgreSQL 清理）、`5167fbc`（生命周期加固）、`13ad3ca`（快照所有权）、`cc2a760`（锁刷新）、`83a8f14`（持久 `lifecycle_managed`）。
 
-Tasks 1–6 的规格与质量审阅均已通过；Task 7 质量审阅发现 legacy `VARCHAR(32)` 迁移失败时清理也会失败，修复轮 1 已让标准 helper 在严格 schema 校验后全限定扩宽隔离版本列，并保留原始迁移异常。Task 7 复审和 Stage 3A 全分支审阅待 controller 执行，不能据此提前宣布 Stage 3A 已完成最终 gate。当前验证结果为 Ruff 通过、mypy 79 个源文件通过、backend `513 passed / 2 skipped / 2 deselected`、integration `13 passed`、migration/seed `34 passed / 2 skipped`、performance `2 passed / 514 deselected`，10k/100k 搜索 p95 为 13.0 ms。live PostgreSQL 两个 marker 通过，覆盖正常 round trip 与 legacy 失败清理，结束后没有 `stage3a_test_*` schema 残留。
+Tasks 1–7 均已完成。Task 7 及全分支最终审阅在 round 4/5 后得到 specification PASS 和 quality APPROVED，且没有开放的 Critical、Important 或 Minor finding。当前 `83a8f14` 验证结果为 Ruff clean、mypy 79 个源文件 clean、backend `539 passed / 2 skipped / 2 deselected`、integration `13 passed`、performance `2 passed / 541 deselected`；offline Alembic upgrade/downgrade clean；live PostgreSQL `2 passed / 17 deselected`，结束后 `stage3a_test_*` schema 残留为零。
 
 当前 Provider 测试与静态引用审计证明 Provider 不调用 `RecordJobSnapshot` 或 `JobCoverageService`，因此不会伪造完整列表或可信空列表。默认测试不访问真实网络、浏览器、Redis 或 LLM。唯一 warning 来自既有的非整数 `salary_months` 负向测试，已如实保留在 gate 证据中。

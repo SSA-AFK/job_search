@@ -1,7 +1,7 @@
 # Stage 3 万级职位覆盖迁移总计划
 
-> **状态：Stage 3A 已实施，Task 7 质量修复轮 1 完成、待复审与全分支审阅**
-> **修订日期：2026-08-05**
+> **状态：Stage 3A 已完成；七项计划任务及 Task 7 审阅全部通过**
+> **修订日期：2026-08-06**
 > **定位：** 基于已完成 Stage 2 的 Stage 3 执行路线；Stage 3A 已按获批详细计划实施，后续阶段仍不是可直接开工的 implementation plan。
 > **设计依据：** [job-coverage-at-scale-plan.md](job-coverage-at-scale-plan.md)
 > **审批规则：** 本文批准后仍需生成详细 implementation plan，并再次获得执行授权。
@@ -106,6 +106,7 @@ backend/app/
 - `job_sources` 增加 `job_entry_id`；
 - 增加 `last_seen_snapshot_id`；
 - 增加 `missing_complete_snapshots`，默认 0；
+- 增加 `lifecycle_managed`，默认 false，持久区分 30 天 fallback 与 applied complete 生命周期；
 - 迁移现有数据时保留当前 active 状态；
 - 外键和唯一约束在 SQLite 重建表时保持完整。
 
@@ -133,7 +134,7 @@ backend/app/
 - 定义列表快照、分页状态和覆盖错误码；
 - 写入 succeeded、partial、failed 和可信 empty 快照；
 - 实现连续完整快照缺失两次才关闭来源；
-- 保留 30 天失效作为不完整来源的兜底；
+- legacy 和仅有 partial/failed 快照的来源保留 30 天失效兜底；applied complete 生命周期来源在入口保留时使用两次完整缺失规则；
 - 增加内部覆盖率查询和 Gate 报告，不先建设复杂前端看板。
 
 ### 验收
@@ -151,11 +152,11 @@ backend/app/
 
 ### 实施状态（2026-08-05）
 
-Tasks 1–6 已实现并通过逐任务规格/质量审阅，提交序列为 `758078b..5c30753`。Task 7 gate commit `b9eb888` 增加真实 Alembic-backed 生命周期验收，并修复 PostgreSQL 默认 32 字符 Alembic revision 列无法容纳既有长 revision id 的问题。质量审阅修复轮 1 又覆盖迁移失败后的标准清理 helper；当前 fix commit SHA 将在提交后由 controller 记录。
+Tasks 1–7 均已实现并通过审阅。Task 7 gate 与最终修复提交为 `b9eb888`（集成验收与 gate）、`eb55e77`（PostgreSQL 清理）、`5167fbc`（生命周期加固）、`13ad3ca`（快照所有权）、`cc2a760`（锁刷新）、`83a8f14`（持久 `lifecycle_managed`）。
 
-当前矩阵：Ruff 通过；mypy 79 个源文件通过；backend `513 passed / 2 skipped / 2 deselected`；integration `13 passed`；migration/seed `34 passed / 2 skipped`；performance `2 passed / 514 deselected`，10k/100k 搜索 p95 13.0 ms；live PostgreSQL markers `2 passed / 16 deselected` 且清理后无隔离 schema 残留。Provider 目录没有 Stage 3A 快照写入调用，默认 suite 不依赖网络、浏览器、Redis 或 LLM。
+`83a8f14` 当前矩阵：Ruff clean；mypy 79 个源文件 clean；backend `539 passed / 2 skipped / 2 deselected`；integration `13 passed`；performance `2 passed / 541 deselected`；offline Alembic upgrade/downgrade clean；live PostgreSQL `2 passed / 17 deselected`，清理后 `stage3a_test_*` schema 残留为零。Provider 目录没有 Stage 3A 快照写入调用，默认 suite 不依赖网络、浏览器、Redis 或 LLM；backend 全量测试保留一个既有非整数 `salary_months` 负向测试的 intentional Pydantic serializer warning。
 
-Task 7 质量修复轮 1 已完成，复审和 Stage 3A 全分支审阅仍待 controller 完成。Stage 3B 状态为“等待单独 implementation plan 与审批”，不得在本 gate 中开始。
+Task 7 及全分支最终审阅在 round 4/5 后得到 specification PASS 和 quality APPROVED，没有开放的 Critical、Important 或 Minor finding。Stage 3A 状态为“已完成”；Stage 3B 状态为“等待单独实施计划与审批”，不得在本 gate 中开始。
 
 ## 6. Stage 3B：ATS 正式接入
 
@@ -327,6 +328,6 @@ Task 7 质量修复轮 1 已完成，复审和 Stage 3A 全分支审阅仍待 co
 3. 为 Stage 3A 编写逐步骤 implementation plan；
 4. 再次取得执行授权；
 5. 创建隔离工作树并从测试开始实施；
-6. Stage 3A 完成审阅后，再决定是否编写 Stage 3B 详细计划。
+6. Stage 3A 完成审阅后，Stage 3B 仍须等待单独实施计划与审批。
 
 本文档获批不等同于授权实施。未经明确执行授权，不修改生产代码、不运行外部采集、不创建规模数据集。

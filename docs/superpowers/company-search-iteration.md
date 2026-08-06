@@ -17,25 +17,25 @@ This is the living delivery document for the AI Company Search project. It is th
 | [`specs/2026-07-31-ai-company-search-agent-design.md`](specs/2026-07-31-ai-company-search-agent-design.md) | Product, architecture, contracts, data model, and acceptance criteria | Approved |
 | [`plans/2026-07-31-company-search-web-foundation.md`](plans/2026-07-31-company-search-web-foundation.md) | Stage one implementation plan | Executed and integrated locally into `main` |
 | [`plans/2026-07-31-company-search-ingestion-pipeline.md`](plans/2026-07-31-company-search-ingestion-pipeline.md) | Stage two implementation plan | Executed and integrated locally into `main` |
-| [`../dev/job-coverage-at-scale-plan.md`](../dev/job-coverage-at-scale-plan.md) | Stage 3 coverage design and scale gates | Stage 3A implemented; Task 7 fix round 1/re-review pending |
-| [`../dev/migration-master-plan.md`](../dev/migration-master-plan.md) | Stage 3 migration and approval sequence | Stage 3A implemented; later stages awaiting separate plans |
-| [`plans/2026-08-05-company-search-stage3a-coverage-observability.md`](plans/2026-08-05-company-search-stage3a-coverage-observability.md) | Stage 3A detailed implementation plan | Tasks 1–6 reviewed; Task 7 quality fix round 1 complete, re-review pending |
+| [`../dev/job-coverage-at-scale-plan.md`](../dev/job-coverage-at-scale-plan.md) | Stage 3 coverage design and scale gates | Stage 3A Complete; later stages awaiting separate plans |
+| [`../dev/migration-master-plan.md`](../dev/migration-master-plan.md) | Stage 3 migration and approval sequence | Stage 3A Complete; later stages awaiting separate plans |
+| [`plans/2026-08-05-company-search-stage3a-coverage-observability.md`](plans/2026-08-05-company-search-stage3a-coverage-observability.md) | Stage 3A detailed implementation plan | All 7 tasks complete; Task 7 and final reviews passed |
 | [`../zhihu.md`](../../zhihu.md) | Supplied Zhihu Global Search API contract | Reference |
 
 ## Current Snapshot
 
 | Field | Value |
 |-------|-------|
-| Overall status | Stage one and two complete on `main`; Stage 3A implemented on isolated branch with final reviews pending |
-| Current stage | Stage 3A coverage observability completion gate |
-| Current task | Task 7 quality re-review, then whole-branch review |
+| Overall status | Stage one and two complete on `main`; Stage 3A Complete on its isolated branch |
+| Current stage | Stage 3A coverage observability complete; integration decision pending |
+| Current task | Choose the Stage 3A integration path; do not begin Stage 3B |
 | Execution method | Subagent-Driven Development |
 | Active branch/worktree | `codex/company-search-stage3a-coverage-observability` in its isolated worktree; main-workspace WIP untouched |
 | Stage one progress | 8/8 tasks complete; completion gate passed |
 | Stage two progress | 12/12 tasks complete; completion gate passed |
-| Stage 3A progress | Tasks 1–6 reviewed; Task 7 quality fix round 1 complete and current matrix passed; re-review/final review pending |
-| Last verified artifact state | Stage 3A branch: Ruff clean; mypy 79 files; backend 513 passed/2 skipped/2 deselected; integration 13; migration/seed 34 passed/2 skipped; performance 2 passed at 13.0 ms p95; live PostgreSQL markers 2 passed with no schema residue |
-| Next action | Complete Task 7 and whole-branch reviews; Stage 3B awaits a separate implementation plan and approval |
+| Stage 3A progress | 7/7 tasks complete; Task 7 and final reviews passed with no open findings |
+| Last verified artifact state | `83a8f14`: Ruff clean; mypy 79 files; backend 539 passed/2 skipped/2 deselected; integration 13; performance 2 passed/541 deselected; offline Alembic upgrade/downgrade clean; live PostgreSQL 2 passed/17 deselected; zero residual `stage3a_test_*` schemas |
+| Next action | Choose the Stage 3A integration path; Stage 3B is awaiting separate implementation plan and approval |
 
 ## Delivery Sequence
 
@@ -123,7 +123,7 @@ Plan: [`plans/2026-08-05-company-search-stage3a-coverage-observability.md`](plan
 | 4 | Transaction-neutral coverage repository | Complete | `b1fea8e`, `bd4f5ec`, `b7ffe3d`, `a0e5b65` | Approved after fix rounds 1–3 |
 | 5 | Atomic snapshot/source lifecycle | Complete | `2d3f166`, `5936b41`, `eae6055` | Approved after fix rounds 1–2 |
 | 6 | Coverage reports and JSON CLI | Complete | `809bafa`, `3b208ae`, `5c30753` | Approved after fix rounds 1–2 |
-| 7 | Integration acceptance and completion gate | Fix round 1 complete | `b9eb888`, current fix commit | Quality re-review pending |
+| 7 | Integration acceptance and completion gate | Complete | `b9eb888`, `eb55e77`, `5167fbc`, `13ad3ca`, `cc2a760`, `83a8f14` | Specification PASS and quality APPROVED after round 4/5; no open findings |
 
 ### Stage 3A Gate
 
@@ -132,9 +132,9 @@ Plan: [`plans/2026-08-05-company-search-stage3a-coverage-observability.md`](plan
 - [x] Live PostgreSQL upgrades through head and cleans its isolated schema without `CASCADE`.
 - [x] Internal JSON reports distinguish confirmed empty companies from failures with bounded query count.
 - [x] Current Providers do not write false complete-list snapshots; default tests use no live network, browser, Redis or LLM.
-- [ ] Task 7 quality re-review after PostgreSQL failure-cleanup fix round 1.
-- [ ] Final whole-branch review and current-HEAD matrix after review findings.
-- [ ] Integration decision. Stage 3B remains unapproved.
+- [x] Task 7 quality re-review and all bounded fix/re-review rounds passed.
+- [x] Final specification review PASS and quality review APPROVED at `83a8f14`, with no open Critical/Important/Minor findings.
+- [x] Current-HEAD matrix and Stage 3A completion gate passed; integration remains a separate decision and Stage 3B is unapproved.
 
 ## Quality Gates Per Task
 
@@ -156,6 +156,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 - Search reads only local persisted data and never waits on external collection.
 - CrewAI and the LLM produce candidate data only; deterministic services own validation, normalization, deduplication, state changes, and persistence.
 - `job_sources` preserves the provider, platform raw id, and apply URL relationship.
+- `JobSource.lifecycle_managed` keeps legacy/partial-only sources on the 30-day fallback while applied complete lifecycle sources require two complete absences.
 - `collection_requests` and `crawl_runs` are the source of truth for asynchronous state.
 - Provider integrations default to disabled and cannot bypass access controls or service terms.
 - Redis and external integrations may improve or refresh results but cannot make existing search data unreadable.
@@ -211,7 +212,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-08-04 | Stage two Task 12 | End-to-end failure verification, runbook, and two scoped fix re-reviews | PASS: Ruff clean; mypy 69 files; full pytest 347 passed/2 deselected; integration 12 passed; performance 2 passed; migrations/seed 19 passed; Vitest 54 passed; build passed; Playwright 9 passed; opt-in collection, deterministic conflicts, bounded Zhihu responses, two-phase company-site collection, and operator-owned host authorization verified; two Minors deferred |
 | 2026-08-04 | Stage two final review fix wave | Ten Important findings plus scoped concurrency/security follow-ups | BLOCKED: implementation gates pass (Ruff, mypy 71 files, backend 398 passed/2 deselected, integration 12, performance 2, migrations/seed 21, Vitest 54, build, Playwright 9), but official scoped review found a reconciliation race and employment-type loss |
 | 2026-08-04 | Stage two authorized targeted repair | Atomic reconciliation, employment-type preservation, and two scoped review rounds | PASS: Ruff clean; mypy 71 files; backend 414 passed/2 deselected; integration 12; performance 2; migrations/seed 24; Vitest 55; build passed; Playwright 9; official scoped re-review found no Critical/Important |
-| 2026-08-05 | Stage 3A Tasks 1–7 implementation matrix | Coverage contracts, migrations, lifecycle, reports, integration acceptance, Provider audit, live PostgreSQL round trip, and failure cleanup | PASS before re-review/final review: Ruff clean; mypy 79 files; backend 513 passed/2 skipped/2 deselected; integration 13; migration/seed 34 passed/2 skipped; performance 2 at 13.0 ms p95; PostgreSQL 2 passed and zero residual schemas; one known Pydantic negative-test warning |
+| 2026-08-05 | Stage 3A Tasks 1–7 completion matrix | Coverage contracts, migrations, durable lifecycle, reports, integration acceptance, Provider audit, offline Alembic, live PostgreSQL, and final reviews | PASS at `83a8f14`: specification PASS; quality APPROVED after round 4/5; no open findings; Ruff clean; mypy 79 files; backend 539 passed/2 skipped/2 deselected with one known Pydantic negative-test warning; integration 13; performance 2 passed/541 deselected; PostgreSQL 2 passed/17 deselected; zero residual schemas |
 
 ## Iteration History
 
@@ -250,6 +251,7 @@ The whole stage receives a separate broad review after all of its task reviews p
 | 2026-08-05 | Stage two local integration | Fast-forwarded approved stage-two HEAD `5ff344a` into `main`, repeated merged-result verification, restored and hash-verified pre-existing user work, and removed the merged feature branch/worktree using validated per-file cleanup | Define and approve the next bounded stage before implementation |
 | 2026-08-05 | Stage 3A Tasks 1–7 implementation | Added formal entry/snapshot facts, replay-safe lifecycle, safe two-absence source deactivation, bounded internal coverage reporting, real database acceptance, and PostgreSQL revision-column compatibility; Tasks 1–6 reviews passed | Run Task 7 independent review and final whole-branch review; do not begin Stage 3B without a separate approved plan |
 | 2026-08-05 | Stage 3A Task 7 quality fix round 1 | Made isolated PostgreSQL cleanup widen only a strictly validated schema-qualified Alembic version column before downgrade; added direct legacy cleanup, absent-schema, and absent-version-table live coverage | Run Task 7 quality re-review; final whole-branch review remains pending |
+| 2026-08-06 | Stage 3A final closure | Closed Task 7 and whole-branch specification/quality reviews after rounds 4/5; durable `lifecycle_managed` preserves legacy fallback and complete-snapshot ownership across FK deletion transitions; final matrix passed at `83a8f14` with no open findings | Choose integration path; Stage 3B is awaiting separate implementation plan and approval |
 
 ## Update Template
 

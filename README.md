@@ -90,7 +90,9 @@ python -m alembic upgrade head
 python -m app.coverage.cli --refresh-hours 24
 ```
 
-The report is an offline database read. Current Providers do not write Stage 3A complete-list snapshots; ATS and complete-list ingestion remain disabled until Stage 3B has a separate implementation plan and approval.
+The report is an offline database read. Stage 3A is Complete at `83a8f14`: all seven planned tasks and Task 7 reviews passed, with final specification review PASS and quality review APPROVED after round 4/5 and no open findings. Current Providers do not write Stage 3A complete-list snapshots; Stage 3B is awaiting separate implementation plan and approval.
+
+`JobSource.lifecycle_managed` records durable source-level lifecycle ownership. Legacy sources and sources linked only to partial/failed snapshots retain the 30-day age fallback; sources processed by an applied complete snapshot use the two-consecutive-complete-absences rule while their entry remains present.
 
 The Stage 3A rollback target is migration `0005_extend_job_type_values`:
 
@@ -99,6 +101,8 @@ python -m alembic downgrade 0005_extend_job_type_values
 ```
 
 This downgrade is allowed only before Stage 3B writes production sources linked to job entries or collection snapshots. Back up the database and stop writers before any production migration. `TEST_POSTGRES_URL` is an opt-in test-runner input for the PostgreSQL migration gate, not an application setting; do not add it to application configuration or `.env.example`.
+
+The verified Stage 3A closure matrix at `83a8f14` is: backend `539 passed / 2 skipped / 2 deselected`, integration `13 passed`, performance `2 passed / 541 deselected`, Ruff clean, mypy clean across 79 files, offline Alembic upgrade/downgrade clean, live PostgreSQL `2 passed / 17 deselected`, and zero residual `stage3a_test_*` schemas. The full backend run retains one intentional Pydantic serializer warning from the existing non-integer `salary_months` negative test.
 
 ## Test matrix
 
