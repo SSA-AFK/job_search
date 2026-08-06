@@ -143,6 +143,7 @@ class CoverageRepository:
             .where(JobSource.job_entry_id == entry_id)
             .order_by(JobSource.id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
         return tuple(self.session.scalars(statement))
 

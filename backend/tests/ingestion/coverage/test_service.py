@@ -742,6 +742,42 @@ def test_default_expiring_session_stays_clean_across_create_replay_and_second_re
         assert not default_session.in_transaction()
 
 
+def test_second_absence_refreshes_stale_source_identity_before_deactivation(
+    session: Session, service: JobCoverageService, rows: CoverageRows
+) -> None:
+    assert session.bind is not None
+    with Session(session.bind, expire_on_commit=False) as stale_session:
+        stale_source = stale_session.get(JobSource, rows.source.id)
+        assert stale_source is not None
+        assert stale_source.missing_complete_snapshots == 0
+        stale_session.commit()
+
+        first = service.record(snapshot_command(session, rows, completed_at=NOW))
+        assert first.sources_missing_incremented == 1
+
+        second = JobCoverageService(stale_session).record(
+            snapshot_command(
+                session,
+                rows,
+                completed_at=NOW + timedelta(hours=1),
+            )
+        )
+
+        assert second.sources_missing_incremented == 1
+        assert second.sources_deactivated == 1
+        assert stale_source.missing_complete_snapshots == 2
+        assert stale_source.is_active is False
+
+    with Session(session.bind) as verification_session:
+        persisted_source = verification_session.get(JobSource, rows.source.id)
+        persisted_posting = verification_session.get(JobPosting, rows.posting.id)
+        assert persisted_source is not None
+        assert persisted_posting is not None
+        assert persisted_source.missing_complete_snapshots == 2
+        assert persisted_source.is_active is False
+        assert persisted_posting.is_active is False
+
+
 def test_record_locks_entry_before_uuid_ordered_sources_and_commits_once(
     session: Session, service: JobCoverageService, rows: CoverageRows
 ) -> None:
