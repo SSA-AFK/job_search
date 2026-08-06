@@ -52,13 +52,18 @@ def persisted_company(session: Session, *, suffix: str = "") -> Company:
     return company
 
 
-def persisted_manifest(session: Session, *, suffix: str = "a") -> CompanyManifest:
+def persisted_manifest(
+    session: Session,
+    *,
+    suffix: str = "a",
+    frozen_at: datetime | None = None,
+) -> CompanyManifest:
     manifest = CompanyManifest(
         version=f"{suffix}" * 64,
         config_fingerprint="b" * 64,
         member_count=1,
         canonical_quota={"foundation_models": 1},
-        frozen_at=datetime.now(UTC),
+        frozen_at=frozen_at or datetime.now(UTC),
     )
     session.add(manifest)
     session.flush()
@@ -88,6 +93,22 @@ def persisted_entry(session: Session, company: Company) -> JobEntry:
     session.add(entry)
     session.flush()
     return entry
+
+
+def candidate_fact(*, stable_evidence_id: str = "a" * 64) -> CandidateFact:
+    return CandidateFact(
+        stable_evidence_id=stable_evidence_id,
+        canonical_name="Example AI",
+        normalized_name="example ai",
+        aliases=["Example"],
+        primary_category=AiCategory.FOUNDATION_MODELS,
+        source_id="public_list",
+        source_url="https://example.com/list",
+        retrieved_at=datetime.now(UTC),
+        evidence_summary="Published member directory entry.",
+        confidence_tier=ConfidenceTier.HIGH,
+        confidence_reason="Government directory with an official website.",
+    )
 
 
 def discovery_observation(
@@ -157,19 +178,8 @@ def test_base_metadata_registers_manifest_models_in_fresh_process() -> None:
 
 def test_candidate_fact_defaults_and_utc_fields_round_trip(session: Session) -> None:
     plus_eight = timezone(timedelta(hours=8))
-    fact = CandidateFact(
-        stable_evidence_id="a" * 64,
-        canonical_name="Example AI",
-        normalized_name="example ai",
-        aliases=["Example"],
-        primary_category=AiCategory.FOUNDATION_MODELS,
-        source_id="public_list",
-        source_url="https://example.com/list",
-        retrieved_at=datetime(2026, 8, 6, 12, tzinfo=plus_eight),
-        evidence_summary="Published member directory entry.",
-        confidence_tier=ConfidenceTier.HIGH,
-        confidence_reason="Government directory with an official website.",
-    )
+    fact = candidate_fact()
+    fact.retrieved_at = datetime(2026, 8, 6, 12, tzinfo=plus_eight)
     session.add(fact)
     session.commit()
     session.expire(fact)
@@ -177,6 +187,15 @@ def test_candidate_fact_defaults_and_utc_fields_round_trip(session: Session) -> 
     assert fact.decision_status is CandidateDecisionStatus.REVIEW_REQUIRED
     assert fact.retrieved_at == datetime(2026, 8, 6, 4, tzinfo=UTC)
     assert CandidateFact.__table__.c.decision_status.server_default is not None
+
+
+def test_candidate_fact_rejects_duplicate_stable_evidence_id(session: Session) -> None:
+    session.add(candidate_fact())
+    session.flush()
+    session.add(candidate_fact())
+
+    with pytest.raises(IntegrityError):
+        session.flush()
 
 
 def test_manifest_membership_is_unique_by_position_and_company(session: Session) -> None:
@@ -191,6 +210,52 @@ def test_manifest_membership_is_unique_by_position_and_company(session: Session)
 
     with pytest.raises(IntegrityError):
         session.flush()
+
+
+def test_manifest_membership_rejects_duplicate_position_for_distinct_companies(
+    session: Session,
+) -> None:
+    manifest = persisted_manifest(session)
+    company_a = persisted_company(session, suffix="a")
+    company_b = persisted_company(session, suffix="b")
+    session.add_all(
+        [
+            manifest_member(manifest, company_a, position=1),
+            manifest_member(manifest, company_b, position=1),
+        ]
+    )
+
+    with pytest.raises(IntegrityError):
+        session.flush()
+
+
+def test_review_manifest_and_observation_utc_fields_round_trip(session: Session) -> None:
+    plus_eight = timezone(timedelta(hours=8))
+    fact = candidate_fact()
+    session.add(fact)
+    session.flush()
+    review = CandidateReview(
+        candidate_fact_id=fact.id,
+        prior_status=CandidateDecisionStatus.REVIEW_REQUIRED,
+        action=ReviewAction.ACCEPT,
+        resulting_status=CandidateDecisionStatus.ACCEPTED,
+        reason="Exact public evidence supports the accepted identity.",
+        decided_at=datetime(2026, 8, 6, 12, tzinfo=plus_eight),
+    )
+    manifest = persisted_manifest(
+        session,
+        frozen_at=datetime(2026, 8, 6, 13, tzinfo=plus_eight),
+    )
+    company = persisted_company(session)
+    observation = discovery_observation(manifest, company)
+    observation.observed_at = datetime(2026, 8, 6, 14, tzinfo=plus_eight)
+    session.add_all([review, observation])
+    session.commit()
+    session.expire_all()
+
+    assert review.decided_at == datetime(2026, 8, 6, 4, tzinfo=UTC)
+    assert manifest.frozen_at == datetime(2026, 8, 6, 5, tzinfo=UTC)
+    assert observation.observed_at == datetime(2026, 8, 6, 6, tzinfo=UTC)
 
 
 def test_discovery_observation_cannot_own_another_company_entry(session: Session) -> None:
