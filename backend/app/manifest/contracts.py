@@ -6,7 +6,7 @@ from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Annotated, Literal
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import (
@@ -23,33 +23,15 @@ from pydantic import (
 
 from app.ingestion.contracts import DocumentUrl
 
-_CREDENTIAL_QUERY_NAMES = frozenset(
-    {
-        "apikey",
-        "accesstoken",
-        "authorization",
-        "auth",
-        "clientsecret",
-        "key",
-        "password",
-        "passwd",
-        "secret",
-        "signature",
-        "sig",
-        "token",
-    }
-)
 
-
-def _require_credential_free_query(value: HttpUrl) -> HttpUrl:
-    for parameter_name, _ in parse_qsl(urlsplit(str(value)).query, keep_blank_values=True):
-        normalized_name = "".join(character for character in parameter_name.casefold() if character.isalnum())
-        if normalized_name in _CREDENTIAL_QUERY_NAMES:
-            raise ValueError("URL must not contain credential query parameters")
+def _require_static_registry_url(value: HttpUrl) -> HttpUrl:
+    parsed = urlsplit(str(value))
+    if parsed.query or parsed.fragment:
+        raise ValueError("registry URL must not contain a query string or fragment")
     return value
 
 
-RegistryUrl = Annotated[DocumentUrl, AfterValidator(_require_credential_free_query)]
+RegistryUrl = Annotated[DocumentUrl, AfterValidator(_require_static_registry_url)]
 
 
 class AiCategory(StrEnum):

@@ -57,28 +57,38 @@ def test_registry_rejects_unreviewed_or_invalid_entries(
         load_source_registry(write_registry(tmp_path, entries=[entry]))
 
 
-def test_registry_rejects_credential_query_parameters_without_echoing_values(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("base_url", "disallowed_value"),
+    [
+        ("https://example.com/public?locale=en&page=2", "locale=en"),
+        ("https://example.com/public?credential=not-a-secret", "not-a-secret"),
+        ("https://example.com/public#private-section", "private-section"),
+    ],
+)
+def test_registry_rejects_query_strings_and_fragments_without_echoing_values(
+    tmp_path: Path, base_url: str, disallowed_value: str
+) -> None:
     path = write_registry(
         tmp_path,
-        entries=[registry_entry(base_url="https://example.com/public?Api_Key=not-a-secret")],
+        entries=[registry_entry(base_url=base_url)],
     )
 
     with pytest.raises(SourceRegistryError) as error:
         load_source_registry(path)
 
     assert str(error.value) == "source registry is invalid"
-    assert "not-a-secret" not in str(error.value)
+    assert disallowed_value not in str(error.value)
 
 
-def test_registry_allows_ordinary_public_query_parameters(tmp_path: Path) -> None:
+def test_registry_allows_path_only_https_urls(tmp_path: Path) -> None:
     registry = load_source_registry(
         write_registry(
             tmp_path,
-            entries=[registry_entry(base_url="https://example.com/public?locale=en&page=2")],
+            entries=[registry_entry(base_url="https://example.com/public-list")],
         )
     )
 
-    assert str(registry.require("official_list").base_url).endswith("locale=en&page=2")
+    assert str(registry.require("official_list").base_url) == "https://example.com/public-list"
 
 
 def test_registry_allows_independently_budgeted_entries_on_one_host(tmp_path: Path) -> None:
