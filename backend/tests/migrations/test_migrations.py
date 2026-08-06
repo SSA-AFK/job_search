@@ -18,10 +18,15 @@ from sqlalchemy.exc import IntegrityError
 from alembic import command
 
 EXPECTED_TABLES = {
+    "candidate_facts",
+    "candidate_reviews",
     "companies",
     "company_aliases",
+    "company_manifest_members",
+    "company_manifests",
     "source_documents",
     "company_sources",
+    "entry_discovery_observations",
     "job_postings",
     "job_sources",
     "regulatory_filings",
@@ -675,6 +680,437 @@ def test_job_source_snapshot_lifecycle_round_trip_preserves_legacy_rows(
         assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
 
 
+def _expect_integrity_error(
+    connection: Any, statement: str, parameters: dict[str, object]
+) -> None:
+    with pytest.raises(IntegrityError), connection.begin_nested():
+        connection.execute(text(statement), parameters)
+
+
+def test_gate1_manifest_discovery_round_trip_preserves_stage3a_rows(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "gate1-manifest-discovery.sqlite3"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config(Path(__file__).parents[2] / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", database_url)
+    engine = create_engine(database_url)
+    company_id = str(uuid4())
+    other_company_id = str(uuid4())
+    job_id = str(uuid4())
+    source_id = str(uuid4())
+    entry_id = str(uuid4())
+    snapshot_id = str(uuid4())
+    candidate_id = str(uuid4())
+    manifest_version = "a" * 64
+    created_at = "2026-08-06 00:00:00+00:00"
+
+    @event.listens_for(engine, "connect")
+    def enable_foreign_keys(
+        dbapi_connection: Any, _connection_record: object
+    ) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    command.upgrade(config, "0007_job_source_snapshot_lifecycle")
+    with engine.begin() as connection:
+        for row_id, canonical_name, normalized_name in (
+            (company_id, "Example", "example"),
+            (other_company_id, "Other", "other"),
+        ):
+            connection.execute(
+                text(
+                    "INSERT INTO companies "
+                    "(id, canonical_name, normalized_name, funding_stage, scale, "
+                    "created_at, updated_at) VALUES "
+                    "(:id, :canonical_name, :normalized_name, 'unknown', 'unknown', "
+                    ":created_at, :created_at)"
+                ),
+                {
+                    "id": row_id,
+                    "canonical_name": canonical_name,
+                    "normalized_name": normalized_name,
+                    "created_at": created_at,
+                },
+            )
+        connection.execute(
+            text(
+                "INSERT INTO job_postings "
+                "(id, company_id, title, normalized_title, job_type, city, "
+                "description, is_active, created_at, updated_at) VALUES "
+                "(:id, :company_id, 'Engineer', 'engineer', 'full_time', '', '', 1, "
+                ":created_at, :created_at)"
+            ),
+            {"id": job_id, "company_id": company_id, "created_at": created_at},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO job_entries "
+                "(id, company_id, url, normalized_url, provider, platform, "
+                "requires_rendering, status, failure_count, created_at, updated_at) "
+                "VALUES (:id, :company_id, 'https://example.com/jobs', "
+                "'https://example.com/jobs', 'official', 'custom', 0, 'unknown', 0, "
+                ":created_at, :created_at)"
+            ),
+            {"id": entry_id, "company_id": company_id, "created_at": created_at},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO job_collection_snapshots "
+                "(id, job_entry_id, status, pagination_complete, empty_confirmed, "
+                "observed_count, pages_fetched, command_hash, started_at, completed_at, "
+                "created_at) VALUES (:id, :entry_id, 'succeeded', 1, 1, 0, 0, "
+                ":command_hash, :created_at, :created_at, :created_at)"
+            ),
+            {
+                "id": snapshot_id,
+                "entry_id": entry_id,
+                "command_hash": "b" * 64,
+                "created_at": created_at,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO job_sources "
+                "(id, job_posting_id, job_entry_id, last_seen_snapshot_id, "
+                "missing_complete_snapshots, lifecycle_managed, provider, "
+                "source_raw_id, apply_url, first_seen_at, last_seen_at, is_active) "
+                "VALUES (:id, :job_id, :entry_id, :snapshot_id, 0, 1, 'official', "
+                "'job-1', 'https://example.com/job-1', :created_at, :created_at, 1)"
+            ),
+            {
+                "id": source_id,
+                "job_id": job_id,
+                "entry_id": entry_id,
+                "snapshot_id": snapshot_id,
+                "created_at": created_at,
+            },
+        )
+
+    command.upgrade(config, "0008_gate1_manifest_discovery")
+    inspector = inspect(engine)
+    assert set(inspector.get_table_names()) >= EXPECTED_TABLES
+    assert {
+        index["name"]
+        for index in inspector.get_indexes("job_entries")
+        if index["unique"]
+    } >= {"uq_job_entries_id_company"}
+    assert {constraint["name"] for constraint in inspector.get_unique_constraints("candidate_facts")} >= {
+        "uq_candidate_fact_evidence"
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("company_manifest_members")
+    } >= {"uq_manifest_member_position", "uq_manifest_member_company"}
+
+    with engine.begin() as connection:
+        candidate_insert = (
+            "INSERT INTO candidate_facts "
+            "(id, stable_evidence_id, canonical_name, normalized_name, aliases, "
+            "primary_category, source_id, source_url, retrieved_at, evidence_summary, "
+            "confidence_tier, confidence_reason, decision_status, company_id, "
+            "created_at, updated_at) VALUES "
+            "(:id, :evidence_id, 'Example', 'example', '[\"Example\"]', "
+            "'foundation_models', 'source_a', 'https://source.example/item', "
+            ":created_at, 'Public evidence', 'high', 'Primary source', "
+            "'review_required', :company_id, :created_at, :created_at)"
+        )
+        connection.execute(
+            text(candidate_insert),
+            {
+                "id": candidate_id,
+                "evidence_id": "c" * 64,
+                "company_id": company_id,
+                "created_at": created_at,
+            },
+        )
+        _expect_integrity_error(
+            connection,
+            candidate_insert,
+            {
+                "id": str(uuid4()),
+                "evidence_id": "c" * 64,
+                "company_id": company_id,
+                "created_at": created_at,
+            },
+        )
+        _expect_integrity_error(
+            connection,
+            candidate_insert,
+            {
+                "id": str(uuid4()),
+                "evidence_id": "d" * 64,
+                "company_id": str(uuid4()),
+                "created_at": created_at,
+            },
+        )
+
+        review_insert = (
+            "INSERT INTO candidate_reviews "
+            "(id, candidate_fact_id, prior_status, action, resulting_status, "
+            "resulting_company_id, reason, decided_at) VALUES "
+            "(:id, :candidate_id, 'review_required', 'accept', 'accepted', "
+            ":company_id, 'Evidence reviewed', :created_at)"
+        )
+        connection.execute(
+            text(review_insert),
+            {
+                "id": str(uuid4()),
+                "candidate_id": candidate_id,
+                "company_id": company_id,
+                "created_at": created_at,
+            },
+        )
+        _expect_integrity_error(
+            connection,
+            review_insert,
+            {
+                "id": str(uuid4()),
+                "candidate_id": str(uuid4()),
+                "company_id": company_id,
+                "created_at": created_at,
+            },
+        )
+        _expect_integrity_error(
+            connection,
+            review_insert,
+            {
+                "id": str(uuid4()),
+                "candidate_id": candidate_id,
+                "company_id": str(uuid4()),
+                "created_at": created_at,
+            },
+        )
+
+        connection.execute(
+            text(
+                "INSERT INTO company_manifests "
+                "(version, config_fingerprint, member_count, canonical_quota, frozen_at) "
+                "VALUES (:version, :fingerprint, 2, '{}', :created_at)"
+            ),
+            {
+                "version": manifest_version,
+                "fingerprint": "e" * 64,
+                "created_at": created_at,
+            },
+        )
+        member_insert = (
+            "INSERT INTO company_manifest_members "
+            "(id, manifest_version, company_id, position, canonical_name, "
+            "primary_category) VALUES "
+            "(:id, :version, :company_id, :position, :canonical_name, "
+            "'foundation_models')"
+        )
+        connection.execute(
+            text(member_insert),
+            {
+                "id": str(uuid4()),
+                "version": manifest_version,
+                "company_id": company_id,
+                "position": 1,
+                "canonical_name": "Example",
+            },
+        )
+        for parameters in (
+            {
+                "id": str(uuid4()),
+                "version": manifest_version,
+                "company_id": other_company_id,
+                "position": 1,
+                "canonical_name": "Other",
+            },
+            {
+                "id": str(uuid4()),
+                "version": manifest_version,
+                "company_id": company_id,
+                "position": 2,
+                "canonical_name": "Example",
+            },
+            {
+                "id": str(uuid4()),
+                "version": "f" * 64,
+                "company_id": other_company_id,
+                "position": 2,
+                "canonical_name": "Other",
+            },
+            {
+                "id": str(uuid4()),
+                "version": manifest_version,
+                "company_id": str(uuid4()),
+                "position": 2,
+                "canonical_name": "Missing",
+            },
+        ):
+            _expect_integrity_error(connection, member_insert, parameters)
+
+        observation_insert = (
+            "INSERT INTO entry_discovery_observations "
+            "(id, manifest_version, company_id, method, status, requires_rendering, "
+            "job_entry_id, observed_at) VALUES "
+            "(:id, :version, :company_id, 'official_site', 'accepted', 0, "
+            ":entry_id, :created_at)"
+        )
+        connection.execute(
+            text(observation_insert),
+            {
+                "id": str(uuid4()),
+                "version": manifest_version,
+                "company_id": company_id,
+                "entry_id": entry_id,
+                "created_at": created_at,
+            },
+        )
+        for parameters in (
+            {
+                "id": str(uuid4()),
+                "version": "f" * 64,
+                "company_id": company_id,
+                "entry_id": None,
+                "created_at": created_at,
+            },
+            {
+                "id": str(uuid4()),
+                "version": manifest_version,
+                "company_id": str(uuid4()),
+                "entry_id": None,
+                "created_at": created_at,
+            },
+            {
+                "id": str(uuid4()),
+                "version": manifest_version,
+                "company_id": other_company_id,
+                "entry_id": entry_id,
+                "created_at": created_at,
+            },
+        ):
+            _expect_integrity_error(connection, observation_insert, parameters)
+        assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
+
+    command.downgrade(config, "0007_job_source_snapshot_lifecycle")
+    inspector = inspect(engine)
+    assert set(inspector.get_table_names()).isdisjoint(
+        {
+            "candidate_facts",
+            "candidate_reviews",
+            "company_manifests",
+            "company_manifest_members",
+            "entry_discovery_observations",
+        }
+    )
+    assert {
+        index["name"] for index in inspector.get_indexes("job_entries")
+    }.isdisjoint({"uq_job_entries_id_company"})
+    with engine.connect() as connection:
+        assert connection.scalar(
+            text("SELECT count(*) FROM companies WHERE id IN (:first, :second)"),
+            {"first": company_id, "second": other_company_id},
+        ) == 2
+        assert connection.scalar(
+            text("SELECT count(*) FROM job_entries WHERE id = :id"), {"id": entry_id}
+        ) == 1
+        assert connection.scalar(
+            text("SELECT count(*) FROM job_collection_snapshots WHERE id = :id"),
+            {"id": snapshot_id},
+        ) == 1
+        assert connection.execute(
+            text(
+                "SELECT job_entry_id, last_seen_snapshot_id FROM job_sources "
+                "WHERE id = :id"
+            ),
+            {"id": source_id},
+        ).one() == (entry_id, snapshot_id)
+        assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
+
+
+def test_gate1_manifest_discovery_emits_named_postgresql_ddl() -> None:
+    migration_path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "0008_gate1_manifest_discovery.py"
+    )
+    migration = runpy.run_path(str(migration_path))
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect=postgresql.dialect(),
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    migration["upgrade"].__globals__["op"] = Operations(context)
+
+    migration["upgrade"]()
+
+    sql = " ".join(output.getvalue().split())
+    assert "CONSTRAINT uq_job_entries_id_company UNIQUE (id, company_id)" in sql
+    for constraint_name in (
+        "fk_candidate_facts_company_id",
+        "fk_candidate_reviews_candidate_fact_id",
+        "fk_candidate_reviews_resulting_company_id",
+        "fk_manifest_members_manifest_version",
+        "fk_manifest_members_company_id",
+        "fk_discovery_observations_manifest_version",
+        "fk_discovery_observations_company_id",
+        "fk_discovery_observation_entry_company",
+        "uq_candidate_fact_evidence",
+        "uq_manifest_member_position",
+        "uq_manifest_member_company",
+    ):
+        assert f"CONSTRAINT {constraint_name}" in sql
+    for index_name in (
+        "ix_candidate_facts_decision_category",
+        "ix_candidate_reviews_candidate_decided",
+        "ix_manifest_members_company",
+        "ix_discovery_observations_manifest_status",
+        "ix_discovery_observations_company_observed",
+    ):
+        assert f"CREATE INDEX {index_name}" in sql
+
+
+def test_gate1_manifest_discovery_default_sqlite_offline_upgrade_completes() -> None:
+    output = StringIO()
+    config = Config(Path(__file__).parents[2] / "alembic.ini", output_buffer=output)
+    config.set_main_option("sqlalchemy.url", "sqlite://")
+
+    command.upgrade(config, "head", sql=True)
+
+    sql = " ".join(output.getvalue().split())
+    assert "CREATE UNIQUE INDEX uq_job_entries_id_company ON job_entries (id, company_id)" in sql
+    for table_name in (
+        "candidate_facts",
+        "candidate_reviews",
+        "company_manifests",
+        "company_manifest_members",
+        "entry_discovery_observations",
+    ):
+        assert f"CREATE TABLE {table_name}" in sql
+    assert "CONSTRAINT fk_discovery_observation_entry_company" in sql
+    assert "FOREIGN KEY(job_entry_id, company_id)" in sql
+    assert "REFERENCES job_entries (id, company_id) ON DELETE RESTRICT" in sql
+
+
+def test_gate1_manifest_discovery_default_sqlite_offline_downgrade_completes() -> None:
+    output = StringIO()
+    config = Config(Path(__file__).parents[2] / "alembic.ini", output_buffer=output)
+    config.set_main_option("sqlalchemy.url", "sqlite://")
+
+    command.downgrade(
+        config,
+        "0008_gate1_manifest_discovery:0007_job_source_snapshot_lifecycle",
+        sql=True,
+    )
+
+    sql = " ".join(output.getvalue().split())
+    for table_name in (
+        "entry_discovery_observations",
+        "company_manifest_members",
+        "company_manifests",
+        "candidate_reviews",
+        "candidate_facts",
+    ):
+        assert f"DROP TABLE {table_name}" in sql
+    assert "DROP INDEX uq_job_entries_id_company" in sql
+
+
 def test_job_source_snapshot_lifecycle_emits_named_postgresql_ddl() -> None:
     migration_path = (
         Path(__file__).parents[2]
@@ -985,12 +1421,13 @@ def test_job_entries_postgresql_schema_round_trip() -> None:
                 )
         finally:
             legacy_schema_engine.dispose()
-        command.upgrade(config, "head")
+        command.upgrade(config, "0007_job_source_snapshot_lifecycle")
         schema_engine = create_engine(schema_url)
         try:
             with schema_engine.begin() as connection:
                 company_id = str(uuid4())
                 entry_id = str(uuid4())
+                snapshot_id = str(uuid4())
                 job_id = str(uuid4())
                 source_id = str(uuid4())
                 created_at = "2026-08-05 00:00:00+00:00"
@@ -1043,7 +1480,7 @@ def test_job_entries_postgresql_schema_round_trip() -> None:
                         ":created_at, :created_at, :created_at)"
                     ),
                     {
-                        "id": str(uuid4()),
+                        "id": snapshot_id,
                         "entry_id": entry_id,
                         "command_hash": "b" * 64,
                         "created_at": created_at,
@@ -1064,6 +1501,103 @@ def test_job_entries_postgresql_schema_round_trip() -> None:
                 ) is False
                 assert connection.scalar(text("SELECT count(*) FROM job_entries")) == 1
                 assert connection.scalar(text("SELECT count(*) FROM job_collection_snapshots")) == 1
+        finally:
+            schema_engine.dispose()
+
+        command.upgrade(config, "head")
+        schema_engine = create_engine(schema_url)
+        try:
+            with schema_engine.begin() as connection:
+                inspector = inspect(connection)
+                assert set(inspector.get_table_names()) >= EXPECTED_TABLES
+                assert {
+                    constraint["name"]
+                    for constraint in inspector.get_unique_constraints("job_entries")
+                } >= {"uq_job_entries_id_company"}
+                other_company_id = str(uuid4())
+                manifest_version = "a" * 64
+                connection.execute(
+                    text(
+                        "INSERT INTO companies "
+                        "(id, canonical_name, normalized_name, funding_stage, scale, "
+                        "created_at, updated_at) VALUES "
+                        "(:id, 'Postgres Other', 'postgres other', 'unknown', 'unknown', "
+                        ":created_at, :created_at)"
+                    ),
+                    {"id": other_company_id, "created_at": created_at},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO company_manifests "
+                        "(version, config_fingerprint, member_count, canonical_quota, "
+                        "frozen_at) VALUES (:version, :fingerprint, 1, '{}', :created_at)"
+                    ),
+                    {
+                        "version": manifest_version,
+                        "fingerprint": "b" * 64,
+                        "created_at": created_at,
+                    },
+                )
+                observation_insert = (
+                    "INSERT INTO entry_discovery_observations "
+                    "(id, manifest_version, company_id, method, status, "
+                    "requires_rendering, job_entry_id, observed_at) VALUES "
+                    "(:id, :version, :company_id, 'official_site', 'accepted', false, "
+                    ":entry_id, :created_at)"
+                )
+                connection.execute(
+                    text(observation_insert),
+                    {
+                        "id": str(uuid4()),
+                        "version": manifest_version,
+                        "company_id": company_id,
+                        "entry_id": entry_id,
+                        "created_at": created_at,
+                    },
+                )
+                _expect_integrity_error(
+                    connection,
+                    observation_insert,
+                    {
+                        "id": str(uuid4()),
+                        "version": manifest_version,
+                        "company_id": other_company_id,
+                        "entry_id": entry_id,
+                        "created_at": created_at,
+                    },
+                )
+        finally:
+            schema_engine.dispose()
+
+        command.downgrade(config, "0007_job_source_snapshot_lifecycle")
+        schema_engine = create_engine(schema_url)
+        try:
+            with schema_engine.connect() as connection:
+                assert connection.scalar(
+                    text("SELECT count(*) FROM companies WHERE id = :id"),
+                    {"id": company_id},
+                ) == 1
+                assert connection.scalar(
+                    text("SELECT count(*) FROM job_entries WHERE id = :id"),
+                    {"id": entry_id},
+                ) == 1
+                assert connection.scalar(
+                    text("SELECT count(*) FROM job_collection_snapshots WHERE id = :id"),
+                    {"id": snapshot_id},
+                ) == 1
+                assert connection.scalar(
+                    text("SELECT count(*) FROM job_sources WHERE id = :id"),
+                    {"id": source_id},
+                ) == 1
+                assert set(inspect(connection).get_table_names()).isdisjoint(
+                    {
+                        "candidate_facts",
+                        "candidate_reviews",
+                        "company_manifests",
+                        "company_manifest_members",
+                        "entry_discovery_observations",
+                    }
+                )
         finally:
             schema_engine.dispose()
 
