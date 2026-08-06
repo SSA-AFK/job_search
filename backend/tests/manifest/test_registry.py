@@ -57,6 +57,30 @@ def test_registry_rejects_unreviewed_or_invalid_entries(
         load_source_registry(write_registry(tmp_path, entries=[entry]))
 
 
+def test_registry_rejects_credential_query_parameters_without_echoing_values(tmp_path: Path) -> None:
+    path = write_registry(
+        tmp_path,
+        entries=[registry_entry(base_url="https://example.com/public?Api_Key=not-a-secret")],
+    )
+
+    with pytest.raises(SourceRegistryError) as error:
+        load_source_registry(path)
+
+    assert str(error.value) == "source registry is invalid"
+    assert "not-a-secret" not in str(error.value)
+
+
+def test_registry_allows_ordinary_public_query_parameters(tmp_path: Path) -> None:
+    registry = load_source_registry(
+        write_registry(
+            tmp_path,
+            entries=[registry_entry(base_url="https://example.com/public?locale=en&page=2")],
+        )
+    )
+
+    assert str(registry.require("official_list").base_url).endswith("locale=en&page=2")
+
+
 def test_registry_allows_independently_budgeted_entries_on_one_host(tmp_path: Path) -> None:
     path = write_registry(
         tmp_path,

@@ -1,14 +1,55 @@
 """Validated immutable contracts for the Gate 1 manifest domain."""
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Annotated, Literal
+from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from app.ingestion.contracts import DocumentUrl
+
+_CREDENTIAL_QUERY_NAMES = frozenset(
+    {
+        "apikey",
+        "accesstoken",
+        "authorization",
+        "auth",
+        "clientsecret",
+        "key",
+        "password",
+        "passwd",
+        "secret",
+        "signature",
+        "sig",
+        "token",
+    }
+)
+
+
+def _require_credential_free_query(value: HttpUrl) -> HttpUrl:
+    for parameter_name, _ in parse_qsl(urlsplit(str(value)).query, keep_blank_values=True):
+        normalized_name = "".join(character for character in parameter_name.casefold() if character.isalnum())
+        if normalized_name in _CREDENTIAL_QUERY_NAMES:
+            raise ValueError("URL must not contain credential query parameters")
+    return value
+
+
+RegistryUrl = Annotated[DocumentUrl, AfterValidator(_require_credential_free_query)]
 
 
 class AiCategory(StrEnum):
@@ -71,7 +112,7 @@ class FrozenManifestDTO(BaseModel):
 class SourceRegistryEntry(FrozenManifestDTO):
     id: str = Field(pattern=r"^[a-z][a-z0-9_]{2,49}$")
     name: str = Field(min_length=1, max_length=100)
-    base_url: DocumentUrl
+    base_url: RegistryUrl
     source_class: SourceClass
     authorization_basis: str = Field(min_length=10, max_length=500)
     robots_policy: Literal["required", "api_contract"]
@@ -178,5 +219,31 @@ class AtsCensus(FrozenManifestDTO):
     manifest_version: str = Field(pattern=r"^[0-9a-f]{64}$")
     manifest_companies: int = Field(ge=0, le=1_000)
     accepted_entries: int = Field(ge=0, le=100_000)
-    platform_entry_counts: dict[str, int] = Field(default_factory=dict, max_length=100)
-    status_counts: dict[DiscoveryStatus, int] = Field(default_factory=dict, max_length=100)
+    platform_entry_counts: Mapping[str, int] = Field(
+        default_factory=dict, max_length=100, validate_default=True
+    )
+    status_counts: Mapping[DiscoveryStatus, int] = Field(
+        default_factory=dict, max_length=100, validate_default=True
+    )
+
+    @field_validator("platform_entry_counts")
+    @classmethod
+    def freeze_platform_counts(cls, value: Mapping[str, int]) -> Mapping[str, int]:
+        return MappingProxyType(dict(value))
+
+    @field_validator("status_counts")
+    @classmethod
+    def freeze_status_counts(
+        cls, value: Mapping[DiscoveryStatus, int]
+    ) -> Mapping[DiscoveryStatus, int]:
+        return MappingProxyType(dict(value))
+
+    @field_serializer("platform_entry_counts")
+    def serialize_platform_counts(self, value: Mapping[str, int]) -> dict[str, int]:
+        return dict(value)
+
+    @field_serializer("status_counts")
+    def serialize_status_counts(
+        self, value: Mapping[DiscoveryStatus, int]
+    ) -> dict[DiscoveryStatus, int]:
+        return dict(value)

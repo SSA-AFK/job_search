@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
-from app.manifest.contracts import AiCategory, CandidateFactInput
+from app.manifest.contracts import AiCategory, AtsCensus, CandidateFactInput, DiscoveryStatus
 
 
 def candidate_fact(**overrides: object) -> CandidateFactInput:
@@ -61,3 +61,25 @@ def test_candidate_fact_keeps_public_identity_fields_typed() -> None:
     assert fact.official_website is not None
     assert fact.recruitment_url is not None
     assert fact.primary_category is AiCategory.FOUNDATION_MODELS
+
+
+def test_ats_census_deep_freezes_count_mappings_without_changing_json_output() -> None:
+    census = AtsCensus(
+        manifest_version="a" * 64,
+        manifest_companies=1,
+        accepted_entries=1,
+        platform_entry_counts={"moka": 1},
+        status_counts={DiscoveryStatus.ACCEPTED: 1},
+    )
+
+    with pytest.raises(TypeError):
+        census.platform_entry_counts["moka"] = 2
+    with pytest.raises(TypeError):
+        census.status_counts[DiscoveryStatus.NOT_FOUND] = 1
+    assert census.model_dump(mode="json") == {
+        "manifest_version": "a" * 64,
+        "manifest_companies": 1,
+        "accepted_entries": 1,
+        "platform_entry_counts": {"moka": 1},
+        "status_counts": {"accepted": 1},
+    }
