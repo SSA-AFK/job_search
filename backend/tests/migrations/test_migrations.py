@@ -126,6 +126,7 @@ def test_initial_migration_round_trip(tmp_path: Path) -> None:
         "job_entry_id",
         "last_seen_snapshot_id",
         "missing_complete_snapshots",
+        "lifecycle_managed",
     }
     assert {index["name"] for index in inspector.get_indexes("companies")} >= {
         "ix_companies_normalized_name",
@@ -594,11 +595,12 @@ def test_job_source_snapshot_lifecycle_round_trip_preserves_legacy_rows(
     with engine.begin() as connection:
         assert connection.execute(
             text(
-                "SELECT job_entry_id, last_seen_snapshot_id, missing_complete_snapshots "
+                "SELECT job_entry_id, last_seen_snapshot_id, missing_complete_snapshots, "
+                "lifecycle_managed "
                 "FROM job_sources WHERE id = :id"
             ),
             {"id": source_id},
-        ).one() == (None, None, 0)
+        ).one() == (None, None, 0, 0)
         assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
         connection.execute(
             text(
@@ -628,7 +630,8 @@ def test_job_source_snapshot_lifecycle_round_trip_preserves_legacy_rows(
         connection.execute(
             text(
                 "UPDATE job_sources SET job_entry_id = :entry_id, "
-                "last_seen_snapshot_id = :snapshot_id, missing_complete_snapshots = 2 "
+                "last_seen_snapshot_id = :snapshot_id, missing_complete_snapshots = 2, "
+                "lifecycle_managed = 1 "
                 "WHERE id = :source_id"
             ),
             {"entry_id": entry_id, "snapshot_id": snapshot_id, "source_id": source_id},
@@ -690,6 +693,7 @@ def test_job_source_snapshot_lifecycle_emits_named_postgresql_ddl() -> None:
     migration["upgrade"]()
 
     sql = " ".join(output.getvalue().split())
+    assert "lifecycle_managed BOOLEAN DEFAULT false NOT NULL" in sql
     assert "ADD CONSTRAINT fk_job_sources_job_entry_id FOREIGN KEY(job_entry_id)" in sql
     assert "REFERENCES job_entries (id) ON DELETE SET NULL" in sql
     assert (
@@ -738,6 +742,7 @@ def test_job_source_snapshot_lifecycle_default_sqlite_offline_upgrade_completes(
     assert "job_entry_id CHAR(36)" in sql
     assert "last_seen_snapshot_id CHAR(36)" in sql
     assert "missing_complete_snapshots INTEGER DEFAULT 0 NOT NULL" in sql
+    assert "lifecycle_managed BOOLEAN DEFAULT false NOT NULL" in sql
     assert "FOREIGN KEY(job_entry_id) REFERENCES job_entries (id) ON DELETE SET NULL" in sql
     assert (
         "FOREIGN KEY(last_seen_snapshot_id) REFERENCES job_collection_snapshots (id) "
@@ -766,6 +771,7 @@ def test_job_source_snapshot_lifecycle_default_sqlite_offline_downgrade_complete
     assert "FOREIGN KEY(job_posting_id) REFERENCES job_postings (id) ON DELETE CASCADE" in sql
     assert "FOREIGN KEY(source_document_id) REFERENCES source_documents (id) ON DELETE SET NULL" in sql
     assert "missing_complete_snapshots" not in sql
+    assert "lifecycle_managed" not in sql
     assert "ix_job_sources_entry_active" not in sql
     assert "ix_job_sources_posting_active" not in sql
 
@@ -985,6 +991,8 @@ def test_job_entries_postgresql_schema_round_trip() -> None:
             with schema_engine.begin() as connection:
                 company_id = str(uuid4())
                 entry_id = str(uuid4())
+                job_id = str(uuid4())
+                source_id = str(uuid4())
                 created_at = "2026-08-05 00:00:00+00:00"
                 connection.execute(
                     text(
@@ -995,6 +1003,26 @@ def test_job_entries_postgresql_schema_round_trip() -> None:
                         ":created_at, :created_at)"
                     ),
                     {"id": company_id, "created_at": created_at},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO job_postings "
+                        "(id, company_id, title, normalized_title, job_type, city, "
+                        "description, is_active, created_at, updated_at) VALUES "
+                        "(:id, :company_id, 'Engineer', 'engineer', 'full_time', '', '', true, "
+                        ":created_at, :created_at)"
+                    ),
+                    {"id": job_id, "company_id": company_id, "created_at": created_at},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO job_sources "
+                        "(id, job_posting_id, provider, source_raw_id, apply_url, "
+                        "first_seen_at, last_seen_at, is_active) VALUES "
+                        "(:id, :job_id, 'legacy', 'legacy-job-1', "
+                        "'https://example.com/legacy-job-1', :created_at, :created_at, true)"
+                    ),
+                    {"id": source_id, "job_id": job_id, "created_at": created_at},
                 )
                 connection.execute(
                     text(
@@ -1027,6 +1055,12 @@ def test_job_entries_postgresql_schema_round_trip() -> None:
                         "WHERE job_entry_id = :entry_id"
                     ),
                     {"entry_id": entry_id},
+                ) is False
+                assert connection.scalar(
+                    text(
+                        "SELECT lifecycle_managed FROM job_sources WHERE id = :source_id"
+                    ),
+                    {"source_id": source_id},
                 ) is False
                 assert connection.scalar(text("SELECT count(*) FROM job_entries")) == 1
                 assert connection.scalar(text("SELECT count(*) FROM job_collection_snapshots")) == 1

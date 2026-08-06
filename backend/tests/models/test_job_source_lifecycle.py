@@ -61,6 +61,7 @@ def test_job_source_lifecycle_references_clear_when_entry_and_snapshot_are_delet
         job_posting_id=posting.id,
         job_entry_id=entry.id,
         last_seen_snapshot_id=snapshot.id,
+        lifecycle_managed=True,
         provider="official",
         source_raw_id="job-1",
         apply_url="https://example.com/jobs/1",
@@ -70,17 +71,46 @@ def test_job_source_lifecycle_references_clear_when_entry_and_snapshot_are_delet
 
     assert source.missing_complete_snapshots == 0
     assert JobSource.__table__.c.missing_complete_snapshots.server_default is not None
+    assert source.lifecycle_managed is True
+    assert JobSource.__table__.c.lifecycle_managed.server_default is not None
 
     session.delete(snapshot)
     session.commit()
     session.refresh(source)
     assert source.job_entry_id == entry.id
     assert source.last_seen_snapshot_id is None
+    assert source.lifecycle_managed is True
 
     session.delete(entry)
     session.commit()
     session.refresh(source)
     assert source.job_entry_id is None
+    assert source.lifecycle_managed is True
+
+
+def test_job_source_lifecycle_managed_defaults_false(session: Session) -> None:
+    company = Company(canonical_name="Default", normalized_name="default")
+    session.add(company)
+    session.flush()
+    posting = JobPosting(
+        company_id=company.id,
+        title="Engineer",
+        normalized_title="engineer",
+        city="Shanghai",
+        description="Build systems",
+    )
+    session.add(posting)
+    session.flush()
+    source = JobSource(
+        job_posting_id=posting.id,
+        provider="legacy",
+        source_raw_id="legacy-job-1",
+        apply_url="https://example.com/legacy/jobs/1",
+    )
+    session.add(source)
+    session.commit()
+
+    assert source.lifecycle_managed is False
 
 
 def test_job_source_lifecycle_index_matches_query_contract() -> None:

@@ -57,6 +57,12 @@ _JOB_SOURCES_POST_LIFECYCLE = sa.Table(
         server_default=sa.text("0"),
         nullable=False,
     ),
+    sa.Column(
+        "lifecycle_managed",
+        sa.Boolean(),
+        server_default=sa.text("false"),
+        nullable=False,
+    ),
     sa.Column("provider", sa.String(50), nullable=False),
     sa.Column("source_raw_id", sa.String(255), nullable=False),
     sa.Column("apply_url", sa.String(2000), nullable=False),
@@ -116,6 +122,14 @@ def upgrade() -> None:
                     nullable=False,
                 )
             )
+            batch_op.add_column(
+                sa.Column(
+                    "lifecycle_managed",
+                    sa.Boolean(),
+                    server_default=sa.text("false"),
+                    nullable=False,
+                )
+            )
             batch_op.create_foreign_key(
                 ENTRY_FK_NAME,
                 "job_entries",
@@ -148,6 +162,15 @@ def upgrade() -> None:
             "missing_complete_snapshots",
             sa.Integer(),
             server_default=sa.text("0"),
+            nullable=False,
+        ),
+    )
+    op.add_column(
+        "job_sources",
+        sa.Column(
+            "lifecycle_managed",
+            sa.Boolean(),
+            server_default=sa.text("false"),
             nullable=False,
         ),
     )
@@ -192,6 +215,7 @@ def downgrade() -> None:
             batch_op.drop_index(ENTRY_ACTIVE_INDEX_NAME)
             batch_op.drop_constraint(SNAPSHOT_FK_NAME, type_="foreignkey")
             batch_op.drop_constraint(ENTRY_FK_NAME, type_="foreignkey")
+            batch_op.drop_column("lifecycle_managed")
             batch_op.drop_column("missing_complete_snapshots")
             batch_op.drop_column("last_seen_snapshot_id")
             batch_op.drop_column("job_entry_id")
@@ -201,6 +225,7 @@ def downgrade() -> None:
     op.drop_index(ENTRY_ACTIVE_INDEX_NAME, table_name="job_sources")
     op.drop_constraint(SNAPSHOT_FK_NAME, "job_sources", type_="foreignkey")
     op.drop_constraint(ENTRY_FK_NAME, "job_sources", type_="foreignkey")
+    op.drop_column("job_sources", "lifecycle_managed")
     op.drop_column("job_sources", "missing_complete_snapshots")
     op.drop_column("job_sources", "last_seen_snapshot_id")
     op.drop_column("job_sources", "job_entry_id")

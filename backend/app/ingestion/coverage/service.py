@@ -120,6 +120,7 @@ class JobCoverageService:
         for source in sources:
             if source.id not in command.seen_source_ids:
                 continue
+            source.lifecycle_managed = True
             if not source.is_active:
                 counters.sources_reactivated += 1
             source.last_seen_snapshot_id = snapshot.id
@@ -130,6 +131,7 @@ class JobCoverageService:
         for source in sources:
             if source.id in command.seen_source_ids:
                 continue
+            source.lifecycle_managed = True
             source.missing_complete_snapshots += 1
             counters.sources_missing_incremented += 1
             if (

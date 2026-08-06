@@ -12,6 +12,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -82,4 +83,7 @@ class JobSource(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     missing_complete_snapshots: Mapped[int] = mapped_column(
         Integer, default=0, server_default="0", nullable=False
+    )
+    lifecycle_managed: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
     )

@@ -3,7 +3,7 @@
 from datetime import timedelta
 from typing import Any, cast
 
-from sqlalchemy import exists, select, update
+from sqlalchemy import exists, or_, select, update
 from sqlalchemy.engine import CursorResult
 
 from app.core.database import SessionLocal
@@ -20,8 +20,10 @@ def expire_stale_job_sources() -> dict[str, int]:
     try:
         stale_fallback_source = (
             JobSource.is_active.is_(True),
-            JobSource.last_seen_snapshot_id.is_(None),
-            JobSource.missing_complete_snapshots == 0,
+            or_(
+                JobSource.job_entry_id.is_(None),
+                JobSource.lifecycle_managed.is_(False),
+            ),
             JobSource.last_seen_at < cutoff,
         )
         affected_job_ids = session.scalars(

@@ -148,6 +148,7 @@ def test_two_complete_absences_deactivate_source_and_posting(
     assert first.jobs_recomputed == 1
     assert session.get(JobCollectionSnapshot, first.snapshot_id) is not None
     assert rows.source.missing_complete_snapshots == 1
+    assert rows.source.lifecycle_managed is True
     assert rows.source.is_active is True
 
     second = service.record(
@@ -162,6 +163,7 @@ def test_two_complete_absences_deactivate_source_and_posting(
     assert second.snapshot_id != first.snapshot_id
     assert session.get(JobCollectionSnapshot, second.snapshot_id) is not None
     assert rows.source.missing_complete_snapshots == 2
+    assert rows.source.lifecycle_managed is True
     assert rows.source.is_active is False
     assert rows.posting.is_active is False
 
@@ -184,6 +186,7 @@ def test_noncomplete_snapshot_updates_health_without_changing_sources(
     assert result.sources_reactivated == 0
     assert result.jobs_recomputed == 0
     assert rows.source.missing_complete_snapshots == 0
+    assert rows.source.lifecycle_managed is False
     assert rows.source.is_active is True
     assert rows.source.last_seen_at == previous_seen_at
     assert rows.entry.failure_count == 1
@@ -399,6 +402,7 @@ def test_seen_source_reactivates_resets_counter_and_updates_last_seen(
     assert result.jobs_recomputed == 1
     assert rows.source.is_active is True
     assert rows.source.missing_complete_snapshots == 0
+    assert rows.source.lifecycle_managed is True
     assert rows.source.last_seen_at == NOW
     assert rows.source.last_seen_snapshot_id == result.snapshot_id
     assert rows.posting.is_active is True
@@ -602,9 +606,12 @@ def test_complete_snapshot_does_not_mutate_legacy_or_unrelated_entry_sources(
     service.record(snapshot_command(session, rows))
 
     assert rows.source.missing_complete_snapshots == 1
+    assert rows.source.lifecycle_managed is True
     assert legacy.missing_complete_snapshots == 7
+    assert legacy.lifecycle_managed is False
     assert legacy.is_active is True
     assert unrelated.missing_complete_snapshots == 9
+    assert unrelated.lifecycle_managed is False
     assert unrelated.is_active is False
 
 
@@ -889,6 +896,7 @@ def test_flush_failure_rolls_back_mixed_source_posting_and_entry_lifecycle(
                     row.missing_complete_snapshots,
                     row.last_seen_snapshot_id,
                     row.last_seen_at,
+                    row.lifecycle_managed,
                 )
                 for row in connection.execute(
                     select(
@@ -897,6 +905,7 @@ def test_flush_failure_rolls_back_mixed_source_posting_and_entry_lifecycle(
                         JobSource.missing_complete_snapshots,
                         JobSource.last_seen_snapshot_id,
                         JobSource.last_seen_at,
+                        JobSource.lifecycle_managed,
                     ).where(JobSource.id.in_((seen_source_id, unseen_source_id)))
                 )
             }
@@ -938,8 +947,8 @@ def test_flush_failure_rolls_back_mixed_source_posting_and_entry_lifecycle(
     assert isinstance(snapshot_ids, tuple) and len(snapshot_ids) == 1
     snapshot_id = snapshot_ids[0]
     assert before_rollback["sources"] == {
-        seen_source_id: (True, 0, snapshot_id, NOW),
-        unseen_source_id: (False, 2, None, original_unseen_at),
+        seen_source_id: (True, 0, snapshot_id, NOW, True),
+        unseen_source_id: (False, 2, None, original_unseen_at, True),
     }
     assert before_rollback["postings"] == {
         seen_posting_id: True,
@@ -957,11 +966,13 @@ def test_flush_failure_rolls_back_mixed_source_posting_and_entry_lifecycle(
     assert persisted_seen.is_active is False
     assert persisted_seen.last_seen_snapshot_id is None
     assert persisted_seen.last_seen_at == original_seen_at
+    assert persisted_seen.lifecycle_managed is False
     assert persisted_unseen is not None
     assert persisted_unseen.missing_complete_snapshots == 1
     assert persisted_unseen.is_active is True
     assert persisted_unseen.last_seen_snapshot_id is None
     assert persisted_unseen.last_seen_at == original_unseen_at
+    assert persisted_unseen.lifecycle_managed is False
     assert persisted_seen_posting is not None
     assert persisted_seen_posting.is_active is False
     assert persisted_unseen_posting is not None
