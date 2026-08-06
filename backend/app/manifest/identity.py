@@ -1,6 +1,7 @@
 """Conservative recruiting-identity resolution and append-only manual reviews."""
 
 import json
+import re
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -72,6 +73,17 @@ _SHARED_ATS_TENANT_PATH_HOSTS = frozenset(
 _GREENHOUSE_HOSTS = frozenset(
     {"boards.greenhouse.io", "job-boards.greenhouse.io"}
 )
+_IDENTITY_SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$")
+
+
+@dataclass(frozen=True)
+class _RecruitmentEvidence:
+    identity: str | None
+    ambiguous: bool
+
+
+_NO_RECRUITMENT_EVIDENCE = _RecruitmentEvidence(identity=None, ambiguous=False)
+_AMBIGUOUS_RECRUITMENT_EVIDENCE = _RecruitmentEvidence(identity=None, ambiguous=True)
 
 
 @contextmanager
@@ -98,33 +110,68 @@ def _sanitized_public_url(value: str | None) -> str | None:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
-def _recruitment_identity(value: str | None) -> str | None:
+def _identity_segment(value: str) -> str | None:
+    return value if _IDENTITY_SEGMENT_PATTERN.fullmatch(value) else None
+
+
+def _recruitment_evidence(value: str | None) -> _RecruitmentEvidence:
+    if value is None:
+        return _NO_RECRUITMENT_EVIDENCE
     normalized = _normalized_url(value)
     if normalized is None:
-        return None
+        return _AMBIGUOUS_RECRUITMENT_EVIDENCE
     parts = urlsplit(normalized)
     host = None if parts.hostname is None else parts.hostname.removesuffix(".")
     path_parts = tuple(part for part in parts.path.split("/") if part)
     if host in _SHARED_ATS_TENANT_PATH_HOSTS:
         if not path_parts:
-            return None
+            return _AMBIGUOUS_RECRUITMENT_EVIDENCE
         if host in _GREENHOUSE_HOSTS and path_parts[0] == "embed":
             tenants = tuple(
                 tenant
                 for tenant in parse_qs(parts.query).get("for", ())
-                if tenant
+                if _identity_segment(tenant) is not None
             )
             if len(tenants) == 1:
-                return f"tenant:{host}:{tenants[0]}"
-            return None
+                return _RecruitmentEvidence(
+                    identity=f"tenant:{host}:{tenants[0]}", ambiguous=False
+                )
+            return _AMBIGUOUS_RECRUITMENT_EVIDENCE
         if host == "apply.workable.com" and path_parts[0] == "j":
-            return f"url:{normalized}" if len(path_parts) > 1 else None
-        return f"tenant:{host}:{path_parts[0]}"
-    if host is not None and host.endswith(
-        (".myworkdayjobs.com", ".myworkdaysite.com")
-    ):
-        return f"tenant:{host}"
-    return f"url:{normalized}"
+            if len(path_parts) > 1 and _identity_segment(path_parts[1]) is not None:
+                return _RecruitmentEvidence(identity=f"url:{normalized}", ambiguous=False)
+            return _AMBIGUOUS_RECRUITMENT_EVIDENCE
+        tenant = _identity_segment(path_parts[0])
+        if tenant is None:
+            return _AMBIGUOUS_RECRUITMENT_EVIDENCE
+        return _RecruitmentEvidence(
+            identity=f"tenant:{host}:{tenant}", ambiguous=False
+        )
+    if host is not None and host.endswith(".myworkdaysite.com"):
+        if (
+            len(path_parts) >= 2
+            and path_parts[0] == "recruiting"
+            and (tenant := _identity_segment(path_parts[1])) is not None
+        ):
+            return _RecruitmentEvidence(
+                identity=f"tenant:{host}:{tenant}", ambiguous=False
+            )
+        return _AMBIGUOUS_RECRUITMENT_EVIDENCE
+    if host is not None and host.endswith(".myworkdayjobs.com"):
+        host_prefix = host.removesuffix(".myworkdayjobs.com")
+        prefix_parts = tuple(part for part in host_prefix.split(".") if part)
+        if (
+            len(prefix_parts) >= 2
+            and _identity_segment(prefix_parts[0]) is not None
+            and re.fullmatch(r"wd[0-9]+", prefix_parts[-1]) is not None
+        ):
+            return _RecruitmentEvidence(identity=f"tenant:{host}", ambiguous=False)
+        return _AMBIGUOUS_RECRUITMENT_EVIDENCE
+    return _RecruitmentEvidence(identity=f"url:{normalized}", ambiguous=False)
+
+
+def _recruitment_identity(value: str | None) -> str | None:
+    return _recruitment_evidence(value).identity
 
 
 def _identity_names(fact: CandidateFact) -> frozenset[str]:
@@ -212,6 +259,19 @@ def _has_separable_recruiting_inventories(
         if (identity := _recruitment_identity(entry.normalized_url)) is not None
     )
     return len(identities) > 1
+
+
+def _has_ambiguous_recruitment_evidence(
+    facts: Sequence[CandidateFact],
+    entries: Sequence[JobEntry] = (),
+) -> bool:
+    return any(
+        _recruitment_evidence(value).ambiguous
+        for value in (
+            *(fact.recruitment_url for fact in facts),
+            *(entry.normalized_url for entry in entries),
+        )
+    )
 
 
 def _name_owners(
@@ -428,6 +488,9 @@ def auto_resolve_candidates(session: Session) -> IdentityResolutionSummary:
                 or _has_separable_recruiting_inventories(
                     context_facts, context_entries
                 )
+                or _has_ambiguous_recruitment_evidence(
+                    context_facts, context_entries
+                )
                 or len(owner_ids) > 1
                 or not fuzzy_existing_owner_ids.issubset(owner_ids)
                 or not _aliases_fit_storage(group_facts)
@@ -607,7 +670,7 @@ def _apply_one_decision(
     fact = session.scalar(
         select(CandidateFact).where(
             CandidateFact.stable_evidence_id == decision.stable_evidence_id
-        )
+        ).with_for_update().execution_options(populate_existing=True)
     )
     if fact is None:
         raise ReviewDecisionConflict("review decision references unknown evidence")

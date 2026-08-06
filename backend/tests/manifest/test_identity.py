@@ -6,7 +6,9 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import create_engine, event, func, select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import Select
 
 from app.core.normalization import normalize_name
 from app.manifest.contracts import (
@@ -186,7 +188,7 @@ def test_shared_ats_hostname_alone_does_not_merge_tenants(session: Session) -> N
     "shared_root_url",
     ["https://jobs.lever.co/", "https://jobs.lever.co./"],
 )
-def test_shared_ats_root_url_alone_does_not_merge_companies(
+def test_shared_ats_root_url_requires_review(
     session: Session,
     shared_root_url: str,
 ) -> None:
@@ -206,8 +208,8 @@ def test_shared_ats_root_url_alone_does_not_merge_companies(
 
     summary = auto_resolve_candidates(session)
 
-    assert summary == IdentityResolutionSummary(auto_accepted=2, review_required=0)
-    assert session.scalar(select(func.count()).select_from(Company)) == 2
+    assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=2)
+    assert session.scalar(select(func.count()).select_from(Company)) == 0
 
 
 def test_embedded_greenhouse_tenant_query_prevents_shared_host_merge(
@@ -244,7 +246,7 @@ def test_embedded_greenhouse_tenant_query_prevents_shared_host_merge(
         "https://apply.workable.com/j/",
     ],
 )
-def test_generic_shared_ats_path_does_not_merge_without_identity_evidence(
+def test_generic_shared_ats_path_requires_review_without_identity_evidence(
     session: Session,
     generic_url: str,
 ) -> None:
@@ -256,8 +258,73 @@ def test_generic_shared_ats_path_does_not_merge_without_identity_evidence(
 
     summary = auto_resolve_candidates(session)
 
+    assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=2)
+    assert session.scalar(select(func.count()).select_from(Company)) == 0
+
+
+def test_workday_shard_path_tenants_do_not_merge(session: Session) -> None:
+    persist_candidates(
+        session,
+        candidate(
+            "workday-one",
+            "Workday One Robotics",
+            recruitment_url=(
+                "https://wd1.myworkdaysite.com/recruiting/company-a/jobs/engineering"
+            ),
+        ),
+        candidate(
+            "workday-two",
+            "Workday Two Vision",
+            recruitment_url=(
+                "https://wd1.myworkdaysite.com/recruiting/company-b/jobs/research"
+            ),
+        ),
+    )
+
+    summary = auto_resolve_candidates(session)
+
     assert summary == IdentityResolutionSummary(auto_accepted=2, review_required=0)
     assert session.scalar(select(func.count()).select_from(Company)) == 2
+
+
+def test_exact_workday_path_tenant_merges_different_pages(session: Session) -> None:
+    persist_candidates(
+        session,
+        candidate(
+            "workday-page-one",
+            "Workday Parent",
+            recruitment_url=(
+                "https://wd1.myworkdaysite.com/recruiting/company-a/jobs/engineering"
+            ),
+        ),
+        candidate(
+            "workday-page-two",
+            "Workday Product",
+            recruitment_url=(
+                "https://wd1.myworkdaysite.com/recruiting/company-a/jobs/research"
+            ),
+        ),
+    )
+
+    summary = auto_resolve_candidates(session)
+
+    assert summary == IdentityResolutionSummary(auto_accepted=2, review_required=0)
+    assert session.scalar(select(func.count()).select_from(Company)) == 1
+
+
+def test_unknown_workday_shard_path_requires_review(session: Session) -> None:
+    fact = candidate(
+        "workday-unknown",
+        "Unknown Workday Tenant",
+        recruitment_url="https://wd1.myworkdaysite.com/jobs/company-a",
+    )
+    persist_candidates(session, fact)
+
+    summary = auto_resolve_candidates(session)
+
+    assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=1)
+    assert fact.decision_status is CandidateDecisionStatus.REVIEW_REQUIRED
+    assert fact.company_id is None
 
 
 def test_independently_attributable_subsidiary_inventories_require_review(
@@ -551,6 +618,82 @@ def test_review_replay_is_exact_and_does_not_append_audit_rows(session: Session)
 
     with pytest.raises(ReviewDecisionConflict):
         apply_review_decisions(session, [decision(fact, reason="A different decision payload.")])
+
+    assert session.scalar(select(func.count()).select_from(CandidateReview)) == 1
+
+
+def test_review_decision_locks_candidate_in_postgresql(session: Session) -> None:
+    fact = candidate("review-lock", "Locked Review Example")
+    persist_candidates(session, fact)
+    captured_statements: list[object] = []
+    bind = session.get_bind()
+
+    def capture_statement(
+        _connection: object,
+        clauseelement: object,
+        _multiparams: object,
+        _params: object,
+        _execution_options: object,
+    ) -> None:
+        captured_statements.append(clauseelement)
+
+    event.listen(bind, "before_execute", capture_statement)
+    try:
+        apply_review_decisions(
+            session,
+            [
+                decision(
+                    fact,
+                    action=ReviewAction.REJECT,
+                    resulting_status=CandidateDecisionStatus.REJECTED,
+                )
+            ],
+        )
+    finally:
+        event.remove(bind, "before_execute", capture_statement)
+
+    compiled = tuple(
+        str(statement.compile(dialect=postgresql.dialect()))
+        for statement in captured_statements
+        if isinstance(statement, Select)
+    )
+    candidate_lock_index = next(
+        index
+        for index, statement in enumerate(compiled)
+        if "FROM candidate_facts" in statement and "FOR UPDATE" in statement
+    )
+    review_read_index = next(
+        index
+        for index, statement in enumerate(compiled)
+        if "FROM candidate_reviews" in statement
+    )
+    assert candidate_lock_index < review_read_index
+
+
+def test_stale_reviewer_conflicts_after_another_decision_commits(session: Session) -> None:
+    fact = candidate("stale-reviewer", "Stale Reviewer Example")
+    persist_candidates(session, fact)
+    bind = session.get_bind()
+
+    with Session(bind, expire_on_commit=False) as stale_session:
+        stale_fact = stale_session.get(CandidateFact, fact.id)
+        assert stale_fact is not None
+        assert stale_fact.decision_status is CandidateDecisionStatus.REVIEW_REQUIRED
+        stale_session.commit()
+
+        apply_review_decisions(
+            session,
+            [
+                decision(
+                    fact,
+                    action=ReviewAction.REJECT,
+                    resulting_status=CandidateDecisionStatus.REJECTED,
+                )
+            ],
+        )
+
+        with pytest.raises(ReviewDecisionConflict):
+            apply_review_decisions(stale_session, [decision(fact)])
 
     assert session.scalar(select(func.count()).select_from(CandidateReview)) == 1
 
