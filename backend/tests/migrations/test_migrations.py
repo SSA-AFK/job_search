@@ -1453,16 +1453,6 @@ def test_job_entries_postgresql_schema_round_trip() -> None:
                 )
                 connection.execute(
                     text(
-                        "INSERT INTO job_sources "
-                        "(id, job_posting_id, provider, source_raw_id, apply_url, "
-                        "first_seen_at, last_seen_at, is_active) VALUES "
-                        "(:id, :job_id, 'legacy', 'legacy-job-1', "
-                        "'https://example.com/legacy-job-1', :created_at, :created_at, true)"
-                    ),
-                    {"id": source_id, "job_id": job_id, "created_at": created_at},
-                )
-                connection.execute(
-                    text(
                         "INSERT INTO job_entries "
                         "(id, company_id, url, normalized_url, provider, platform, requires_rendering, "
                         "status, failure_count, created_at, updated_at) VALUES "
@@ -1483,6 +1473,24 @@ def test_job_entries_postgresql_schema_round_trip() -> None:
                         "id": snapshot_id,
                         "entry_id": entry_id,
                         "command_hash": "b" * 64,
+                        "created_at": created_at,
+                    },
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO job_sources "
+                        "(id, job_posting_id, job_entry_id, last_seen_snapshot_id, "
+                        "provider, source_raw_id, apply_url, first_seen_at, last_seen_at, "
+                        "is_active) VALUES "
+                        "(:id, :job_id, :entry_id, :snapshot_id, 'legacy', "
+                        "'legacy-job-1', 'https://example.com/legacy-job-1', "
+                        ":created_at, :created_at, true)"
+                    ),
+                    {
+                        "id": source_id,
+                        "job_id": job_id,
+                        "entry_id": entry_id,
+                        "snapshot_id": snapshot_id,
                         "created_at": created_at,
                     },
                 )
@@ -1585,10 +1593,18 @@ def test_job_entries_postgresql_schema_round_trip() -> None:
                     text("SELECT count(*) FROM job_collection_snapshots WHERE id = :id"),
                     {"id": snapshot_id},
                 ) == 1
-                assert connection.scalar(
-                    text("SELECT count(*) FROM job_sources WHERE id = :id"),
+                source_relationship = connection.execute(
+                    text(
+                        "SELECT job_posting_id, job_entry_id, last_seen_snapshot_id "
+                        "FROM job_sources WHERE id = :id"
+                    ),
                     {"id": source_id},
-                ) == 1
+                ).one()
+                assert tuple(str(value) for value in source_relationship) == (
+                    job_id,
+                    entry_id,
+                    snapshot_id,
+                )
                 assert set(inspect(connection).get_table_names()).isdisjoint(
                     {
                         "candidate_facts",
