@@ -45,6 +45,7 @@ def cli_environment(tmp_path: Path) -> dict[str, str]:
             JobCollectionSnapshot(
                 job_entry_id=entry.id,
                 status=JobSnapshotStatus.SUCCEEDED,
+                lifecycle_applied=True,
                 pagination_complete=True,
                 empty_confirmed=False,
                 observed_count=1,

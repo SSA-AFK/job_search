@@ -75,6 +75,7 @@ def upgrade() -> None:
         sa.Column("job_entry_id", GUID(), nullable=False),
         sa.Column("crawl_run_id", GUID(), nullable=True),
         sa.Column("status", job_snapshot_status, nullable=False),
+        sa.Column("lifecycle_applied", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("pagination_complete", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("empty_confirmed", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("reported_total", sa.Integer(), nullable=True),

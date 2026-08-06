@@ -122,6 +122,7 @@ def snapshot_command(
         error_code="request_failed",
         started_at=completed_at - timedelta(minutes=1),
         completed_at=completed_at,
+        seen_source_ids=seen_source_ids,
     )
 
 
@@ -336,6 +337,15 @@ def test_equal_time_new_snapshots_are_audited_with_first_writer_wins(
     assert rows.source.missing_complete_snapshots == 1
     assert rows.source.is_active is True
     assert rows.posting.is_active is True
+    assert session.get(JobCollectionSnapshot, first.snapshot_id).lifecycle_applied is True
+    assert (
+        session.get(JobCollectionSnapshot, equal_absence.snapshot_id).lifecycle_applied
+        is False
+    )
+    assert (
+        session.get(JobCollectionSnapshot, equal_failure.snapshot_id).lifecycle_applied
+        is False
+    )
 
 
 def test_entry_lock_refreshes_stale_identity_before_comparing_watermark(
@@ -504,6 +514,54 @@ def test_seen_source_from_another_entry_is_rejected_without_snapshot(
     assert raised.value.code == "source_entry_conflict"
     assert session.scalar(select(func.count()).select_from(JobCollectionSnapshot)) == 0
     assert rows.source.missing_complete_snapshots == 0
+    assert other_source.missing_complete_snapshots == 0
+
+
+@pytest.mark.parametrize(
+    "status", (JobSnapshotStatus.SUCCEEDED, JobSnapshotStatus.PARTIAL)
+)
+def test_delayed_snapshot_with_foreign_seen_source_is_rejected_before_insertion(
+    session: Session,
+    service: JobCoverageService,
+    rows: CoverageRows,
+    status: JobSnapshotStatus,
+) -> None:
+    other_entry = JobEntry(
+        company_id=rows.company.id,
+        url="https://jobs.example.com/delayed-other",
+        normalized_url="https://jobs.example.com/delayed-other",
+        provider="official",
+        platform="self_hosted",
+        requires_rendering=False,
+    )
+    session.add(other_entry)
+    session.flush()
+    other_source = JobSource(
+        job_posting_id=rows.posting.id,
+        job_entry_id=other_entry.id,
+        provider="official",
+        source_raw_id=str(uuid4()),
+        apply_url="https://jobs.example.com/delayed-other/apply",
+    )
+    session.add(other_source)
+    session.commit()
+    first = service.record(snapshot_command(session, rows, completed_at=NOW))
+    command = snapshot_command(
+        session,
+        rows,
+        status=status,
+        seen_source_ids={other_source.id},
+        completed_at=NOW - timedelta(hours=1),
+    )
+
+    with pytest.raises(CoverageConflict) as raised:
+        service.record(command)
+
+    assert raised.value.code == "source_entry_conflict"
+    assert session.scalar(select(func.count()).select_from(JobCollectionSnapshot)) == 1
+    assert session.get(JobCollectionSnapshot, first.snapshot_id) is not None
+    assert rows.entry.last_checked_at == NOW
+    assert rows.source.missing_complete_snapshots == 1
     assert other_source.missing_complete_snapshots == 0
 
 

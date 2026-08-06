@@ -7,7 +7,13 @@ from sqlalchemy.orm import Session
 
 from app.ingestion.coverage.contracts import RecordJobSnapshot, SnapshotRecordResult
 from app.ingestion.coverage.repository import CoverageRepository
-from app.models import JobCollectionSnapshot, JobEntry, JobEntryStatus, JobSnapshotStatus
+from app.models import (
+    JobCollectionSnapshot,
+    JobEntry,
+    JobEntryStatus,
+    JobSnapshotStatus,
+    JobSource,
+)
 
 _DEACTIVATION_MISSING_THRESHOLD = 2
 
@@ -54,7 +60,14 @@ class JobCoverageService:
                 counters = _LifecycleCounters()
                 jobs_recomputed = 0
             else:
-                snapshot = self.repository.insert_snapshot(command)
+                sources = self.repository.lock_entry_sources(command.entry_id)
+                self._validate_seen_source_ownership(command, sources)
+                lifecycle_applied = self._is_newer_complete_lifecycle_snapshot(
+                    entry, command
+                )
+                snapshot = self.repository.insert_snapshot(
+                    command, lifecycle_applied=lifecycle_applied
+                )
                 snapshot_id = snapshot.id
                 created = True
                 if (
@@ -65,11 +78,8 @@ class JobCoverageService:
                     jobs_recomputed = 0
                 else:
                     self._update_entry_health(entry, command)
-                    if (
-                        command.status is JobSnapshotStatus.SUCCEEDED
-                        and command.pagination_complete
-                    ):
-                        counters = self._apply_complete_snapshot(snapshot, command)
+                    if lifecycle_applied:
+                        counters = self._apply_complete_snapshot(snapshot, command, sources)
                     else:
                         counters = _LifecycleCounters()
                     jobs_recomputed = self.repository.recompute_job_activity(
@@ -102,12 +112,8 @@ class JobCoverageService:
         self,
         snapshot: JobCollectionSnapshot,
         command: RecordJobSnapshot,
+        sources: tuple[JobSource, ...],
     ) -> _LifecycleCounters:
-        sources = self.repository.lock_entry_sources(command.entry_id)
-        source_ids = {source.id for source in sources}
-        if not command.seen_source_ids.issubset(source_ids):
-            raise CoverageConflict(code="source_entry_conflict")
-
         counters = _LifecycleCounters(
             affected_job_ids={source.job_posting_id for source in sources}
         )
@@ -133,6 +139,26 @@ class JobCoverageService:
                 source.is_active = False
                 counters.sources_deactivated += 1
         return counters
+
+    @staticmethod
+    def _validate_seen_source_ownership(
+        command: RecordJobSnapshot, sources: tuple[JobSource, ...]
+    ) -> None:
+        if not command.seen_source_ids.issubset({source.id for source in sources}):
+            raise CoverageConflict(code="source_entry_conflict")
+
+    @staticmethod
+    def _is_newer_complete_lifecycle_snapshot(
+        entry: JobEntry, command: RecordJobSnapshot
+    ) -> bool:
+        return (
+            command.status is JobSnapshotStatus.SUCCEEDED
+            and command.pagination_complete
+            and (
+                entry.last_checked_at is None
+                or command.completed_at > entry.last_checked_at
+            )
+        )
 
     @staticmethod
     def _update_entry_health(entry: JobEntry, command: RecordJobSnapshot) -> None:

@@ -109,6 +109,7 @@ def test_initial_migration_round_trip(tmp_path: Path) -> None:
         "job_entry_id",
         "crawl_run_id",
         "status",
+        "lifecycle_applied",
         "pagination_complete",
         "empty_confirmed",
         "reported_total",
@@ -703,6 +704,27 @@ def test_job_source_snapshot_lifecycle_emits_named_postgresql_ddl() -> None:
     )
 
 
+def test_job_snapshot_applied_state_emits_postgresql_ddl() -> None:
+    migration_path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "0006_job_entries_and_snapshots.py"
+    )
+    migration = runpy.run_path(str(migration_path))
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect=postgresql.dialect(),
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    migration["upgrade"].__globals__["op"] = Operations(context)
+
+    migration["upgrade"]()
+
+    sql = " ".join(output.getvalue().split())
+    assert "lifecycle_applied BOOLEAN DEFAULT false NOT NULL" in sql
+
+
 def test_job_source_snapshot_lifecycle_default_sqlite_offline_upgrade_completes() -> None:
     output = StringIO()
     config = Config(Path(__file__).parents[2] / "alembic.ini", output_buffer=output)
@@ -711,6 +733,7 @@ def test_job_source_snapshot_lifecycle_default_sqlite_offline_upgrade_completes(
     command.upgrade(config, "head", sql=True)
 
     sql = " ".join(output.getvalue().split())
+    assert "lifecycle_applied BOOLEAN DEFAULT false NOT NULL" in sql
     assert "CREATE TABLE _alembic_tmp_job_sources" in sql
     assert "job_entry_id CHAR(36)" in sql
     assert "last_seen_snapshot_id CHAR(36)" in sql
@@ -998,6 +1021,13 @@ def test_job_entries_postgresql_schema_round_trip() -> None:
                         "created_at": created_at,
                     },
                 )
+                assert connection.scalar(
+                    text(
+                        "SELECT lifecycle_applied FROM job_collection_snapshots "
+                        "WHERE job_entry_id = :entry_id"
+                    ),
+                    {"entry_id": entry_id},
+                ) is False
                 assert connection.scalar(text("SELECT count(*) FROM job_entries")) == 1
                 assert connection.scalar(text("SELECT count(*) FROM job_collection_snapshots")) == 1
         finally:

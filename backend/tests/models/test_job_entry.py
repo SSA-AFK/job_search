@@ -103,6 +103,7 @@ def test_entry_and_snapshot_defaults_match_coverage_contract(
         job_entry_id=entry.id,
         crawl_run_id=crawl_run.id,
         status=JobSnapshotStatus.SUCCEEDED,
+        lifecycle_applied=True,
         pagination_complete=True,
         empty_confirmed=True,
         reported_total=0,
@@ -119,9 +120,10 @@ def test_entry_and_snapshot_defaults_match_coverage_contract(
     assert entry.failure_count == 0
     assert snapshot.observed_count == 0
     assert snapshot.pages_fetched == 0
+    assert snapshot.lifecycle_applied is True
     for column_name in ("failure_count",):
         assert JobEntry.__table__.c[column_name].server_default is not None
-    for column_name in ("observed_count", "pages_fetched"):
+    for column_name in ("observed_count", "pages_fetched", "lifecycle_applied"):
         assert JobCollectionSnapshot.__table__.c[column_name].server_default is not None
 
 
@@ -165,11 +167,11 @@ def test_boolean_server_defaults_are_false_for_direct_inserts(
     ) == 0
     assert session.execute(
         text(
-            "SELECT pagination_complete, empty_confirmed "
+            "SELECT lifecycle_applied, pagination_complete, empty_confirmed "
             "FROM job_collection_snapshots WHERE id = :id"
         ),
         {"id": str(snapshot_id)},
-    ).one() == (0, 0)
+    ).one() == (0, 0, 0)
     entry = session.get(JobEntry, entry_id)
     snapshot = session.get(JobCollectionSnapshot, snapshot_id)
     assert entry is not None
@@ -177,6 +179,7 @@ def test_boolean_server_defaults_are_false_for_direct_inserts(
     assert entry.requires_rendering is False
     assert snapshot.pagination_complete is False
     assert snapshot.empty_confirmed is False
+    assert snapshot.lifecycle_applied is False
 
 
 def test_snapshot_identity_rejects_duplicate_non_null_crawl_run(

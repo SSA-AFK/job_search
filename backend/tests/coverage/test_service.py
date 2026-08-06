@@ -71,11 +71,13 @@ def _snapshot(
     status: JobSnapshotStatus = JobSnapshotStatus.SUCCEEDED,
     complete: bool = True,
     empty: bool = False,
+    lifecycle_applied: bool = True,
     command_digit: int = 1,
 ) -> JobCollectionSnapshot:
     snapshot = JobCollectionSnapshot(
         job_entry_id=entry.id,
         status=status,
+        lifecycle_applied=lifecycle_applied,
         pagination_complete=complete,
         empty_confirmed=empty,
         reported_total=0 if empty else None,
@@ -231,6 +233,64 @@ def test_build_uses_latest_qualifying_snapshot_per_entry(session: Session) -> No
 
     assert report.recently_enumerated_companies == 1
     assert report.confirmed_empty_companies == 1
+
+
+def test_build_preserves_applied_empty_result_when_equal_time_audit_is_nonempty(
+    session: Session,
+) -> None:
+    company = _company(session, "Applied Empty")
+    entry = _entry(session, company, "applied-empty")
+    _snapshot(
+        session,
+        entry,
+        completed_at=AS_OF - timedelta(hours=1),
+        empty=True,
+        lifecycle_applied=True,
+        command_digit=1,
+    )
+    _snapshot(
+        session,
+        entry,
+        completed_at=AS_OF - timedelta(hours=1),
+        empty=False,
+        lifecycle_applied=False,
+        command_digit=2,
+    )
+    session.commit()
+
+    report = CoverageReportService(session).build(as_of=AS_OF)
+
+    assert report.recently_enumerated_companies == 1
+    assert report.confirmed_empty_companies == 1
+
+
+def test_build_preserves_applied_nonempty_result_when_equal_time_audit_is_empty(
+    session: Session,
+) -> None:
+    company = _company(session, "Applied Nonempty")
+    entry = _entry(session, company, "applied-nonempty")
+    _snapshot(
+        session,
+        entry,
+        completed_at=AS_OF - timedelta(hours=1),
+        empty=False,
+        lifecycle_applied=True,
+        command_digit=1,
+    )
+    _snapshot(
+        session,
+        entry,
+        completed_at=AS_OF - timedelta(hours=1),
+        empty=True,
+        lifecycle_applied=False,
+        command_digit=2,
+    )
+    session.commit()
+
+    report = CoverageReportService(session).build(as_of=AS_OF)
+
+    assert report.recently_enumerated_companies == 1
+    assert report.confirmed_empty_companies == 0
 
 
 def test_build_does_not_confirm_empty_when_another_active_entry_is_nonempty(

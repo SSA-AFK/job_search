@@ -99,7 +99,9 @@ class CoverageRepository:
             )
         )
 
-    def insert_snapshot(self, command: RecordJobSnapshot) -> JobCollectionSnapshot:
+    def insert_snapshot(
+        self, command: RecordJobSnapshot, *, lifecycle_applied: bool = False
+    ) -> JobCollectionSnapshot:
         entry = self._require_entry(command.entry_id)
         run = self._require_run(command.crawl_run_id)
         if run.company_id != entry.company_id:
@@ -111,6 +113,7 @@ class CoverageRepository:
             job_entry_id=command.entry_id,
             crawl_run_id=command.crawl_run_id,
             status=command.status,
+            lifecycle_applied=lifecycle_applied,
             pagination_complete=command.pagination_complete,
             empty_confirmed=command.empty_confirmed,
             reported_total=command.reported_total,

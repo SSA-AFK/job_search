@@ -81,6 +81,9 @@ class JobCollectionSnapshot(Base):
     status: Mapped[JobSnapshotStatus] = mapped_column(
         _enum_column(JobSnapshotStatus, "job_snapshot_status"), nullable=False
     )
+    lifecycle_applied: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
     pagination_complete: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=false(), nullable=False
     )

@@ -53,6 +53,7 @@ class CoverageReportService:
             .where(
                 JobEntry.status == JobEntryStatus.ACTIVE,
                 JobCollectionSnapshot.status == JobSnapshotStatus.SUCCEEDED,
+                JobCollectionSnapshot.lifecycle_applied.is_(True),
                 JobCollectionSnapshot.pagination_complete.is_(True),
                 JobCollectionSnapshot.completed_at >= window_start,
                 JobCollectionSnapshot.completed_at <= as_of_utc,
