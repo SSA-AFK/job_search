@@ -575,7 +575,7 @@ def test_discovery_locks_manifest_before_entry_upsert_in_postgresql(
         if isinstance(statement, Select)
     )
     manifest_locks = [
-        index
+        (index, statement)
         for index, statement in enumerate(compiled)
         if "FROM company_manifests" in statement and "FOR UPDATE" in statement
     ]
@@ -583,7 +583,10 @@ def test_discovery_locks_manifest_before_entry_upsert_in_postgresql(
         index for index, statement in enumerate(compiled) if "FROM job_entries" in statement
     )
     assert manifest_locks
-    assert manifest_locks[0] < entry_read_index
+    manifest_lock_index, manifest_lock_sql = manifest_locks[0]
+    assert "WHERE" not in manifest_lock_sql
+    assert "ORDER BY company_manifests.version" in manifest_lock_sql
+    assert manifest_lock_index < entry_read_index
 
 
 def test_review_required_discovery_records_observation_without_entry(

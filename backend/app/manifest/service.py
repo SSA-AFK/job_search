@@ -219,10 +219,20 @@ def record_discovery_result(
     )
 
     with session.begin():
-        manifest = session.scalar(
-            select(CompanyManifest)
-            .where(CompanyManifest.version == command.manifest_version)
-            .with_for_update()
+        manifests = tuple(
+            session.scalars(
+                select(CompanyManifest)
+                .order_by(CompanyManifest.version)
+                .with_for_update()
+            )
+        )
+        manifest = next(
+            (
+                persisted
+                for persisted in manifests
+                if persisted.version == command.manifest_version
+            ),
+            None,
         )
         if manifest is None:
             raise DiscoveryRecordConflict("discovery manifest does not exist")
