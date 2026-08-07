@@ -151,6 +151,7 @@ backend/app/company_identity/
 
 - `id`: UUID 主键
 - `stable_identity_hash`: lowercase SHA-256，唯一
+- `first_crawl_run_id`: 首次创建审核项的 crawl run 外键，后续重放不得覆盖
 - `status`: `pending | resolved | rejected`
 - `candidate_name`, `normalized_name`
 - `aliases`: 有界 JSON 数组
@@ -161,7 +162,7 @@ backend/app/company_identity/
 - `created_at`
 - `resolved_at`: 可空
 
-同一公开身份和证据快照重放返回同一审核项。身份内容发生变化时产生不同 hash 和新审核项，不覆盖旧记录。
+同一公开身份和证据快照重放返回同一审核项，并保留首次 `first_crawl_run_id`。后续 crawl 获得同一 review item id，但不修改不可变审核项。身份内容发生变化时产生不同 hash 和新审核项，不覆盖旧记录。
 
 ### 7.2 `company_identity_review_decisions`
 
@@ -180,12 +181,12 @@ append-only 人工决定：
 
 ### 7.3 PostgreSQL 相似度索引
 
-迁移启用并验证 `pg_trgm`，为以下字段创建 trigram 索引：
+迁移启用并验证 `pg_trgm`，为以下字段创建 `GiST gist_trgm_ops` 索引：
 
 - `companies.normalized_name`
 - `company_aliases.normalized_alias`
 
-精确查询继续使用现有唯一 B-tree 索引。模糊查询必须在数据库中排序和限制 Top-K，再对返回的有界集合使用 RapidFuzz 生成确定性展示分数。生产路径不得调用 `list_for_deduplication()` 全表读取。
+精确查询继续使用现有唯一 B-tree 索引。模糊查询使用 trigram distance KNN `ORDER BY normalized_name <-> :candidate LIMIT :limit` 在数据库中直接限制 Top-K，再对返回的有界集合使用 RapidFuzz 生成确定性展示分数。生产路径不得调用 `list_for_deduplication()` 全表读取。
 
 若部署账号不能创建 extension，环境预检必须在迁移前明确失败；不得静默退回全表扫描或把未知候选视为新公司。
 
