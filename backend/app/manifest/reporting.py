@@ -1,9 +1,10 @@
 """Database-backed reporting for a frozen manifest and its entry census."""
 
+from collections import Counter
 from decimal import ROUND_HALF_UP, Decimal
 
 from pydantic import Field, field_validator
-from sqlalchemy import distinct, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.manifest.contracts import AtsCensus, DiscoveryStatus
@@ -24,7 +25,7 @@ class ManifestCoverageReport(AtsCensus):
     """Immutable, explicitly denominated manifest discovery census."""
 
     code_commit: str
-    config_fingerprint: str
+    config_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     discovered_companies: int = Field(ge=0)
     discovery_company_denominator: int = Field(ge=0)
     discovery_coverage_rate: Decimal | None
@@ -75,54 +76,41 @@ class ManifestReportService:
         if manifest_companies != manifest.member_count:
             raise ManifestReportError("manifest member count is inconsistent")
 
-        grouped_statuses = self.session.execute(
-            select(
-                EntryDiscoveryObservation.status,
-                func.count(EntryDiscoveryObservation.id),
+        observations = tuple(
+            self.session.scalars(
+                select(EntryDiscoveryObservation)
+                .where(
+                    EntryDiscoveryObservation.manifest_version == manifest_version
+                )
+                .order_by(EntryDiscoveryObservation.id)
             )
-            .where(EntryDiscoveryObservation.manifest_version == manifest_version)
-            .group_by(EntryDiscoveryObservation.status)
-        ).all()
-        observed_status_counts: dict[DiscoveryStatus, int] = {
-            status: int(count) for status, count in grouped_statuses
-        }
+        )
+        observed_status_counts = Counter(
+            observation.status for observation in observations
+        )
         status_counts = {
-            status: int(observed_status_counts.get(status, 0))
+            status: observed_status_counts.get(status, 0)
             for status in DiscoveryStatus
         }
-        discovered_companies = self.session.scalar(
-            select(func.count(distinct(EntryDiscoveryObservation.company_id))).where(
-                EntryDiscoveryObservation.manifest_version == manifest_version
-            )
+        discovered_companies = len(
+            {observation.company_id for observation in observations}
         )
-        assert discovered_companies is not None
 
-        grouped_platforms = self.session.execute(
-            select(
-                EntryDiscoveryObservation.platform,
-                func.count(EntryDiscoveryObservation.id),
-            )
-            .where(
-                EntryDiscoveryObservation.manifest_version == manifest_version,
-                EntryDiscoveryObservation.status == DiscoveryStatus.ACCEPTED,
-                EntryDiscoveryObservation.job_entry_id.is_not(None),
-            )
-            .group_by(EntryDiscoveryObservation.platform)
-            .order_by(EntryDiscoveryObservation.platform)
-        ).all()
-        platform_entry_counts = {
-            "unknown" if platform is None else platform: int(count)
-            for platform, count in grouped_platforms
-        }
-        accepted_entries = sum(platform_entry_counts.values())
-        entry_companies = self.session.scalar(
-            select(func.count(distinct(EntryDiscoveryObservation.company_id))).where(
-                EntryDiscoveryObservation.manifest_version == manifest_version,
-                EntryDiscoveryObservation.status == DiscoveryStatus.ACCEPTED,
-                EntryDiscoveryObservation.job_entry_id.is_not(None),
-            )
+        accepted_observations = tuple(
+            observation
+            for observation in observations
+            if observation.status is DiscoveryStatus.ACCEPTED
+            and observation.job_entry_id is not None
         )
-        assert entry_companies is not None
+        platform_counts = Counter(
+            observation.platform or "unknown"
+            for observation in accepted_observations
+        )
+        platform_entry_counts = dict(sorted(platform_counts.items()))
+        accepted_entries = len(accepted_observations)
+        entry_companies = len(
+            {observation.company_id for observation in accepted_observations}
+        )
         self_hosted_entries = platform_entry_counts.get("self_hosted", 0)
 
         return ManifestCoverageReport(

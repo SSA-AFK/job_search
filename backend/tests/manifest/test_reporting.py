@@ -5,8 +5,10 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import Select
 
 from app.manifest.contracts import AiCategory, DiscoveryStatus
 from app.manifest.models import (
@@ -197,3 +199,56 @@ def test_report_serializes_undefined_rates_as_null_and_exposes_no_raw_fields(
         "self_hosted_entries",
         "self_hosted_rate",
     }
+
+
+def test_report_reads_observations_once_for_one_consistent_census(
+    session: Session,
+) -> None:
+    companies = seed_manifest(session, member_count=2)
+    add_accepted_observation(session, companies[0], suffix="primary", platform="moka")
+    session.commit()
+    captured_statements: list[object] = []
+    bind = session.get_bind()
+
+    def capture_statement(
+        _connection: object,
+        clauseelement: object,
+        _multiparams: object,
+        _params: object,
+        _execution_options: object,
+    ) -> None:
+        captured_statements.append(clauseelement)
+
+    event.listen(bind, "before_execute", capture_statement)
+    try:
+        report = ManifestReportService(session).build(
+            MANIFEST_VERSION,
+            code_commit="abc1234",
+            config_fingerprint="a" * 64,
+        )
+    finally:
+        event.remove(bind, "before_execute", capture_statement)
+
+    observation_reads = [
+        statement
+        for statement in captured_statements
+        if isinstance(statement, Select)
+        and "FROM entry_discovery_observations" in str(statement)
+    ]
+    assert report.accepted_entries == 1
+    assert len(observation_reads) == 1
+
+
+@pytest.mark.parametrize("fingerprint", ["", "short", "G" * 64])
+def test_report_rejects_noncanonical_config_fingerprint(
+    session: Session,
+    fingerprint: str,
+) -> None:
+    seed_manifest(session, member_count=0)
+
+    with pytest.raises(ValidationError, match="String should match pattern"):
+        ManifestReportService(session).build(
+            MANIFEST_VERSION,
+            code_commit="abc1234",
+            config_fingerprint=fingerprint,
+        )
