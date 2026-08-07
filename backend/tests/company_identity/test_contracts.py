@@ -11,6 +11,7 @@ from app.company_identity.contracts import (
     CompanyIdentityInput,
     CompanyIdentityResolution,
     CompanyIdentityReviewDraft,
+    IdentityAuditFinding,
     IdentityAuditReport,
     IdentityAuditSeverity,
     IdentityResolutionKind,
@@ -63,6 +64,21 @@ def review_draft(*, match_score: Decimal, observed_at: datetime) -> CompanyIdent
         ),
         review_reasons=(IdentityReviewReason.FUZZY_NAME_NEIGHBOR,),
         observed_at=observed_at,
+    )
+
+
+def candidate_match(
+    *,
+    company_id: UUID = COMPANY_ID,
+    canonical_name: str = "OpenAI",
+    score: Decimal = Decimal(90),
+) -> CompanyIdentityCandidateMatch:
+    return CompanyIdentityCandidateMatch(
+        company_id=company_id,
+        canonical_name=canonical_name,
+        normalized_name="openai" if canonical_name == "OpenAI" else canonical_name.lower(),
+        match_kind="fuzzy_name",
+        score=score,
     )
 
 
@@ -223,6 +239,84 @@ def test_resolution_canonicalizes_candidate_order_and_review_reason_set() -> Non
     )
 
 
+def test_resolution_rejects_collections_that_conflict_with_its_kind() -> None:
+    with pytest.raises(ValidationError):
+        CompanyIdentityResolution(
+            kind=IdentityResolutionKind.EXISTING,
+            company_id=COMPANY_ID,
+            stable_identity_hash="a" * 64,
+            review_reasons=(IdentityReviewReason.FUZZY_NAME_NEIGHBOR,),
+        )
+    with pytest.raises(ValidationError):
+        CompanyIdentityResolution(
+            kind=IdentityResolutionKind.NEW,
+            stable_identity_hash="a" * 64,
+            candidate_matches=(candidate_match(),),
+        )
+    with pytest.raises(ValidationError):
+        CompanyIdentityResolution(
+            kind=IdentityResolutionKind.REVIEW_REQUIRED,
+            stable_identity_hash="a" * 64,
+        )
+
+
+def test_candidate_match_requires_the_normalized_canonical_name_without_echoing_input() -> None:
+    hostile_name = "do-not-echo-this-name"
+
+    with pytest.raises(ValidationError) as error:
+        CompanyIdentityCandidateMatch(
+            company_id=COMPANY_ID,
+            canonical_name=hostile_name,
+            normalized_name="different",
+            match_kind="fuzzy_name",
+            score=Decimal(90),
+        )
+
+    assert hostile_name not in str(error.value)
+    assert "normalized_name is invalid" in str(error.value)
+
+
+def test_resolution_orders_tied_candidates_by_name_then_uuid() -> None:
+    first_company_id = UUID("00000000-0000-0000-0000-000000000001")
+    second_company_id = UUID("00000000-0000-0000-0000-000000000002")
+    result = CompanyIdentityResolution(
+        kind=IdentityResolutionKind.REVIEW_REQUIRED,
+        stable_identity_hash="a" * 64,
+        candidate_matches=(
+            candidate_match(company_id=second_company_id, canonical_name="OpenAI", score=Decimal(88)),
+            candidate_match(company_id=first_company_id, canonical_name="OpenAI", score=Decimal(88)),
+        ),
+        review_reasons=(IdentityReviewReason.FUZZY_NAME_NEIGHBOR,),
+    )
+
+    assert [match.company_id for match in result.candidate_matches] == [
+        first_company_id,
+        second_company_id,
+    ]
+
+
+def test_resolution_and_review_draft_reject_duplicate_company_candidates() -> None:
+    duplicate_candidates = (
+        candidate_match(score=Decimal(91)),
+        candidate_match(score=Decimal(88)),
+    )
+
+    with pytest.raises(ValidationError):
+        CompanyIdentityResolution(
+            kind=IdentityResolutionKind.REVIEW_REQUIRED,
+            stable_identity_hash="a" * 64,
+            candidate_matches=duplicate_candidates,
+            review_reasons=(IdentityReviewReason.FUZZY_NAME_NEIGHBOR,),
+        )
+    with pytest.raises(ValidationError):
+        CompanyIdentityReviewDraft(
+            identity=identity(),
+            candidate_matches=duplicate_candidates,
+            review_reasons=(IdentityReviewReason.FUZZY_NAME_NEIGHBOR,),
+            observed_at=utc(7),
+        )
+
+
 def test_candidate_match_rejects_whitespace_only_canonical_name() -> None:
     with pytest.raises(ValidationError):
         CompanyIdentityCandidateMatch(
@@ -332,3 +426,81 @@ def test_audit_counts_are_immutable_return_values() -> None:
     assert isinstance(report.finding_counts, MappingProxyType)
     with pytest.raises(TypeError):
         report.finding_counts[IdentityAuditSeverity.MINOR] = 1  # type: ignore[index]
+
+
+def test_audit_finding_canonicalizes_safe_display_names_and_evidence_codes() -> None:
+    finding = IdentityAuditFinding(
+        finding_id="a" * 64,
+        code="cross_table_name_owner",
+        severity=IdentityAuditSeverity.CRITICAL,
+        company_ids=(COMPANY_ID,),
+        display_names=("  OpenAI  ", "OpenAI"),
+        evidence_codes=(" Name_Owner ", "name_owner"),
+        recommended_action="review",
+    )
+
+    assert finding.display_names == ("OpenAI",)
+    assert finding.evidence_codes == ("name_owner",)
+
+
+def test_audit_finding_rejects_hostile_or_oversize_public_values_without_echoing_input() -> None:
+    hostile_code = "token=do-not-echo"
+
+    with pytest.raises(ValidationError) as error:
+        IdentityAuditFinding(
+            finding_id="a" * 64,
+            code="cross_table_name_owner",
+            severity=IdentityAuditSeverity.CRITICAL,
+            company_ids=(COMPANY_ID,),
+            display_names=("x" * 201,),
+            evidence_codes=(hostile_code,),
+            recommended_action="review",
+        )
+
+    assert hostile_code not in str(error.value)
+    assert "display_names is invalid" in str(error.value)
+    assert "evidence_codes is invalid" in str(error.value)
+
+
+@pytest.mark.parametrize("hostile_name", ("<script>", "Acme\u0007"))
+def test_audit_finding_rejects_unsafe_display_names_without_echoing_input(
+    hostile_name: str,
+) -> None:
+
+    with pytest.raises(ValidationError) as error:
+        IdentityAuditFinding(
+            finding_id="a" * 64,
+            code="cross_table_name_owner",
+            severity=IdentityAuditSeverity.CRITICAL,
+            company_ids=(COMPANY_ID,),
+            display_names=(hostile_name,),
+            recommended_action="review",
+        )
+
+    assert hostile_name not in str(error.value)
+    assert "display_names is invalid" in str(error.value)
+
+
+def test_audit_count_mapping_and_json_follow_severity_declaration_order() -> None:
+    report = IdentityAuditReport(
+        findings=(),
+        scanned_companies=3,
+        scanned_aliases=2,
+        scanned_review_items=1,
+        finding_counts={
+            IdentityAuditSeverity.MINOR: 3,
+            IdentityAuditSeverity.IMPORTANT: 2,
+            IdentityAuditSeverity.CRITICAL: 1,
+        },
+    )
+
+    assert tuple(report.finding_counts) == (
+        IdentityAuditSeverity.CRITICAL,
+        IdentityAuditSeverity.IMPORTANT,
+        IdentityAuditSeverity.MINOR,
+    )
+    assert list(report.model_dump(mode="json")["finding_counts"]) == [
+        "critical",
+        "important",
+        "minor",
+    ]

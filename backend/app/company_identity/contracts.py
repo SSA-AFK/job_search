@@ -33,6 +33,7 @@ _MAX_CANDIDATE_MATCHES = 20
 _MAX_REVIEW_REASONS = 7
 _MAX_TEXT_LENGTH = 2_000
 _IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,49}$")
+_EVIDENCE_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,99}$")
 _MATCH_KIND_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,49}$")
 _SAFE_REASON_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .,:;()'/-]{0,1999}$")
 
@@ -273,6 +274,12 @@ class CompanyIdentityCandidateMatch(_FrozenIdentityDTO):
     ) -> tuple[IdentityReviewReason, ...]:
         return tuple(sorted(set(value), key=lambda reason: reason.value))
 
+    @model_validator(mode="after")
+    def validate_normalized_name(self) -> Self:
+        if self.normalized_name != normalize_name(self.canonical_name):
+            raise ValueError("normalized_name is invalid")
+        return self
+
 
 class CompanyIdentityResolution(_FrozenIdentityDTO):
     kind: IdentityResolutionKind
@@ -290,12 +297,7 @@ class CompanyIdentityResolution(_FrozenIdentityDTO):
     def order_candidate_matches(
         cls, value: tuple[CompanyIdentityCandidateMatch, ...]
     ) -> tuple[CompanyIdentityCandidateMatch, ...]:
-        return tuple(
-            sorted(
-                value,
-                key=lambda match: (-match.score, match.normalized_name, str(match.company_id)),
-            )
-        )
+        return _canonical_candidate_matches(value)
 
     @field_validator("review_reasons")
     @classmethod
@@ -306,10 +308,21 @@ class CompanyIdentityResolution(_FrozenIdentityDTO):
 
     @model_validator(mode="after")
     def validate_kind(self) -> Self:
-        if self.kind is IdentityResolutionKind.EXISTING and self.company_id is None:
-            raise ValueError("existing resolution requires company_id")
-        if self.kind is not IdentityResolutionKind.EXISTING and self.company_id is not None:
-            raise ValueError("only existing resolution may include company_id")
+        if self.kind is IdentityResolutionKind.EXISTING:
+            if self.company_id is None:
+                raise ValueError("existing resolution requires company_id")
+            if self.candidate_matches or self.review_reasons:
+                raise ValueError("existing resolution cannot include review data")
+        elif self.kind is IdentityResolutionKind.NEW:
+            if self.company_id is not None:
+                raise ValueError("new resolution cannot include company_id")
+            if self.candidate_matches or self.review_reasons:
+                raise ValueError("new resolution cannot include review data")
+        else:
+            if self.company_id is not None:
+                raise ValueError("review resolution cannot include company_id")
+            if not self.review_reasons:
+                raise ValueError("review resolution requires a reason")
         return self
 
 
@@ -328,12 +341,7 @@ class CompanyIdentityReviewDraft(_FrozenIdentityDTO):
     def order_candidate_matches(
         cls, value: tuple[CompanyIdentityCandidateMatch, ...]
     ) -> tuple[CompanyIdentityCandidateMatch, ...]:
-        return tuple(
-            sorted(
-                value,
-                key=lambda match: (-match.score, match.normalized_name, str(match.company_id)),
-            )
-        )
+        return _canonical_candidate_matches(value)
 
     @field_validator("review_reasons")
     @classmethod
@@ -428,6 +436,41 @@ class IdentityAuditFinding(_FrozenIdentityDTO):
     evidence_codes: tuple[str, ...] = Field(default=(), max_length=100)
     recommended_action: str = Field(min_length=1, max_length=100)
 
+    @field_validator("display_names")
+    @classmethod
+    def canonicalize_display_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        display_by_normalized: dict[str, str] = {}
+        for name in value:
+            cleaned = _clean_display_name(name)
+            normalized = normalize_name(cleaned)
+            if (
+                not cleaned
+                or not normalized
+                or len(cleaned) > _MAX_NAME_LENGTH
+                or any(
+                    character in "<>" or unicodedata.category(character).startswith("C")
+                    for character in cleaned
+                )
+            ):
+                raise ValueError("display_names is invalid")
+            existing = display_by_normalized.get(normalized)
+            if existing is None or cleaned < existing:
+                display_by_normalized[normalized] = cleaned
+        return tuple(
+            display_by_normalized[normalized] for normalized in sorted(display_by_normalized)
+        )
+
+    @field_validator("evidence_codes")
+    @classmethod
+    def canonicalize_evidence_codes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized_codes: set[str] = set()
+        for code in value:
+            normalized = _normalized_identifier(code)
+            if _EVIDENCE_CODE_PATTERN.fullmatch(normalized) is None:
+                raise ValueError("evidence_codes is invalid")
+            normalized_codes.add(normalized)
+        return tuple(sorted(normalized_codes))
+
 
 class IdentityAuditReport(_FrozenIdentityDTO):
     findings: tuple[IdentityAuditFinding, ...] = Field(default=(), max_length=10_000)
@@ -445,13 +488,23 @@ class IdentityAuditReport(_FrozenIdentityDTO):
     ) -> Mapping[IdentityAuditSeverity, int]:
         if any(count < 0 for count in value.values()):
             raise ValueError("finding counts must be nonnegative")
-        return MappingProxyType(dict(value))
+        return MappingProxyType(
+            {
+                severity: value[severity]
+                for severity in IdentityAuditSeverity
+                if severity in value
+            }
+        )
 
     @field_serializer("finding_counts")
     def serialize_finding_counts(
         self, value: Mapping[IdentityAuditSeverity, int]
     ) -> dict[IdentityAuditSeverity, int]:
-        return dict(value)
+        return {
+            severity: value[severity]
+            for severity in IdentityAuditSeverity
+            if severity in value
+        }
 
 
 def _canonical_identity_bytes(identity: CompanyIdentityInput) -> bytes:
@@ -481,3 +534,16 @@ def _canonical_decimal(value: Decimal) -> str:
     if value == 0:
         return "0"
     return format(value.normalize(), "f")
+
+
+def _canonical_candidate_matches(
+    value: tuple[CompanyIdentityCandidateMatch, ...],
+) -> tuple[CompanyIdentityCandidateMatch, ...]:
+    if len({match.company_id for match in value}) != len(value):
+        raise ValueError("candidate company ids must be unique")
+    return tuple(
+        sorted(
+            value,
+            key=lambda match: (-match.score, match.normalized_name, str(match.company_id)),
+        )
+    )
