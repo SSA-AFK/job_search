@@ -324,6 +324,31 @@ async def test_access_and_rate_limit_responses_stop_discovery(
         ("<title>Verify you are human</title><p>CAPTCHA</p>", "captcha_required"),
     ],
 )
+async def test_access_challenge_on_official_root_is_classified_as_blocked(
+    page: str, error_code: str
+) -> None:
+    route_robots()
+    respx.get("https://acme.cn/").mock(
+        return_value=httpx.Response(
+            200, headers={"content-type": "text/html"}, text=page
+        )
+    )
+
+    result = await discoverer().discover(company())
+
+    assert result.status is DiscoveryStatus.BLOCKED
+    assert result.error_code == error_code
+
+
+@pytest.mark.anyio
+@respx.mock
+@pytest.mark.parametrize(
+    ("page", "error_code"),
+    [
+        ("<title>Login required</title><p>Sign in to continue</p>", "login_required"),
+        ("<title>Verify you are human</title><p>CAPTCHA</p>", "captcha_required"),
+    ],
+)
 async def test_access_challenge_on_candidate_is_classified_as_blocked(
     page: str, error_code: str
 ) -> None:
@@ -491,4 +516,38 @@ async def test_coordinator_does_not_invoke_fallback_after_official_acceptance() 
     ).discover(company(recruitment_url="https://jobs.feishu.cn/acme"))
 
     assert result == accepted
+    assert zhihu.calls == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "status",
+    [
+        DiscoveryStatus.REVIEW_REQUIRED,
+        DiscoveryStatus.BLOCKED,
+        DiscoveryStatus.FAILED,
+    ],
+)
+async def test_coordinator_preserves_terminal_official_result(status: DiscoveryStatus) -> None:
+    official_result = EntryDiscoveryResult(
+        status=status,
+        method="official_navigation",
+        error_code="official_discovery_stopped",
+    )
+    official = _StaticDiscoverer(official_result)
+    zhihu = _StaticDiscoverer(
+        EntryDiscoveryResult(
+            status=DiscoveryStatus.ACCEPTED,
+            method="zhihu_global_search",
+            candidate_url="https://jobs.feishu.cn/acme",
+            normalized_url="https://jobs.feishu.cn/acme",
+            classification=AtsClassification(platform="feishu", requires_rendering=True),
+        )
+    )
+
+    result = await EntryDiscoveryCoordinator(
+        official_discoverer=official, fallback_discoverer=zhihu
+    ).discover(company())
+
+    assert result == official_result
     assert zhihu.calls == 0

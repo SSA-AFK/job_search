@@ -163,6 +163,10 @@ class OfficialEntryDiscoverer:
         except ProviderError as error:
             return self._failure(method="official_navigation", code=error.code)
 
+        challenge = self._access_challenge(root)
+        if challenge is not None:
+            return self._failure(method="official_navigation", code=challenge)
+
         candidates = self._candidate_links(root, official_host)
         external = [
             candidate
@@ -388,7 +392,7 @@ class EntryDiscoveryCoordinator:
 
     async def discover(self, company: ManifestCompany) -> EntryDiscoveryResult:
         official = await self._official_discoverer.discover(company)
-        if official.status is DiscoveryStatus.ACCEPTED:
+        if official.status is not DiscoveryStatus.NOT_FOUND:
             return official
 
         fallback = await self._fallback_discoverer.discover(company)
