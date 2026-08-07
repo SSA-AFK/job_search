@@ -568,7 +568,7 @@ class PersistenceService:
             filing = self.session.scalar(
                 select(RegulatoryFiling).where(
                     RegulatoryFiling.filing_type == record.filing_type,
-                    RegulatoryFiling.filing_number == record.filing_number,
+                    RegulatoryFiling.normalized_filing_number == record.filing_number,
                 )
             )
             if filing is not None and filing.company_id != company_id:
@@ -598,7 +598,8 @@ class PersistenceService:
                     candidate_filing,
                     select(RegulatoryFiling).where(
                         RegulatoryFiling.filing_type == record.filing_type,
-                        RegulatoryFiling.filing_number == record.filing_number,
+                        RegulatoryFiling.normalized_filing_number
+                        == record.filing_number,
                     ),
                     run_id=run_id,
                     constraint="uq_filing_type_number",

@@ -1144,6 +1144,19 @@ def test_0009_postgresql_sql_contains_bounded_similarity_indexes() -> None:
         "CREATE INDEX ix_company_aliases_normalized_alias_trgm ON company_aliases "
         "USING gist (normalized_alias gist_trgm_ops)" in sql
     )
+    assert "ALTER TABLE companies ADD COLUMN normalized_website VARCHAR(1000)" in sql
+    assert (
+        "ALTER TABLE regulatory_filings ADD COLUMN "
+        "normalized_filing_number VARCHAR(255)" in sql
+    )
+    assert (
+        "CREATE INDEX ix_companies_normalized_website "
+        "ON companies (normalized_website)" in sql
+    )
+    assert (
+        "CREATE INDEX ix_regulatory_filings_normalized_filing_number "
+        "ON regulatory_filings (normalized_filing_number)" in sql
+    )
     for constraint_name in (
         "identity_review_status",
         "identity_review_action",
@@ -1198,6 +1211,12 @@ def test_0009_postgresql_downgrade_owns_only_review_objects() -> None:
     assert "DROP INDEX IF EXISTS ix_company_aliases_normalized_alias_trgm" in sql
     assert "DROP TABLE company_identity_review_decisions" in sql
     assert "DROP TABLE company_identity_review_items" in sql
+    assert "DROP INDEX ix_companies_normalized_website" in sql
+    assert "DROP INDEX ix_regulatory_filings_normalized_filing_number" in sql
+    assert "ALTER TABLE companies DROP COLUMN normalized_website" in sql
+    assert (
+        "ALTER TABLE regulatory_filings DROP COLUMN normalized_filing_number" in sql
+    )
     assert "DROP EXTENSION" not in sql
     assert "CASCADE" not in sql
     for shared_object in (
@@ -1235,6 +1254,84 @@ def test_0009_sqlite_sql_skips_postgresql_similarity_objects() -> None:
     assert "gist_trgm_ops" not in sql
     assert "ix_companies_normalized_name_trgm" not in sql
     assert "ix_company_aliases_normalized_alias_trgm" not in sql
+    assert "ALTER TABLE companies ADD COLUMN normalized_website VARCHAR(1000)" in sql
+    assert (
+        "ALTER TABLE regulatory_filings ADD COLUMN "
+        "normalized_filing_number VARCHAR(255)" in sql
+    )
+
+
+def test_0009_backfills_normalized_evidence_for_legacy_rows(tmp_path: Path) -> None:
+    database_path = tmp_path / "identity-evidence-backfill.sqlite3"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config(Path(__file__).parents[2] / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", database_url)
+    engine = create_engine(database_url)
+    company_id = str(uuid4())
+    filing_id = str(uuid4())
+    created_at = "2026-08-07 00:00:00+00:00"
+
+    command.upgrade(config, "0008_gate1_manifest_discovery")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO companies "
+                "(id, canonical_name, normalized_name, funding_stage, scale, website, "
+                "created_at, updated_at) VALUES "
+                "(:id, 'Legacy Company', 'legacycompany', 'unknown', 'unknown', "
+                ":website, :created_at, :created_at)"
+            ),
+            {
+                "id": company_id,
+                "website": "HTTPS://Legacy.Example/path?campaign=old#fragment",
+                "created_at": created_at,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO regulatory_filings "
+                "(id, company_id, filing_type, filing_number, filing_name, "
+                "created_at, updated_at) VALUES "
+                "(:id, :company_id, 'business_license', :filing_number, "
+                "'Legacy filing', :created_at, :created_at)"
+            ),
+            {
+                "id": filing_id,
+                "company_id": company_id,
+                "filing_number": "  Ｋ\u3000Straße\t42 ",
+                "created_at": created_at,
+            },
+        )
+
+    command.upgrade(config, "head")
+    with engine.connect() as connection:
+        assert connection.scalar(
+            text("SELECT normalized_website FROM companies WHERE id = :id"),
+            {"id": company_id},
+        ) == "https://legacy.example/path"
+        assert connection.scalar(
+            text(
+                "SELECT normalized_filing_number FROM regulatory_filings "
+                "WHERE id = :id"
+            ),
+            {"id": filing_id},
+        ) == "kstrasse42"
+        assert {index["name"] for index in inspect(connection).get_indexes("companies")} >= {
+            "ix_companies_normalized_website"
+        }
+        assert {
+            index["name"]
+            for index in inspect(connection).get_indexes("regulatory_filings")
+        } >= {"ix_regulatory_filings_normalized_filing_number"}
+
+    command.downgrade(config, "0008_gate1_manifest_discovery")
+    inspector = inspect(engine)
+    assert "normalized_website" not in {
+        column["name"] for column in inspector.get_columns("companies")
+    }
+    assert "normalized_filing_number" not in {
+        column["name"] for column in inspector.get_columns("regulatory_filings")
+    }
 
 
 def test_gate1_manifest_discovery_default_sqlite_offline_upgrade_completes() -> None:

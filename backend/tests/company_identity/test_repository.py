@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session
 
@@ -175,15 +175,15 @@ def test_postgresql_missing_trigram_capability_is_cached_as_unavailable() -> Non
     assert "pg_trgm" in capability_sql
 
 
-def test_postgresql_boundary_ties_are_stably_cropped_after_fixed_knn_recall() -> None:
+def test_postgresql_knn_boundary_order_is_stable_before_limit() -> None:
     session = _PostgreSQLRecordingSession()
     repository = SqlAlchemyCompanyIdentityRepository(session, similarity_limit=20)  # type: ignore[arg-type]
 
     asyncio.run(repository.find_similar_names(frozenset({"same-distance"}), limit=20))
 
     assert len(session.statements) == 2
-    for statement in session.statements:
-        compiled_sql = " ".join(
+    compiled_statements = tuple(
+        " ".join(
             str(
                 statement.compile(
                     dialect=postgresql.dialect(),
@@ -193,12 +193,24 @@ def test_postgresql_boundary_ties_are_stably_cropped_after_fixed_knn_recall() ->
             .upper()
             .split()
         )
-        assert compiled_sql.count("LIMIT") == 2
-        assert "LIMIT 40" in compiled_sql
-        assert "LIMIT 20" in compiled_sql
-        assert "ORDER BY ANON_1.DISTANCE, ANON_1.NORMALIZED_NAME, ANON_1.COMPANY_ID" in (
-            compiled_sql
-        )
+        for statement in session.statements
+    )
+    canonical_sql = next(
+        sql for sql in compiled_statements if "FROM COMPANIES" in sql and "JOIN" not in sql
+    )
+    alias_sql = next(sql for sql in compiled_statements if "JOIN COMPANY_ALIASES" in sql)
+
+    assert canonical_sql.count("LIMIT") == 1
+    assert (
+        "ORDER BY COMPANIES.NORMALIZED_NAME <-> 'SAME-DISTANCE', "
+        "COMPANIES.NORMALIZED_NAME, COMPANIES.ID LIMIT 20" in canonical_sql
+    )
+    assert alias_sql.count("LIMIT") == 1
+    assert (
+        "ORDER BY COMPANY_ALIASES.NORMALIZED_ALIAS <-> 'SAME-DISTANCE', "
+        "COMPANY_ALIASES.NORMALIZED_ALIAS, COMPANIES.ID, COMPANY_ALIASES.ID LIMIT 20"
+        in alias_sql
+    )
 
 
 def resolved_review(
@@ -361,7 +373,7 @@ def test_evidence_owners_include_current_records_and_only_resolved_review_histor
     assert rejected == frozenset()
 
 
-def test_company_website_is_identity_normalized_before_persistence() -> None:
+def test_historical_company_website_uses_backfilled_normalized_identity() -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as session:
@@ -371,6 +383,14 @@ def test_company_website_is_identity_normalized_before_persistence() -> None:
             website="HTTPS://Alpha.Example/path?campaign=ignored#fragment",
         )
         session.add(stored)
+        session.commit()
+        session.execute(
+            text("UPDATE companies SET website = :website WHERE id = :company_id"),
+            {
+                "website": "HTTPS://Alpha.Example/path?campaign=ignored#fragment",
+                "company_id": str(COMPANY_A),
+            },
+        )
         session.commit()
         session.refresh(stored)
 
@@ -383,11 +403,34 @@ def test_company_website_is_identity_normalized_before_persistence() -> None:
             )
         )
 
-    assert stored.website == "https://alpha.example/path"
+    assert stored.website == "HTTPS://Alpha.Example/path?campaign=ignored#fragment"
     assert owners == frozenset({COMPANY_A})
 
 
-def test_filing_number_uses_identity_normalization_before_persistence() -> None:
+def test_clearing_company_website_clears_normalized_identity() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        stored = company(COMPANY_A, "alpha", website="https://alpha.example/path")
+        session.add(stored)
+        session.commit()
+
+        stored.website = None
+        session.commit()
+
+        owners = asyncio.run(
+            SqlAlchemyCompanyIdentityRepository(session).find_evidence_owner_ids(
+                CompanyIdentityInput(
+                    canonical_name="Candidate",
+                    official_website="https://alpha.example/path",
+                )
+            )
+        )
+
+    assert owners == frozenset()
+
+
+def test_historical_filing_number_uses_backfilled_normalized_identity() -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     statements: list[str] = []
@@ -403,10 +446,21 @@ def test_filing_number_uses_identity_normalization_before_persistence() -> None:
         stored = RegulatoryFiling(
             company_id=COMPANY_A,
             filing_type=FilingType.BUSINESS_LICENSE,
-            filing_number="  Ｋ\u3000Straße\t42 ",
+            filing_number="K STRASSE 42",
             filing_name="Alpha filing",
         )
         session.add(stored)
+        session.commit()
+        session.execute(
+            text(
+                "UPDATE regulatory_filings SET filing_number = :filing_number "
+                "WHERE id = :filing_id"
+            ),
+            {
+                "filing_number": "  Ｋ\u3000Straße\t42 ",
+                "filing_id": str(stored.id),
+            },
+        )
         session.commit()
         session.refresh(stored)
         statements.clear()
@@ -420,7 +474,7 @@ def test_filing_number_uses_identity_normalization_before_persistence() -> None:
             )
         )
 
-    assert stored.filing_number == "kstrasse42"
+    assert stored.filing_number == "  Ｋ\u3000Straße\t42 "
     assert owners == frozenset({COMPANY_A})
     assert statements
     assert all("LOWER(" not in statement.upper() for statement in statements)

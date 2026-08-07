@@ -10,6 +10,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 
 from alembic import op
+from app.core.normalization import normalize_name, normalize_public_identity_url
 from app.models.base import GUID, UTCDateTime
 
 revision: str = "0009_company_identity_review"
@@ -52,7 +53,98 @@ def _is_postgresql() -> bool:
     return op.get_context().dialect.name == "postgresql"
 
 
+def _backfill_normalized_evidence() -> None:
+    if op.get_context().as_sql:
+        return
+
+    connection = op.get_bind()
+    companies = sa.table(
+        "companies",
+        sa.column("id", GUID()),
+        sa.column("website", sa.String(1000)),
+        sa.column("normalized_website", sa.String(1000)),
+    )
+    filings = sa.table(
+        "regulatory_filings",
+        sa.column("id", GUID()),
+        sa.column("filing_number", sa.String(255)),
+        sa.column("normalized_filing_number", sa.String(255)),
+    )
+
+    last_company_id = None
+    while True:
+        statement = (
+            sa.select(companies.c.id, companies.c.website)
+            .where(
+                companies.c.website.is_not(None),
+                companies.c.normalized_website.is_(None),
+            )
+            .order_by(companies.c.id)
+            .limit(500)
+        )
+        if last_company_id is not None:
+            statement = statement.where(companies.c.id > last_company_id)
+        rows = connection.execute(statement).all()
+        if not rows:
+            break
+        for company_id, website in rows:
+            try:
+                normalized_website = normalize_public_identity_url(website)
+            except ValueError:
+                continue
+            if len(normalized_website) <= 1_000:
+                connection.execute(
+                    sa.update(companies)
+                    .where(companies.c.id == company_id)
+                    .values(normalized_website=normalized_website)
+                )
+        last_company_id = rows[-1][0]
+
+    last_filing_id = None
+    while True:
+        statement = (
+            sa.select(filings.c.id, filings.c.filing_number)
+            .where(filings.c.normalized_filing_number.is_(None))
+            .order_by(filings.c.id)
+            .limit(500)
+        )
+        if last_filing_id is not None:
+            statement = statement.where(filings.c.id > last_filing_id)
+        rows = connection.execute(statement).all()
+        if not rows:
+            break
+        for filing_id, filing_number in rows:
+            normalized_filing_number = normalize_name(filing_number)
+            if normalized_filing_number and len(normalized_filing_number) <= 255:
+                connection.execute(
+                    sa.update(filings)
+                    .where(filings.c.id == filing_id)
+                    .values(normalized_filing_number=normalized_filing_number)
+                )
+        last_filing_id = rows[-1][0]
+
+
 def upgrade() -> None:
+    op.add_column(
+        "companies",
+        sa.Column("normalized_website", sa.String(1000), nullable=True),
+    )
+    op.add_column(
+        "regulatory_filings",
+        sa.Column("normalized_filing_number", sa.String(255), nullable=True),
+    )
+    _backfill_normalized_evidence()
+    op.create_index(
+        "ix_companies_normalized_website",
+        "companies",
+        ["normalized_website"],
+    )
+    op.create_index(
+        "ix_regulatory_filings_normalized_filing_number",
+        "regulatory_filings",
+        ["normalized_filing_number"],
+    )
+
     op.create_table(
         "company_identity_review_items",
         sa.Column("id", GUID(), nullable=False),
@@ -179,3 +271,13 @@ def downgrade() -> None:
         table_name="company_identity_review_items",
     )
     op.drop_table("company_identity_review_items")
+    op.drop_index(
+        "ix_regulatory_filings_normalized_filing_number",
+        table_name="regulatory_filings",
+    )
+    op.drop_index(
+        "ix_companies_normalized_website",
+        table_name="companies",
+    )
+    op.drop_column("regulatory_filings", "normalized_filing_number")
+    op.drop_column("companies", "normalized_website")

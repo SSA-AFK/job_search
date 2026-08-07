@@ -1,7 +1,7 @@
 import asyncio
 import os
 import re
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, event, text
@@ -125,19 +125,33 @@ def test_ten_thousand_company_resolution_uses_bounded_trigram_recall() -> None:
                     "FROM generate_series(1, 10000) AS value"
                 )
             )
+            connection.execute(
+                text(
+                    "INSERT INTO companies (id, canonical_name, normalized_name) "
+                    "SELECT ('00000000-0000-0000-0000-' || "
+                    "lpad(value::text, 12, '0'))::uuid, "
+                    "'KNN Boundary ' || chr(96 + value), "
+                    "'knnboundary' || chr(96 + value) "
+                    "FROM generate_series(1, 25) AS value"
+                )
+            )
             connection.execute(text("ANALYZE companies"))
             connection.execute(text("ANALYZE company_aliases"))
 
-            assert connection.scalar(text("SELECT count(*) FROM companies")) == 10_000
+            assert connection.scalar(text("SELECT count(*) FROM companies")) == 10_025
+            assert connection.scalar(
+                text(
+                    "SELECT count(DISTINCT normalized_name <-> 'knnboundaryz') "
+                    "FROM companies WHERE normalized_name LIKE 'knnboundary%'"
+                )
+            ) == 1
             plan = "\n".join(
                 connection.execute(
                     text(
                         "EXPLAIN (COSTS OFF) "
-                        "SELECT company_id, canonical_name, normalized_name FROM ("
-                        "SELECT id AS company_id, canonical_name, normalized_name, "
-                        "normalized_name <-> 'benchmarkcompany05000x' AS distance "
-                        "FROM companies ORDER BY distance LIMIT 40"
-                        ") AS recall ORDER BY distance, normalized_name, company_id LIMIT 20"
+                        "SELECT id, canonical_name, normalized_name FROM companies "
+                        "ORDER BY normalized_name <-> 'benchmarkcompany05000x', "
+                        "normalized_name, id LIMIT 20"
                     )
                 ).scalars()
             )
@@ -152,14 +166,21 @@ def test_ten_thousand_company_resolution_uses_bounded_trigram_recall() -> None:
             ),
         )
         with Session(schema_engine) as session:
+            repository = SqlAlchemyCompanyIdentityRepository(session, similarity_limit=20)
             result = asyncio.run(
                 CompanyIdentityResolver(
-                    SqlAlchemyCompanyIdentityRepository(session, similarity_limit=20)
+                    repository
                 ).resolve(CompanyIdentityInput(canonical_name="Benchmark Company 05000x"))
+            )
+            boundary_matches = asyncio.run(
+                repository.find_similar_names(frozenset({"knnboundaryz"}), limit=20)
             )
 
         assert result.kind is IdentityResolutionKind.REVIEW_REQUIRED
         assert 1 <= len(result.candidate_matches) <= 20
+        assert tuple(match.company_id for match in boundary_matches) == tuple(
+            UUID(int=value) for value in range(1, 21)
+        )
         assert all(
             "SELECT COMPANIES.ID, COMPANIES.NORMALIZED_NAME FROM COMPANIES"
             not in statement

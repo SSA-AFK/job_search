@@ -5,7 +5,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, event, func, select
+from sqlalchemy import create_engine, event, func, select, text
 from sqlalchemy.orm import Session
 
 from app.collection.repository import CollectionRepository
@@ -383,6 +383,20 @@ def test_equivalent_unicode_filing_numbers_replay_one_normalized_identity(
         ),
         run_id=uuid4(),
     )
+    stored = session.scalar(select(RegulatoryFiling))
+    assert stored is not None
+    session.execute(
+        text(
+            "UPDATE regulatory_filings SET filing_number = :filing_number "
+            "WHERE id = :filing_id"
+        ),
+        {
+            "filing_number": "  Ｋ\u3000Straße\t42 ",
+            "filing_id": str(stored.id),
+        },
+    )
+    session.commit()
+
     second = persistence.persist(
         normalized_batch(
             jobs=(),
@@ -391,11 +405,11 @@ def test_equivalent_unicode_filing_numbers_replay_one_normalized_identity(
         run_id=uuid4(),
     )
 
-    stored = session.scalar(select(RegulatoryFiling))
-    assert stored is not None
+    session.refresh(stored)
     assert second.company_id == first.company_id
     assert count_rows(session, RegulatoryFiling) == 1
-    assert stored.filing_number == "kstrasse42"
+    assert stored.filing_number == "  Ｋ\u3000Straße\t42 "
+    assert stored.normalized_filing_number == "kstrasse42"
 
 
 def test_filing_conflict_preserves_previous_collection_time(

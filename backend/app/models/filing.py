@@ -1,7 +1,7 @@
 from datetime import date
 from uuid import UUID, uuid4
 
-from sqlalchemy import Date, Enum, ForeignKey, String, UniqueConstraint
+from sqlalchemy import Date, Enum, ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from app.core.normalization import normalize_name
@@ -13,6 +13,10 @@ class RegulatoryFiling(Base, TimestampMixin):
     __tablename__ = "regulatory_filings"
     __table_args__ = (
         UniqueConstraint("filing_type", "filing_number", name="uq_filing_type_number"),
+        Index(
+            "ix_regulatory_filings_normalized_filing_number",
+            "normalized_filing_number",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
@@ -33,6 +37,7 @@ class RegulatoryFiling(Base, TimestampMixin):
         )
     )
     filing_number: Mapped[str] = mapped_column(String(255))
+    normalized_filing_number: Mapped[str | None] = mapped_column(String(255))
     filing_name: Mapped[str] = mapped_column(String(255))
     filing_authority: Mapped[str | None] = mapped_column(String(255))
     filing_date: Mapped[date | None] = mapped_column(Date)
@@ -46,4 +51,5 @@ class RegulatoryFiling(Base, TimestampMixin):
             raise ValueError("filing_number is required")
         if len(normalized) > 255:
             raise ValueError("filing_number exceeds database length")
+        self.normalized_filing_number = normalized
         return normalized

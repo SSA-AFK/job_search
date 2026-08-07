@@ -35,7 +35,6 @@ from app.company_identity.models import (
 from app.models import Company, CompanyAlias, RegulatoryFiling
 
 _MAX_CANDIDATES = 20
-_KNN_RECALL_MULTIPLIER = 2
 _POSTGRESQL_SIMILARITY_CAPABILITY_SQL = text(
     "SELECT "
     "EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE extname = 'pg_trgm') "
@@ -107,7 +106,9 @@ class SqlAlchemyCompanyIdentityRepository:
         if identity.official_website is not None:
             owner_ids.update(
                 self._bounded_owner_ids(
-                    select(Company.id).where(Company.website == identity.official_website)
+                    select(Company.id).where(
+                        Company.normalized_website == identity.official_website
+                    )
                 )
             )
             owner_ids.update(
@@ -128,7 +129,9 @@ class SqlAlchemyCompanyIdentityRepository:
             owner_ids.update(
                 self._bounded_owner_ids(
                     select(RegulatoryFiling.company_id).where(
-                        RegulatoryFiling.filing_number.in_(identity.legal_identifiers)
+                        RegulatoryFiling.normalized_filing_number.in_(
+                            identity.legal_identifiers
+                        )
                     )
                 )
             )
@@ -144,64 +147,38 @@ class SqlAlchemyCompanyIdentityRepository:
             return ()
 
         recalled: list[CompanyIdentityCandidateMatch] = []
-        recall_limit = final_limit * _KNN_RECALL_MULTIPLIER
         for candidate_name in sorted(names):
             canonical_distance = Company.normalized_name.op("<->")(candidate_name)
-            canonical_recall = (
+            canonical_statement = (
                 select(
                     Company.id.label("company_id"),
                     Company.canonical_name.label("canonical_name"),
                     Company.normalized_name.label("normalized_name"),
                     Company.normalized_name.label("matched_name"),
                     literal("fuzzy_canonical").label("match_kind"),
-                    canonical_distance.label("distance"),
-                )
-                .order_by(canonical_distance)
-                .limit(recall_limit)
-                .subquery()
-            )
-            canonical_statement = (
-                select(
-                    canonical_recall.c.company_id,
-                    canonical_recall.c.canonical_name,
-                    canonical_recall.c.normalized_name,
-                    canonical_recall.c.matched_name,
-                    canonical_recall.c.match_kind,
                 )
                 .order_by(
-                    canonical_recall.c.distance,
-                    canonical_recall.c.normalized_name,
-                    canonical_recall.c.company_id,
+                    canonical_distance,
+                    Company.normalized_name,
+                    Company.id,
                 )
                 .limit(final_limit)
             )
             alias_distance = CompanyAlias.normalized_alias.op("<->")(candidate_name)
-            alias_recall = (
+            alias_statement = (
                 select(
                     Company.id.label("company_id"),
                     Company.canonical_name.label("canonical_name"),
                     Company.normalized_name.label("normalized_name"),
                     CompanyAlias.normalized_alias.label("matched_name"),
                     literal("fuzzy_alias").label("match_kind"),
-                    alias_distance.label("distance"),
                 )
                 .join(CompanyAlias, CompanyAlias.company_id == Company.id)
-                .order_by(alias_distance)
-                .limit(recall_limit)
-                .subquery()
-            )
-            alias_statement = (
-                select(
-                    alias_recall.c.company_id,
-                    alias_recall.c.canonical_name,
-                    alias_recall.c.normalized_name,
-                    alias_recall.c.matched_name,
-                    alias_recall.c.match_kind,
-                )
                 .order_by(
-                    alias_recall.c.distance,
-                    alias_recall.c.normalized_name,
-                    alias_recall.c.company_id,
+                    alias_distance,
+                    CompanyAlias.normalized_alias,
+                    Company.id,
+                    CompanyAlias.id,
                 )
                 .limit(final_limit)
             )
