@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     provider_min_interval_seconds: float = 0.25
     collection_stale_queued_seconds: int = 300
     collection_stale_running_seconds: int = 1_800
+    gate1_live_discovery_enabled: bool = False
+    gate1_source_registry_path: str = "data/gate1/source_registry.json"
+    gate1_zhihu_request_budget: int = 200
+    gate1_domain_min_interval_seconds: float = 1.0
 
 
 settings = Settings()
