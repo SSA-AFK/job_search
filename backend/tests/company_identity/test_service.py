@@ -589,38 +589,110 @@ def test_decision_rechecks_name_owner_after_queue_export(session: Session) -> No
 def test_decision_batch_rolls_back_every_partial_company_and_alias_change(
     session: Session,
 ) -> None:
-    target = company_row(session, "Target Company")
-    first_item = pending_review(session, candidate_name="First Alias")
-    second_item = pending_review(session, candidate_name="Second Alias")
-    missing_company = UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    first_target = company_row(session, "First Target")
+    second_target = company_row(session, "Second Target")
+    first_target_id = first_target.id
+    second_target_id = second_target.id
+    first_item_id = pending_review(
+        session,
+        candidate_name="Shared Alias",
+        identity=CompanyIdentityInput(canonical_name="Shared Alias", city="first"),
+    )
+    second_item_id = pending_review(
+        session,
+        candidate_name="Shared Alias",
+        identity=CompanyIdentityInput(canonical_name="Shared Alias", city="second"),
+    )
+    statements: list[str] = []
+    engine = session.get_bind()
 
-    with pytest.raises(IdentityOwnerChanged):
-        apply_identity_review_decisions(
-            session,
-            (
-                decision(
-                    first_item,
-                    action=IdentityReviewAction.LINK_AS_ALIAS,
-                    target_company_id=target.id,
+    def capture_mutation(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        statements.append(" ".join(statement.upper().split()))
+
+    event.listen(engine, "after_cursor_execute", capture_mutation)
+    try:
+        with pytest.raises(IdentityOwnerChanged):
+            apply_identity_review_decisions(
+                session,
+                (
+                    decision(
+                        first_item_id,
+                        action=IdentityReviewAction.LINK_AS_ALIAS,
+                        target_company_id=first_target_id,
+                    ),
+                    decision(
+                        second_item_id,
+                        action=IdentityReviewAction.LINK_AS_ALIAS,
+                        target_company_id=second_target_id,
+                    ),
                 ),
-                decision(
-                    second_item,
-                    action=IdentityReviewAction.LINK_AS_ALIAS,
-                    target_company_id=missing_company,
-                ),
-            ),
+            )
+    finally:
+        event.remove(engine, "after_cursor_execute", capture_mutation)
+
+    assert any("INSERT INTO COMPANY_ALIASES" in sql for sql in statements)
+    assert any("UPDATE COMPANY_IDENTITY_REVIEW_ITEMS" in sql for sql in statements)
+    assert any("INSERT INTO COMPANY_IDENTITY_REVIEW_DECISIONS" in sql for sql in statements)
+
+    companies = {
+        company_id: canonical_name
+        for company_id, canonical_name in session.execute(
+            select(Company.id, Company.canonical_name).where(
+                Company.id.in_((first_target_id, second_target_id))
+            )
         )
-
-    assert alias_owner(session, "firstalias") is None
-    assert session.scalar(
-        select(func.count()).select_from(CompanyIdentityReviewDecision)
-    ) == 0
-    statuses = tuple(
-        session.scalars(
-            select(CompanyIdentityReviewItem.status).order_by(CompanyIdentityReviewItem.id)
+    }
+    assert companies == {
+        first_target_id: "First Target",
+        second_target_id: "Second Target",
+    }
+    assert tuple(session.scalars(select(CompanyAlias))) == ()
+    review_states = {
+        item_id: (status, resolved_at)
+        for item_id, status, resolved_at in session.execute(
+            select(
+                CompanyIdentityReviewItem.id,
+                CompanyIdentityReviewItem.status,
+                CompanyIdentityReviewItem.resolved_at,
+            ).where(
+                CompanyIdentityReviewItem.id.in_((first_item_id, second_item_id))
+            )
+        )
+    }
+    assert review_states == {
+        first_item_id: (IdentityReviewStatus.PENDING, None),
+        second_item_id: (IdentityReviewStatus.PENDING, None),
+    }
+    decision_rows = tuple(
+        session.execute(
+            select(
+                CompanyIdentityReviewDecision.review_item_id,
+                CompanyIdentityReviewDecision.decision_hash,
+                CompanyIdentityReviewDecision.resulting_company_id,
+            )
         )
     )
-    assert statuses == (IdentityReviewStatus.PENDING, IdentityReviewStatus.PENDING)
+    assert decision_rows == ()
+    resulting_name_owners = set(
+        session.scalars(
+            select(Company.id).where(Company.normalized_name == "sharedalias")
+        )
+    )
+    resulting_name_owners.update(
+        session.scalars(
+            select(CompanyAlias.company_id).where(
+                CompanyAlias.normalized_alias == "sharedalias"
+            )
+        )
+    )
+    assert resulting_name_owners == set()
 
 
 def test_decision_revalidates_constructed_input_and_rejects_dirty_session(
