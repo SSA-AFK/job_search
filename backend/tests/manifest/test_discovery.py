@@ -494,6 +494,93 @@ async def test_zhihu_fallback_runs_last_and_remains_review_required() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "status",
+    [
+        DiscoveryStatus.REVIEW_REQUIRED,
+        DiscoveryStatus.BLOCKED,
+        DiscoveryStatus.FAILED,
+    ],
+)
+async def test_coordinator_preserves_terminal_fallback_without_candidate(
+    status: DiscoveryStatus,
+) -> None:
+    official = _StaticDiscoverer(
+        EntryDiscoveryResult(
+            status=DiscoveryStatus.NOT_FOUND,
+            method="official_navigation",
+            error_code="recruitment_entry_not_found",
+        )
+    )
+    fallback = _StaticDiscoverer(
+        EntryDiscoveryResult(
+            status=status,
+            method="zhihu_global_search",
+            source_id="zhihu_global_search",
+            error_code="fallback_discovery_stopped",
+        )
+    )
+
+    result = await EntryDiscoveryCoordinator(
+        official_discoverer=official, fallback_discoverer=fallback
+    ).discover(company())
+
+    assert result.status is status
+    assert result.method == "zhihu_global_search"
+    assert result.source_id == "zhihu_global_search"
+    assert result.error_code == "fallback_discovery_stopped"
+    assert result.candidate_url is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "status",
+    [
+        DiscoveryStatus.REVIEW_REQUIRED,
+        DiscoveryStatus.BLOCKED,
+        DiscoveryStatus.FAILED,
+    ],
+)
+async def test_coordinator_preserves_terminal_fallback_with_candidate(
+    status: DiscoveryStatus,
+) -> None:
+    official = _StaticDiscoverer(
+        EntryDiscoveryResult(
+            status=DiscoveryStatus.NOT_FOUND,
+            method="official_navigation",
+            error_code="recruitment_entry_not_found",
+        )
+    )
+    fallback = _StaticDiscoverer(
+        EntryDiscoveryResult(
+            status=status,
+            method="zhihu_global_search",
+            candidate_url="https://jobs.feishu.cn/acme",
+            normalized_url="https://jobs.feishu.cn/acme",
+            source_id="zhihu_global_search",
+            ownership_evidence="fallback_terminal_evidence",
+            classification=AtsClassification(platform="feishu", requires_rendering=True),
+            error_code="fallback_discovery_stopped",
+        )
+    )
+
+    result = await EntryDiscoveryCoordinator(
+        official_discoverer=official, fallback_discoverer=fallback
+    ).discover(company())
+
+    assert result.status is status
+    assert result.method == "zhihu_global_search"
+    assert str(result.candidate_url) == "https://jobs.feishu.cn/acme"
+    assert str(result.normalized_url) == "https://jobs.feishu.cn/acme"
+    assert result.source_id == "zhihu_global_search"
+    assert result.ownership_evidence == "fallback_terminal_evidence"
+    assert result.classification == AtsClassification(
+        platform="feishu", requires_rendering=True
+    )
+    assert result.error_code == "fallback_discovery_stopped"
+
+
+@pytest.mark.anyio
 async def test_coordinator_does_not_invoke_fallback_after_official_acceptance() -> None:
     accepted = EntryDiscoveryResult(
         status=DiscoveryStatus.ACCEPTED,

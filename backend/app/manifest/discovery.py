@@ -396,6 +396,8 @@ class EntryDiscoveryCoordinator:
             return official
 
         fallback = await self._fallback_discoverer.discover(company)
+        if fallback.status is not DiscoveryStatus.ACCEPTED:
+            return fallback
         if fallback.candidate_url is None:
             return official
         return EntryDiscoveryResult(
