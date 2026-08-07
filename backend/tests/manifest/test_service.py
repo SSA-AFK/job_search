@@ -11,14 +11,33 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
-from app.manifest.contracts import AiCategory, CandidateDecisionStatus, ConfidenceTier
-from app.manifest.models import CandidateFact, CompanyManifest, CompanyManifestMember
+from app.manifest.contracts import (
+    AiCategory,
+    AtsClassification,
+    CandidateDecisionStatus,
+    ConfidenceTier,
+    DiscoveryStatus,
+    EntryDiscoveryResult,
+    RecordDiscoveryCommand,
+)
+from app.manifest.models import (
+    CandidateFact,
+    CompanyManifest,
+    CompanyManifestMember,
+    EntryDiscoveryObservation,
+)
 from app.manifest.service import (
+    DiscoveryRecordConflict,
     ManifestFreezeConflict,
     ManifestFreezeError,
     freeze_manifest,
+    record_discovery_result,
 )
-from app.models import Base, Company
+from app.models import Base, Company, JobCollectionSnapshot, JobEntry, JobEntryStatus
+
+DISCOVERY_MANIFEST_VERSION = "d" * 64
+DISCOVERY_COMPANY_ID = UUID(int=91_001)
+DISCOVERY_OBSERVED_AT = datetime(2026, 8, 7, 4, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -89,6 +108,68 @@ def seed_resolved_candidates(
     session.add_all(facts)
     session.commit()
     return tuple(companies)
+
+
+def seed_discovery_manifest(
+    session: Session,
+    *,
+    company_id: UUID = DISCOVERY_COMPANY_ID,
+    position: int = 1,
+) -> Company:
+    company = Company(
+        id=company_id,
+        canonical_name=f"Discovery Company {position}",
+        normalized_name=f"discovery-company-{position}",
+    )
+    session.add(company)
+    if session.get(CompanyManifest, DISCOVERY_MANIFEST_VERSION) is None:
+        session.add(
+            CompanyManifest(
+                version=DISCOVERY_MANIFEST_VERSION,
+                config_fingerprint="a" * 64,
+                member_count=1,
+                canonical_quota={"foundation_models": 1},
+                frozen_at=datetime(2026, 8, 7, tzinfo=UTC),
+            )
+        )
+    session.flush()
+    session.add(
+        CompanyManifestMember(
+            manifest_version=DISCOVERY_MANIFEST_VERSION,
+            company_id=company.id,
+            position=position,
+            canonical_name=company.canonical_name,
+            primary_category=AiCategory.FOUNDATION_MODELS,
+        )
+    )
+    session.commit()
+    return company
+
+
+def accepted_discovery_command(
+    *,
+    company_id: UUID = DISCOVERY_COMPANY_ID,
+    candidate_url: str | None = None,
+    normalized_url: str = "https://jobs.feishu.cn/acme/careers",
+    platform: str = "feishu",
+    observed_at: datetime = DISCOVERY_OBSERVED_AT,
+) -> RecordDiscoveryCommand:
+    return RecordDiscoveryCommand(
+        manifest_version=DISCOVERY_MANIFEST_VERSION,
+        company_id=company_id,
+        observed_at=observed_at,
+        result=EntryDiscoveryResult(
+            status=DiscoveryStatus.ACCEPTED,
+            method="official_navigation",
+            candidate_url=candidate_url or normalized_url,
+            normalized_url=normalized_url,
+            ownership_evidence="official_navigation_anchor:Careers",
+            classification=AtsClassification(
+                platform=platform,
+                requires_rendering=True,
+            ),
+        ),
+    )
 
 
 def test_freeze_counts_unique_companies_for_1500_identity_prerequisite(
@@ -301,3 +382,242 @@ def test_freeze_requires_clean_session_for_owned_transaction(session: Session) -
 
     with pytest.raises(ManifestFreezeError, match="clean session"):
         freeze_manifest(session, config_fingerprint="a" * 64)
+
+
+def test_accepted_discovery_upserts_owned_entry_without_snapshot(
+    session: Session,
+) -> None:
+    seed_discovery_manifest(session)
+
+    result = record_discovery_result(session, accepted_discovery_command())
+
+    entry = session.get(JobEntry, result.job_entry_id)
+    assert result.entry_created is True
+    assert result.observation_created is True
+    assert entry is not None
+    assert entry.company_id == DISCOVERY_COMPANY_ID
+    assert entry.provider == "official_entry_discovery"
+    assert entry.platform == "feishu"
+    assert entry.requires_rendering is True
+    assert entry.status is JobEntryStatus.UNKNOWN
+    assert session.scalar(select(func.count()).select_from(JobCollectionSnapshot)) == 0
+
+
+def test_exact_discovery_replay_does_not_duplicate_observation_or_entry(
+    session: Session,
+) -> None:
+    seed_discovery_manifest(session)
+    command = accepted_discovery_command()
+
+    first = record_discovery_result(session, command)
+    second = record_discovery_result(session, command)
+
+    assert second.observation_id == first.observation_id
+    assert second.job_entry_id == first.job_entry_id
+    assert second.observation_created is False
+    assert second.entry_created is False
+    assert session.scalar(select(func.count()).select_from(EntryDiscoveryObservation)) == 1
+    assert session.scalar(select(func.count()).select_from(JobEntry)) == 1
+
+
+def test_accepted_discovery_upserts_existing_owned_entry_without_resetting_status(
+    session: Session,
+) -> None:
+    company = seed_discovery_manifest(session)
+    existing = JobEntry(
+        company_id=company.id,
+        url="https://jobs.feishu.cn/acme/careers",
+        normalized_url="https://jobs.feishu.cn/acme/careers",
+        provider="legacy_import",
+        platform="unknown",
+        requires_rendering=False,
+        status=JobEntryStatus.ACTIVE,
+    )
+    session.add(existing)
+    session.commit()
+
+    result = record_discovery_result(session, accepted_discovery_command())
+
+    assert result.job_entry_id == existing.id
+    assert result.entry_created is False
+    assert existing.provider == "official_entry_discovery"
+    assert existing.platform == "feishu"
+    assert existing.requires_rendering is True
+    assert existing.status is JobEntryStatus.ACTIVE
+
+
+def test_discovery_allows_multiple_distinct_owned_entries_for_one_company(
+    session: Session,
+) -> None:
+    seed_discovery_manifest(session)
+
+    first = record_discovery_result(session, accepted_discovery_command())
+    second = record_discovery_result(
+        session,
+        accepted_discovery_command(
+            normalized_url="https://jobs.feishu.cn/acme/campus",
+        ),
+    )
+
+    assert first.job_entry_id != second.job_entry_id
+    assert first.entry_created is True
+    assert second.entry_created is True
+    assert session.scalar(select(func.count()).select_from(JobEntry)) == 2
+    assert session.scalar(select(func.count()).select_from(EntryDiscoveryObservation)) == 2
+
+
+def test_same_normalized_url_with_changed_observation_conflicts_atomically(
+    session: Session,
+) -> None:
+    seed_discovery_manifest(session)
+    first = record_discovery_result(session, accepted_discovery_command())
+
+    with pytest.raises(DiscoveryRecordConflict, match="conflicts"):
+        record_discovery_result(
+            session,
+            accepted_discovery_command(platform="moka"),
+        )
+
+    observation = session.get(EntryDiscoveryObservation, first.observation_id)
+    entry = session.get(JobEntry, first.job_entry_id)
+    assert observation is not None
+    assert observation.platform == "feishu"
+    assert entry is not None
+    assert entry.platform == "feishu"
+    assert session.scalar(select(func.count()).select_from(EntryDiscoveryObservation)) == 1
+
+
+def test_accepted_discovery_rejects_mismatched_normalized_url_identity(
+    session: Session,
+) -> None:
+    seed_discovery_manifest(session)
+
+    with pytest.raises(DiscoveryRecordConflict, match="normalized URL"):
+        record_discovery_result(
+            session,
+            accepted_discovery_command(
+                candidate_url="https://jobs.feishu.cn/different/careers",
+            ),
+        )
+
+    assert session.scalar(select(func.count()).select_from(JobEntry)) == 0
+    assert session.scalar(select(func.count()).select_from(EntryDiscoveryObservation)) == 0
+
+
+def test_accepted_discovery_rejects_unknown_platform_classification(
+    session: Session,
+) -> None:
+    seed_discovery_manifest(session)
+
+    with pytest.raises(DiscoveryRecordConflict, match="known platform"):
+        record_discovery_result(
+            session,
+            accepted_discovery_command(platform="unknown"),
+        )
+
+    assert session.scalar(select(func.count()).select_from(JobEntry)) == 0
+    assert session.scalar(select(func.count()).select_from(EntryDiscoveryObservation)) == 0
+
+
+def test_discovery_rejects_normalized_url_owned_by_another_company(
+    session: Session,
+) -> None:
+    seed_discovery_manifest(session)
+    other = Company(
+        id=UUID(int=91_002),
+        canonical_name="Other Owner",
+        normalized_name="other-owner",
+    )
+    session.add(other)
+    session.flush()
+    existing = JobEntry(
+        company_id=other.id,
+        url="https://jobs.feishu.cn/acme/careers",
+        normalized_url="https://jobs.feishu.cn/acme/careers",
+        provider="official_entry_discovery",
+        platform="feishu",
+    )
+    session.add(existing)
+    session.commit()
+
+    with pytest.raises(DiscoveryRecordConflict, match="another company"):
+        record_discovery_result(session, accepted_discovery_command())
+
+    assert session.scalar(select(func.count()).select_from(EntryDiscoveryObservation)) == 0
+    assert session.scalar(select(func.count()).select_from(JobEntry)) == 1
+
+
+def test_discovery_locks_manifest_before_entry_upsert_in_postgresql(
+    session: Session,
+) -> None:
+    seed_discovery_manifest(session)
+    captured_statements: list[object] = []
+    bind = session.get_bind()
+
+    def capture_statement(
+        _connection: object,
+        clauseelement: object,
+        _multiparams: object,
+        _params: object,
+        _execution_options: object,
+    ) -> None:
+        captured_statements.append(clauseelement)
+
+    event.listen(bind, "before_execute", capture_statement)
+    try:
+        record_discovery_result(session, accepted_discovery_command())
+    finally:
+        event.remove(bind, "before_execute", capture_statement)
+
+    compiled = tuple(
+        str(statement.compile(dialect=postgresql.dialect()))
+        for statement in captured_statements
+        if isinstance(statement, Select)
+    )
+    manifest_locks = [
+        index
+        for index, statement in enumerate(compiled)
+        if "FROM company_manifests" in statement and "FOR UPDATE" in statement
+    ]
+    entry_read_index = next(
+        index for index, statement in enumerate(compiled) if "FROM job_entries" in statement
+    )
+    assert manifest_locks
+    assert manifest_locks[0] < entry_read_index
+
+
+def test_review_required_discovery_records_observation_without_entry(
+    session: Session,
+) -> None:
+    seed_discovery_manifest(session)
+    command = RecordDiscoveryCommand(
+        manifest_version=DISCOVERY_MANIFEST_VERSION,
+        company_id=DISCOVERY_COMPANY_ID,
+        observed_at=DISCOVERY_OBSERVED_AT,
+        result=EntryDiscoveryResult(
+            status=DiscoveryStatus.REVIEW_REQUIRED,
+            method="authorized_fallback",
+            candidate_url="https://jobs.example.com/acme",
+            normalized_url="https://jobs.example.com/acme",
+            source_id="zhihu_global_search",
+            classification=AtsClassification(platform="unknown"),
+            error_code="ownership_unverified",
+        ),
+    )
+
+    result = record_discovery_result(session, command)
+
+    assert result.job_entry_id is None
+    assert result.entry_created is False
+    assert result.observation_created is True
+    assert session.get(EntryDiscoveryObservation, result.observation_id) is not None
+    assert session.scalar(select(func.count()).select_from(JobEntry)) == 0
+    assert session.scalar(select(func.count()).select_from(JobCollectionSnapshot)) == 0
+
+
+def test_discovery_requires_clean_session_for_owned_transaction(session: Session) -> None:
+    seed_discovery_manifest(session)
+    session.execute(select(Company.id)).all()
+
+    with pytest.raises(DiscoveryRecordConflict, match="clean session"):
+        record_discovery_result(session, accepted_discovery_command())

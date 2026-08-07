@@ -13,6 +13,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.normalization import normalize_url
 from app.manifest.allocation import (
     ManifestAllocationError,
     QuotaAllocation,
@@ -23,13 +24,24 @@ from app.manifest.allocation import (
 )
 from app.manifest.contracts import (
     AiCategory,
+    AtsClassification,
     CandidateDecisionStatus,
     ConfidenceTier,
+    DiscoveryStatus,
+    EntryDiscoveryResult,
     ManifestCompany,
     ManifestMemberData,
+    RecordDiscoveryCommand,
 )
-from app.manifest.models import CandidateFact, CompanyManifest, CompanyManifestMember
+from app.manifest.models import (
+    CandidateFact,
+    CompanyManifest,
+    CompanyManifestMember,
+    EntryDiscoveryObservation,
+)
 from app.models.company import Company
+from app.models.enums import JobEntryStatus
+from app.models.job_entry import JobEntry
 
 
 class ManifestFreezeError(ValueError):
@@ -38,6 +50,10 @@ class ManifestFreezeError(ValueError):
 
 class ManifestFreezeConflict(ManifestFreezeError):
     """Raised when a freeze attempt differs from the already frozen manifest."""
+
+
+class DiscoveryRecordConflict(ValueError):
+    """Raised when a discovery command cannot be recorded idempotently."""
 
 
 @dataclass(frozen=True)
@@ -52,12 +68,238 @@ class FrozenManifest:
     quota_bytes: bytes
 
 
+@dataclass(frozen=True)
+class DiscoveryRecordSummary:
+    observation_id: UUID
+    job_entry_id: UUID | None
+    observation_created: bool
+    entry_created: bool
+
+
 _FINGERPRINT_PATTERN = re.compile(r"[0-9a-f]{64}")
 _CONFIDENCE_ORDER = {
     ConfidenceTier.HIGH: 0,
     ConfidenceTier.MEDIUM: 1,
     ConfidenceTier.LOW: 2,
 }
+
+
+def _result_values(result: EntryDiscoveryResult) -> tuple[object, ...]:
+    classification = result.classification
+    return (
+        result.method,
+        result.status,
+        None if result.candidate_url is None else str(result.candidate_url),
+        None if result.normalized_url is None else str(result.normalized_url),
+        result.source_id,
+        result.ownership_evidence,
+        None if classification is None else classification.platform,
+        False if classification is None else classification.requires_rendering,
+        result.error_code,
+    )
+
+
+def _observation_values(observation: EntryDiscoveryObservation) -> tuple[object, ...]:
+    return (
+        observation.method,
+        observation.status,
+        observation.candidate_url,
+        observation.normalized_url,
+        observation.source_id,
+        observation.ownership_evidence,
+        observation.platform,
+        observation.requires_rendering,
+        observation.error_code,
+    )
+
+
+def _accepted_classification(result: EntryDiscoveryResult) -> AtsClassification:
+    if (
+        result.normalized_url is None
+        or result.candidate_url is None
+        or result.ownership_evidence is None
+        or result.classification is None
+    ):
+        raise DiscoveryRecordConflict(
+            "accepted discovery requires an owned normalized entry classification"
+        )
+    if normalize_url(str(result.candidate_url)) != str(result.normalized_url):
+        raise DiscoveryRecordConflict(
+            "accepted discovery candidate and normalized URL identities differ"
+        )
+    if result.classification.platform == "unknown":
+        raise DiscoveryRecordConflict("accepted discovery requires a known platform")
+    return result.classification
+
+
+def _matching_observation(
+    observations: Sequence[EntryDiscoveryObservation],
+    command: RecordDiscoveryCommand,
+) -> EntryDiscoveryObservation | None:
+    result = command.result
+    normalized_url = None if result.normalized_url is None else str(result.normalized_url)
+    same_identity = tuple(
+        observation
+        for observation in observations
+        if (
+            observation.normalized_url == normalized_url
+            if normalized_url is not None
+            else observation.normalized_url is None and observation.method == result.method
+        )
+    )
+    if not same_identity:
+        return None
+    expected = _result_values(result)
+    for observation in same_identity:
+        if (
+            _observation_values(observation) == expected
+            and observation.observed_at == command.observed_at
+        ):
+            return observation
+    raise DiscoveryRecordConflict("discovery observation conflicts with stored result")
+
+
+def _upsert_discovered_entry(
+    session: Session,
+    *,
+    command: RecordDiscoveryCommand,
+    classification: AtsClassification,
+) -> tuple[JobEntry, bool]:
+    result = command.result
+    assert result.normalized_url is not None
+    assert result.candidate_url is not None
+    normalized_url = str(result.normalized_url)
+    entries = tuple(
+        session.scalars(
+            select(JobEntry)
+            .where(JobEntry.normalized_url == normalized_url)
+            .order_by(JobEntry.id)
+            .with_for_update()
+        )
+    )
+    if any(entry.company_id != command.company_id for entry in entries):
+        raise DiscoveryRecordConflict("normalized discovery URL is owned by another company")
+    if len(entries) > 1:
+        raise DiscoveryRecordConflict("normalized discovery URL has conflicting entries")
+
+    created = not entries
+    if created:
+        entry = JobEntry(
+            company_id=command.company_id,
+            url=str(result.candidate_url),
+            normalized_url=normalized_url,
+            provider="official_entry_discovery",
+            platform=classification.platform,
+            requires_rendering=classification.requires_rendering,
+            status=JobEntryStatus.UNKNOWN,
+        )
+        session.add(entry)
+    else:
+        entry = entries[0]
+        entry.url = str(result.candidate_url)
+        entry.provider = "official_entry_discovery"
+        entry.platform = classification.platform
+        entry.requires_rendering = classification.requires_rendering
+    session.flush()
+    return entry, created
+
+
+def record_discovery_result(
+    session: Session,
+    command: RecordDiscoveryCommand,
+) -> DiscoveryRecordSummary:
+    """Atomically persist one manifest discovery result and its owned entry."""
+
+    if session.in_transaction():
+        raise DiscoveryRecordConflict("discovery recording requires a clean session")
+    classification = (
+        _accepted_classification(command.result)
+        if command.result.status is DiscoveryStatus.ACCEPTED
+        else command.result.classification
+    )
+
+    with session.begin():
+        manifest = session.scalar(
+            select(CompanyManifest)
+            .where(CompanyManifest.version == command.manifest_version)
+            .with_for_update()
+        )
+        if manifest is None:
+            raise DiscoveryRecordConflict("discovery manifest does not exist")
+        member = session.scalar(
+            select(CompanyManifestMember)
+            .where(
+                CompanyManifestMember.manifest_version == command.manifest_version,
+                CompanyManifestMember.company_id == command.company_id,
+            )
+            .with_for_update()
+        )
+        if member is None:
+            raise DiscoveryRecordConflict(
+                "discovery company is not a member of the requested manifest"
+            )
+
+        observations = tuple(
+            session.scalars(
+                select(EntryDiscoveryObservation)
+                .where(
+                    EntryDiscoveryObservation.manifest_version
+                    == command.manifest_version,
+                    EntryDiscoveryObservation.company_id == command.company_id,
+                )
+                .order_by(EntryDiscoveryObservation.id)
+                .with_for_update()
+            )
+        )
+        replay = _matching_observation(observations, command)
+        if replay is not None:
+            return DiscoveryRecordSummary(
+                observation_id=replay.id,
+                job_entry_id=replay.job_entry_id,
+                observation_created=False,
+                entry_created=False,
+            )
+
+        entry: JobEntry | None = None
+        entry_created = False
+        if command.result.status is DiscoveryStatus.ACCEPTED:
+            assert classification is not None
+            entry, entry_created = _upsert_discovered_entry(
+                session,
+                command=command,
+                classification=classification,
+            )
+
+        result = command.result
+        observation = EntryDiscoveryObservation(
+            manifest_version=command.manifest_version,
+            company_id=command.company_id,
+            method=result.method,
+            status=result.status,
+            candidate_url=(
+                None if result.candidate_url is None else str(result.candidate_url)
+            ),
+            normalized_url=(
+                None if result.normalized_url is None else str(result.normalized_url)
+            ),
+            source_id=result.source_id,
+            ownership_evidence=result.ownership_evidence,
+            platform=None if classification is None else classification.platform,
+            requires_rendering=(
+                False if classification is None else classification.requires_rendering
+            ),
+            error_code=result.error_code,
+            job_entry_id=None if entry is None else entry.id,
+            observed_at=command.observed_at,
+        )
+        session.add(observation)
+        session.flush()
+        return DiscoveryRecordSummary(
+            observation_id=observation.id,
+            job_entry_id=observation.job_entry_id,
+            observation_created=True,
+            entry_created=entry_created,
+        )
 
 
 def _canonical_json_bytes(value: object) -> bytes:
