@@ -14,6 +14,7 @@ from sqlalchemy.exc import DataError, IntegrityError, StatementError
 from sqlalchemy.orm import Session
 
 from app.cache.base import CompanyCache
+from app.company_identity.service import serialized_company_identity_names
 from app.core.normalization import normalize_name, normalize_url
 from app.ingestion.extraction.schemas import CompanyCandidate
 from app.ingestion.persistence.contracts import (
@@ -293,6 +294,32 @@ class PersistenceService:
     def _upsert_company(self, record: NormalizedCompanyRecord, run_id: UUID) -> Company:
         normalized = record.candidate
         candidate = normalized.candidate
+        identity_names = tuple(
+            dict.fromkeys(
+                name
+                for name in (
+                    normalized.normalized_name,
+                    *(normalize_name(alias) for alias in candidate.aliases),
+                )
+                if name
+            )
+        )
+        with serialized_company_identity_names(self.session, identity_names):
+            return self._upsert_company_locked(
+                record,
+                run_id,
+                identity_names=identity_names,
+            )
+
+    def _upsert_company_locked(
+        self,
+        record: NormalizedCompanyRecord,
+        run_id: UUID,
+        *,
+        identity_names: tuple[str, ...],
+    ) -> Company:
+        normalized = record.candidate
+        candidate = normalized.candidate
         if record.company_id is not None:
             company = self.session.get(Company, record.company_id)
             if company is None:
@@ -305,6 +332,16 @@ class PersistenceService:
             company = self.session.scalar(
                 select(Company).where(Company.normalized_name == normalized.normalized_name)
             )
+
+        allowed_owner_ids = set() if company is None else {company.id}
+        for identity_name in sorted(identity_names):
+            owner_ids = self._company_identity_name_owner_ids(identity_name)
+            if owner_ids - allowed_owner_ids:
+                raise PersistenceError(
+                    run_id=run_id,
+                    constraint="uq_company_alias_normalized_alias",
+                    detail="company identity name is owned by another company",
+                )
 
         if company is None:
             candidate_company = Company(
@@ -328,6 +365,18 @@ class PersistenceService:
             company.description = candidate.description
         self._upsert_company_aliases(company, candidate, run_id)
         return company
+
+    def _company_identity_name_owner_ids(self, normalized_name: str) -> set[UUID]:
+        return {
+            *self.session.scalars(
+                select(Company.id).where(Company.normalized_name == normalized_name)
+            ),
+            *self.session.scalars(
+                select(CompanyAlias.company_id).where(
+                    CompanyAlias.normalized_alias == normalized_name
+                )
+            ),
+        }
 
     def _upsert_company_aliases(
         self,

@@ -12,6 +12,10 @@ from app.company_identity.contracts import (
     CompanyIdentityReviewDraft,
     IdentityReviewReason,
 )
+from app.company_identity.service import (
+    IdentityReviewConflict,
+    IdentitySearchUnavailable,
+)
 from app.ingestion.contracts import ProviderQuery, ProviderResult, RawDocument
 from app.ingestion.errors import (
     ExtractionError,
@@ -208,13 +212,16 @@ class FakeBatchBuilder:
 
 
 class FakeIdentityReviewRecorder:
-    def __init__(self) -> None:
+    def __init__(self, error: Exception | None = None) -> None:
         self.records: list[tuple[UUID, CompanyIdentityReviewDraft]] = []
+        self.error = error
 
     def record(
         self, *, crawl_run_id: UUID, draft: CompanyIdentityReviewDraft
     ) -> object:
         self.records.append((crawl_run_id, draft))
+        if self.error is not None:
+            raise self.error
         return object()
 
 
@@ -333,6 +340,56 @@ async def test_lost_claim_prevents_identity_review_write() -> None:
 
     assert result.status is CollectionStatus.RUNNING
     assert recorder.records == []
+    assert persistence.calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "review_error",
+    [
+        OperationalError("insert review", {}, RuntimeError("private database detail")),
+        IdentitySearchUnavailable(),
+    ],
+)
+async def test_review_store_infrastructure_failure_is_retryable(
+    review_error: Exception,
+) -> None:
+    run = FakeRun(uuid4())
+    outcome, _draft = identity_review_outcome()
+    recorder = FakeIdentityReviewRecorder(review_error)
+    orchestrator, _runs, persistence = orchestrator_for(
+        run,
+        providers=[FakeProvider("site", ProviderResult(documents=(document(),)))],
+        build_outcome=outcome,
+        identity_review_recorder=recorder,
+    )
+
+    with pytest.raises(RetryableInfrastructureError) as raised:
+        await orchestrator.run(run.id)
+
+    assert raised.value.claim_token == run.claim_token
+    assert str(raised.value) == "retryable infrastructure failure"
+    assert run.status is CollectionStatus.RUNNING
+    assert persistence.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_review_validation_conflict_is_terminal_not_retryable() -> None:
+    run = FakeRun(uuid4())
+    outcome, _draft = identity_review_outcome()
+    recorder = FakeIdentityReviewRecorder(IdentityReviewConflict())
+    orchestrator, _runs, persistence = orchestrator_for(
+        run,
+        providers=[FakeProvider("site", ProviderResult(documents=(document(),)))],
+        build_outcome=outcome,
+        identity_review_recorder=recorder,
+    )
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.FAILED
+    assert result.error_code == "identity_review_conflict"
+    assert "private" not in (run.error_detail or "")
     assert persistence.calls == 0
 
 

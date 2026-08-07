@@ -67,6 +67,25 @@ def _drop_filing_race_schema(connection: Connection, schema_name: str) -> None:
         connection.execute(text(statement))
 
 
+def _quoted_company_identity_race_schema(schema_name: str) -> str:
+    if re.fullmatch(r"company_identity_race_[0-9a-f]{32}", schema_name) is None:
+        raise ValueError("invalid isolated company identity schema")
+    return f'"{schema_name}"'
+
+
+def _drop_company_identity_race_schema(
+    connection: Connection, schema_name: str
+) -> None:
+    quoted_schema = _quoted_company_identity_race_schema(schema_name)
+    statements = (
+        f"DROP TABLE IF EXISTS {quoted_schema}.company_aliases",
+        f"DROP TABLE IF EXISTS {quoted_schema}.companies",
+        f"DROP SCHEMA {quoted_schema}",
+    )
+    for statement in statements:
+        connection.execute(text(statement))
+
+
 class _FilingLockRecordingSession:
     def __init__(self, dialect_name: str) -> None:
         self._bind = SimpleNamespace(dialect=SimpleNamespace(name=dialect_name))
@@ -561,6 +580,103 @@ def test_alias_owned_by_another_company_rolls_back_entire_batch(
     ) == other_id
 
 
+def test_existing_alias_owner_rejects_new_canonical_and_rolls_back_batch(
+    session: Session,
+) -> None:
+    owner = Company(canonical_name="Owner", normalized_name="owner")
+    session.add(owner)
+    session.flush()
+    session.add(
+        CompanyAlias(
+            company_id=owner.id,
+            alias="Shared",
+            normalized_alias="shared",
+        )
+    )
+    session.commit()
+
+    with pytest.raises(PersistenceError) as raised:
+        PersistenceService(session).persist(
+            normalized_batch(
+                company=normalized_company(name="Shared"),
+                jobs=(),
+                filings=(),
+            ),
+            run_id=uuid4(),
+        )
+
+    assert raised.value.constraint == "uq_company_alias_normalized_alias"
+    assert count_rows(session, Company) == 1
+    assert count_rows(session, CompanyAlias) == 1
+    assert count_rows(session, SourceDocument) == 0
+
+
+def test_existing_canonical_owner_rejects_alias_and_rolls_back_earlier_alias(
+    session: Session,
+) -> None:
+    target = Company(
+        canonical_name="Target",
+        normalized_name="target",
+        description="Old profile",
+    )
+    owner = Company(canonical_name="Taken", normalized_name="taken")
+    session.add_all((target, owner))
+    session.commit()
+    target_id = target.id
+
+    with pytest.raises(PersistenceError) as raised:
+        PersistenceService(session).persist(
+            normalized_batch(
+                company=normalized_company(
+                    name="Target",
+                    company_id=target_id,
+                    aliases=("A Safe", "Taken"),
+                    description="Must roll back",
+                ),
+                jobs=(),
+                filings=(),
+            ),
+            run_id=uuid4(),
+        )
+
+    assert raised.value.constraint == "uq_company_alias_normalized_alias"
+    session.refresh(target)
+    assert target.description == "Old profile"
+    assert session.scalar(
+        select(CompanyAlias).where(CompanyAlias.normalized_alias == "asafe")
+    ) is None
+    assert count_rows(session, SourceDocument) == 0
+
+
+def test_same_company_may_own_candidate_name_as_canonical_and_alias(
+    session: Session,
+) -> None:
+    company = Company(canonical_name="Target", normalized_name="target")
+    session.add(company)
+    session.flush()
+    session.add(
+        CompanyAlias(
+            company_id=company.id,
+            alias="Target",
+            normalized_alias="target",
+        )
+    )
+    session.commit()
+
+    result = PersistenceService(session).persist(
+        normalized_batch(
+            company=normalized_company(name="Target", company_id=company.id),
+            jobs=(),
+            filings=(),
+        ),
+        run_id=uuid4(),
+    )
+
+    assert result.company_id == company.id
+    assert count_rows(session, Company) == 1
+    assert count_rows(session, CompanyAlias) == 1
+
+
 def test_normalized_filing_collision_across_companies_rolls_back(
     session: Session, persistence: PersistenceService
 ) -> None:
@@ -754,6 +870,31 @@ def test_filing_race_cleanup_drops_only_validated_owned_objects() -> None:
 
 
 @pytest.mark.postgresql
+def test_company_identity_race_cleanup_drops_only_validated_owned_objects() -> None:
+    connection = _FilingCleanupRecordingConnection()
+
+    with pytest.raises(ValueError, match="invalid isolated company identity schema"):
+        _drop_company_identity_race_schema(connection, "public")  # type: ignore[arg-type]
+    assert connection.statements == []
+
+    schema_name = f"company_identity_race_{'a' * 32}"
+    _drop_company_identity_race_schema(connection, schema_name)  # type: ignore[arg-type]
+
+    assert connection.statements == [
+        (
+            'DROP TABLE IF EXISTS '
+            '"company_identity_race_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".company_aliases'
+        ),
+        (
+            'DROP TABLE IF EXISTS '
+            '"company_identity_race_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".companies'
+        ),
+        'DROP SCHEMA "company_identity_race_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"',
+    ]
+    assert all("CASCADE" not in statement for statement in connection.statements)
+
+
+@pytest.mark.postgresql
 def test_concurrent_normalized_filing_collision_cannot_commit_two_companies() -> None:
     database_url = os.getenv("TEST_POSTGRES_URL")
     if database_url is None:
@@ -923,6 +1064,153 @@ def test_concurrent_normalized_filing_collision_cannot_commit_two_companies() ->
         if schema_created:
             with admin_engine.begin() as connection:
                 _drop_filing_race_schema(connection, schema_name)
+        admin_engine.dispose()
+
+
+@pytest.mark.postgresql
+def test_concurrent_canonical_alias_collision_has_one_company_owner() -> None:
+    database_url = os.getenv("TEST_POSTGRES_URL")
+    if database_url is None:
+        pytest.skip("TEST_POSTGRES_URL is not configured")
+
+    schema_name = f"company_identity_race_{uuid4().hex}"
+    quoted_schema = _quoted_company_identity_race_schema(schema_name)
+    admin_engine = create_engine(database_url)
+    schema_engine = None
+    schema_created = False
+    alias_company_id = uuid4()
+    shared_name = "Shared Identity"
+    normalized_shared_name = "sharedidentity"
+
+    try:
+        with admin_engine.begin() as connection:
+            connection.execute(text(f"CREATE SCHEMA {quoted_schema}"))
+            schema_created = True
+
+        schema_url = make_url(database_url).update_query_dict(
+            {"options": f"-csearch_path={schema_name}"}
+        )
+        schema_engine = create_engine(schema_url)
+        with schema_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE TABLE companies ("
+                    "id uuid PRIMARY KEY, canonical_name varchar(255) NOT NULL, "
+                    "normalized_name varchar(255) NOT NULL UNIQUE, "
+                    "industry varchar(100), sub_industry varchar(100), "
+                    "funding_stage varchar(50) NOT NULL, scale varchar(50) NOT NULL, "
+                    "city varchar(50), logo_url varchar(1000), website varchar(1000), "
+                    "normalized_website varchar(1000) NOT NULL, description text, "
+                    "last_collected_at timestamptz, created_at timestamptz NOT NULL, "
+                    "updated_at timestamptz NOT NULL)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE TABLE company_aliases ("
+                    "id uuid PRIMARY KEY, "
+                    "company_id uuid NOT NULL REFERENCES companies(id), "
+                    "alias varchar(255) NOT NULL, "
+                    "normalized_alias varchar(255) NOT NULL UNIQUE)"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO companies ("
+                    "id, canonical_name, normalized_name, funding_stage, scale, "
+                    "normalized_website, created_at, updated_at) VALUES ("
+                    ":company_id, 'Alias Target', 'aliastarget', 'unknown', "
+                    "'unknown', '', :now, :now)"
+                ),
+                {"company_id": alias_company_id, "now": NOW},
+            )
+
+        second_lock_attempted = Event()
+        second_finished = Event()
+
+        @event.listens_for(schema_engine, "before_cursor_execute")
+        def observe_second_advisory_lock(
+            connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            info = connection.info  # type: ignore[attr-defined]
+            if (
+                info.get("company_identity_race_role") == "alias"
+                and "PG_ADVISORY_XACT_LOCK" in statement.upper()
+            ):
+                second_lock_attempted.set()
+
+        def write_alias() -> PersistenceError | None:
+            try:
+                with Session(schema_engine) as database_session, database_session.begin():
+                    database_session.connection().info[
+                        "company_identity_race_role"
+                    ] = "alias"
+                    PersistenceService(database_session)._upsert_company(
+                        normalized_company(
+                            name="Alias Target",
+                            company_id=alias_company_id,
+                            aliases=(shared_name,),
+                        ),
+                        uuid4(),
+                    )
+            except PersistenceError as error:
+                return error
+            finally:
+                second_finished.set()
+            return None
+
+        with Session(schema_engine) as canonical_session, ThreadPoolExecutor(
+            max_workers=1
+        ) as executor:
+            transaction = canonical_session.begin()
+            try:
+                canonical_company = PersistenceService(
+                    canonical_session
+                )._upsert_company(normalized_company(name=shared_name), uuid4())
+                canonical_session.flush()
+                canonical_company_id = canonical_company.id
+                second_future = executor.submit(write_alias)
+                if not second_lock_attempted.wait(timeout=15):
+                    raise TimeoutError("alias transaction did not reach identity lock")
+                assert not second_finished.wait(timeout=0.2)
+                transaction.commit()
+            finally:
+                if transaction.is_active:
+                    transaction.rollback()
+            second_error = second_future.result(timeout=15)
+
+        assert second_error is not None
+        assert second_error.constraint == "uq_company_alias_normalized_alias"
+        assert shared_name not in str(second_error)
+
+        with Session(schema_engine) as verification:
+            canonical_owner_ids = set(
+                verification.scalars(
+                    select(Company.id).where(
+                        Company.normalized_name == normalized_shared_name
+                    )
+                )
+            )
+            alias_owner_ids = set(
+                verification.scalars(
+                    select(CompanyAlias.company_id).where(
+                        CompanyAlias.normalized_alias == normalized_shared_name
+                    )
+                )
+            )
+        assert canonical_owner_ids == {canonical_company_id}
+        assert alias_owner_ids == set()
+    finally:
+        if schema_engine is not None:
+            schema_engine.dispose()
+        if schema_created:
+            with admin_engine.begin() as connection:
+                _drop_company_identity_race_schema(connection, schema_name)
         admin_engine.dispose()
 
 

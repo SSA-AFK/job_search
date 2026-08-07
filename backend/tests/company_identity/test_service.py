@@ -947,6 +947,43 @@ def test_identity_lock_keys_are_domain_separated_deduplicated_and_key_ordered() 
     assert keys == (-6410938119080746435, -1983210520360554722)
 
 
+def test_company_name_lock_uses_shared_namespace_and_stable_key_order() -> None:
+    class PostgreSQLSession:
+        class Bind:
+            class Dialect:
+                name = "postgresql"
+
+            dialect = Dialect()
+
+        bind = Bind()
+
+        def __init__(self) -> None:
+            self.events: list[tuple[str, int] | str] = []
+
+        def get_bind(self) -> Bind:
+            return self.bind
+
+        def execute(
+            self, statement: object, parameters: dict[str, int]
+        ) -> None:
+            assert "pg_advisory_xact_lock" in str(statement)
+            self.events.append(("lock", parameters["lock_key"]))
+
+    session = PostgreSQLSession()
+
+    with identity_service.serialized_company_identity_names(  # type: ignore[attr-defined]
+        session,  # type: ignore[arg-type]
+        ("zeta", "alpha", "alpha"),
+    ):
+        session.events.append("body")
+
+    assert session.events == [
+        ("lock", -6980011617892403656),
+        ("lock", 6222147596087359930),
+        "body",
+    ]
+
+
 def test_legal_decision_locks_share_regulatory_filing_protocol() -> None:
     draft = review_draft().model_copy(
         update={

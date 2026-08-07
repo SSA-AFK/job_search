@@ -14,11 +14,12 @@ from app.company_identity.contracts import (
     IdentityReviewRecordSummary,
 )
 from app.company_identity.resolver import CompanyIdentityResolver
-from app.company_identity.service import record_identity_review
+from app.company_identity.service import IdentitySearchUnavailable, record_identity_review
 from app.core.config import settings
 from app.ingestion.contracts import Provider
 from app.ingestion.deduplication.job import JobDeduplicator
 from app.ingestion.deduplication.semantic import SemanticDuplicateJudge
+from app.ingestion.errors import RetryableInfrastructureError
 from app.ingestion.extraction.crew import Extractor
 from app.ingestion.orchestrator import (
     CrawlRunRepository,
@@ -46,11 +47,14 @@ class SqlAlchemyIdentityReviewRecorder:
     def record(
         self, *, crawl_run_id: UUID, draft: CompanyIdentityReviewDraft
     ) -> IdentityReviewRecordSummary:
-        return record_identity_review(
-            self.session,
-            crawl_run_id=crawl_run_id,
-            draft=draft,
-        )
+        try:
+            return record_identity_review(
+                self.session,
+                crawl_run_id=crawl_run_id,
+                draft=draft,
+            )
+        except IdentitySearchUnavailable as error:
+            raise RetryableInfrastructureError() from error
 
 
 def build_ingestion_orchestrator(

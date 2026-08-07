@@ -13,7 +13,13 @@ from weakref import WeakKeyDictionary
 from pydantic import ValidationError
 from sqlalchemy import ColumnElement, String, cast, func, select, text, true
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.exc import DataError, IntegrityError, SQLAlchemyError, StatementError
+from sqlalchemy.exc import (
+    DataError,
+    IntegrityError,
+    OperationalError,
+    SQLAlchemyError,
+    StatementError,
+)
 from sqlalchemy.orm import Session
 
 from app.company_identity.contracts import (
@@ -131,6 +137,8 @@ def record_identity_review(
             return summary
     except _IdentityReviewError:
         raise
+    except OperationalError:
+        raise IdentitySearchUnavailable from None
     except (DataError, IntegrityError, StatementError):
         raise IdentityReviewConflict from None
     except SQLAlchemyError:
@@ -265,8 +273,11 @@ def _identity_key_material(
     identities: set[bytes] = set()
     for draft in drafts:
         identity = draft.identity
-        for name in (identity.normalized_name, *identity.normalized_aliases):
-            identities.add(b"name\0" + name.encode("utf-8"))
+        identities.update(
+            _company_name_key_material(
+                (identity.normalized_name, *identity.normalized_aliases)
+            )
+        )
         if identity.official_website is not None:
             identities.add(
                 b"website\0" + identity.official_website.encode("utf-8")
@@ -280,6 +291,13 @@ def _identity_key_material(
             for identifier in identity.legal_identifiers
         )
     return tuple(identities)
+
+
+def _company_name_key_material(names: Sequence[str]) -> tuple[bytes, ...]:
+    normalized_names = sorted(
+        {normalized for name in names if (normalized := normalize_name(name))}
+    )
+    return tuple(b"name\0" + name.encode("utf-8") for name in normalized_names)
 
 
 def _identity_lock_keys(material: Sequence[bytes]) -> tuple[int, ...]:
@@ -335,6 +353,17 @@ def _serialized_identity_keys(
     material: Sequence[bytes],
 ) -> Iterator[None]:
     with _serialized_lock_keys(session, _identity_lock_keys(material)):
+        yield
+
+
+@contextmanager
+def serialized_company_identity_names(
+    session: Session,
+    names: Sequence[str],
+) -> Iterator[None]:
+    """Serialize canonical and alias ownership using the review decision keys."""
+
+    with _serialized_identity_keys(session, _company_name_key_material(names)):
         yield
 
 

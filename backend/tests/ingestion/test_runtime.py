@@ -1,10 +1,20 @@
+from uuid import uuid4
+
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.collection.repository import CollectionRepository
+from app.company_identity.contracts import (
+    CompanyIdentityInput,
+    CompanyIdentityReviewDraft,
+    IdentityReviewReason,
+)
+from app.company_identity.service import IdentitySearchUnavailable
 from app.ingestion.contracts import ProviderQuery, ProviderResult, RawDocument
 from app.ingestion.deduplication.semantic import DuplicateDecision
+from app.ingestion.errors import RetryableInfrastructureError
 from app.ingestion.extraction.schemas import (
     CompanyCandidate,
     CompanyProfileCandidate,
@@ -12,7 +22,10 @@ from app.ingestion.extraction.schemas import (
     JobCandidate,
     ProfileExtraction,
 )
-from app.ingestion.runtime import build_ingestion_orchestrator
+from app.ingestion.runtime import (
+    SqlAlchemyIdentityReviewRecorder,
+    build_ingestion_orchestrator,
+)
 from app.models import (
     Base,
     CollectionRequest,
@@ -52,6 +65,36 @@ class Extractor:
 class SemanticJudge:
     async def jobs_are_duplicates(self, _left, _right) -> DuplicateDecision:
         return DuplicateDecision(False)
+
+
+def test_review_recorder_maps_database_unavailable_to_retryable() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def fail_review_store(*_args: object) -> None:
+        raise OperationalError(
+            "insert identity review",
+            {},
+            RuntimeError("private database detail"),
+        )
+
+    draft = CompanyIdentityReviewDraft(
+        identity=CompanyIdentityInput(canonical_name="Acme"),
+        review_reasons=(IdentityReviewReason.FUZZY_NAME_NEIGHBOR,),
+        observed_at="2026-08-07T00:00:00Z",
+    )
+    with Session(engine) as session, pytest.raises(
+        RetryableInfrastructureError
+    ) as raised:
+        SqlAlchemyIdentityReviewRecorder(session).record(
+            crawl_run_id=uuid4(),
+            draft=draft,
+        )
+
+    assert isinstance(raised.value.__cause__, IdentitySearchUnavailable)
+    assert str(raised.value) == "retryable infrastructure failure"
+    assert not session.in_transaction()
 
 
 @pytest.mark.parametrize(

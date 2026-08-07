@@ -4,6 +4,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import create_engine, event, func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.collection.repository import CollectionRepository
@@ -15,6 +16,7 @@ from app.company_identity.contracts import (
 from app.company_identity.resolver import CompanyIdentityResolver
 from app.ingestion.contracts import ProviderQuery, ProviderResult, RawDocument
 from app.ingestion.deduplication.semantic import DuplicateDecision
+from app.ingestion.errors import RetryableInfrastructureError
 from app.ingestion.extraction.schemas import (
     CompanyCandidate,
     CompanyProfileCandidate,
@@ -31,6 +33,7 @@ from app.models import (
     CompanyAlias,
     CompanyIdentityReviewItem,
     CompanySource,
+    CrawlRun,
     JobPosting,
     RegulatoryFiling,
     SourceDocument,
@@ -228,4 +231,71 @@ async def test_review_required_records_once_and_writes_no_business_rows(
     assert items[0].first_crawl_run_id == first_run_id
     assert items[0].candidate_name == "Example Artificial Intelligenc"
     assert items[0].created_at == OBSERVED_AT
+    assert cache.invalidated == []
+
+
+@pytest.mark.asyncio
+async def test_review_store_unavailable_is_retryable_and_writes_nothing(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'identity-review-failure.sqlite3'}")
+
+    @event.listens_for(engine, "connect")
+    def enable_foreign_keys(dbapi_connection: object, _connection_record: object) -> None:
+        cursor = dbapi_connection.cursor()  # type: ignore[union-attr]
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    Base.metadata.create_all(engine)
+    cache = RecordingCache()
+    monkeypatch.setattr("app.ingestion.orchestrator.utc_now", lambda: OBSERVED_AT)
+    monkeypatch.setattr(
+        "app.ingestion.runtime.configured_company_cache", lambda _url: cache
+    )
+
+    with Session(engine, expire_on_commit=False) as state, Session(
+        engine, expire_on_commit=False
+    ) as dedup, Session(engine, expire_on_commit=False) as review, Session(
+        engine, expire_on_commit=False
+    ) as write:
+        repository = CollectionRepository(state)
+        _request, run = repository.create_request(
+            "Example Artificial Intelligenc", "exampleartificialintelligenc"
+        )
+        state.commit()
+        run_id = run.id
+        orchestrator = build_ingestion_orchestrator(
+            run_state_session=state,
+            dedup_read_session=dedup,
+            identity_review_write_session=review,
+            persistence_write_session=write,
+            providers=(Provider(),),
+            extractor=Extractor(),
+            semantic_judge=SemanticJudge(),
+        )
+        orchestrator.batch_builder.identity_resolver = CompanyIdentityResolver(
+            FuzzyIdentityRepository()
+        )
+
+        @event.listens_for(review, "do_orm_execute")
+        def fail_review_store(*_args: object) -> None:
+            raise OperationalError(
+                "insert identity review",
+                {},
+                RuntimeError("private database detail"),
+            )
+
+        with pytest.raises(RetryableInfrastructureError) as raised:
+            await orchestrator.run(run_id)
+
+    with Session(engine) as verification:
+        persisted_run = verification.get(CrawlRun, run_id)
+        assert persisted_run is not None
+        assert persisted_run.status is CollectionStatus.RUNNING
+        assert business_table_counts(verification) == (0, 0, 0, 0, 0, 0)
+        assert verification.scalar(
+            select(func.count()).select_from(CompanyIdentityReviewItem)
+        ) == 0
+    assert raised.value.claim_token is not None
+    assert str(raised.value) == "retryable infrastructure failure"
     assert cache.invalidated == []

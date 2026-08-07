@@ -20,6 +20,7 @@ from app.company_identity.contracts import (
     IdentityReviewRecordSummary,
     PublicEvidenceReference,
 )
+from app.company_identity.service import IdentitySearchUnavailable
 from app.core.normalization import normalize_name, normalize_url
 from app.ingestion.contracts import (
     Provider,
@@ -580,6 +581,14 @@ class IngestionOrchestrator:
                 error_code=provider_error,
                 diagnostics=diagnostics,
             )
+        except IdentitySearchUnavailable as error:
+            raise RetryableInfrastructureError(
+                claim_token=claim_token
+            ) from error
+        except RetryableInfrastructureError as error:
+            raise RetryableInfrastructureError(
+                claim_token=claim_token
+            ) from error
         except (ConnectionError, OperationalError) as error:
             raise RetryableInfrastructureError(
                 claim_token=claim_token
