@@ -1,11 +1,17 @@
+import os
+import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from hashlib import sha256
 from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, event, func, select, text
+from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.orm import Session
 
 from app.collection.repository import CollectionRepository
@@ -37,6 +43,56 @@ from app.models import (
 
 NOW = datetime(2026, 7, 31, 12, tzinfo=UTC)
 LATER = datetime(2026, 8, 1, 12, tzinfo=UTC)
+
+
+def _quoted_filing_race_schema(schema_name: str) -> str:
+    if re.fullmatch(r"filing_identity_race_[0-9a-f]{32}", schema_name) is None:
+        raise ValueError("invalid isolated filing identity schema")
+    return f'"{schema_name}"'
+
+
+def _drop_filing_race_schema(connection: Connection, schema_name: str) -> None:
+    quoted_schema = _quoted_filing_race_schema(schema_name)
+    statements = (
+        (
+            f"DROP INDEX IF EXISTS {quoted_schema}."
+            "ix_regulatory_filings_normalized_filing_number"
+        ),
+        f"DROP TABLE IF EXISTS {quoted_schema}.regulatory_filings",
+        f"DROP TABLE IF EXISTS {quoted_schema}.companies",
+        f"DROP SCHEMA {quoted_schema}",
+    )
+    for statement in statements:
+        connection.execute(text(statement))
+
+
+class _FilingLockRecordingSession:
+    def __init__(self, dialect_name: str) -> None:
+        self._bind = SimpleNamespace(dialect=SimpleNamespace(name=dialect_name))
+        self.lock_keys: list[int] = []
+        self.events: list[str] = []
+        self.owner: RegulatoryFiling | None = None
+
+    def get_bind(self) -> object:
+        return self._bind
+
+    def execute(self, statement: object, parameters: dict[str, int]) -> None:
+        assert "pg_advisory_xact_lock" in str(statement)
+        self.events.append("lock")
+        self.lock_keys.append(parameters["lock_key"])
+
+    def scalars(self, _statement: object) -> tuple[RegulatoryFiling, ...]:
+        self.events.append("owners")
+        assert self.owner is not None
+        return (self.owner,)
+
+
+class _FilingCleanupRecordingConnection:
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    def execute(self, statement: object) -> None:
+        self.statements.append(str(statement))
 
 
 def normalized_document(
@@ -526,6 +582,255 @@ def test_same_company_normalized_filing_collision_selects_stable_record(
     assert ascii_filing.filing_name == "ASCII legacy filing"
     assert fullwidth_filing.filing_name == "Fullwidth legacy filing"
     assert canonical_filing.filing_name == "Example ICP filing"
+
+
+def test_filing_identity_advisory_locks_are_stable_and_batch_ordered() -> None:
+    records = (
+        normalized_filing("Z 2"),
+        normalized_filing("A 1"),
+        normalized_filing("A 1").model_copy(
+            update={"filing_type": FilingType.ALGORITHM}
+        ),
+    )
+    postgresql_session = _FilingLockRecordingSession("postgresql")
+
+    PersistenceService(postgresql_session)._lock_filing_identities(records)  # type: ignore[arg-type]
+
+    assert postgresql_session.lock_keys == [
+        -2237796803508185819,
+        5122387751065773925,
+        -286932790104785166,
+    ]
+
+    sqlite_session = _FilingLockRecordingSession("sqlite")
+    PersistenceService(sqlite_session)._lock_filing_identities(records)  # type: ignore[arg-type]
+    assert sqlite_session.lock_keys == []
+
+
+def test_postgresql_filing_identity_lock_precedes_owner_query() -> None:
+    company_id = uuid4()
+    record = normalized_filing("A 1").model_copy(
+        update={"source_evidence_id": None}
+    )
+    owner = RegulatoryFiling(
+        company_id=company_id,
+        filing_type=record.filing_type,
+        filing_number=record.filing_number,
+        filing_name="Existing filing",
+    )
+    postgresql_session = _FilingLockRecordingSession("postgresql")
+    postgresql_session.owner = owner
+
+    PersistenceService(postgresql_session)._upsert_filings(  # type: ignore[arg-type]
+        company_id,
+        (record,),
+        {},
+        uuid4(),
+    )
+
+    assert postgresql_session.events == ["lock", "owners"]
+
+
+@pytest.mark.postgresql
+def test_filing_race_cleanup_drops_only_validated_owned_objects() -> None:
+    connection = _FilingCleanupRecordingConnection()
+
+    with pytest.raises(ValueError, match="invalid isolated filing identity schema"):
+        _drop_filing_race_schema(connection, "public")  # type: ignore[arg-type]
+    assert connection.statements == []
+
+    schema_name = f"filing_identity_race_{'a' * 32}"
+    _drop_filing_race_schema(connection, schema_name)  # type: ignore[arg-type]
+
+    assert connection.statements == [
+        (
+            'DROP INDEX IF EXISTS "filing_identity_race_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".'
+            "ix_regulatory_filings_normalized_filing_number"
+        ),
+        (
+            'DROP TABLE IF EXISTS "filing_identity_race_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".'
+            "regulatory_filings"
+        ),
+        (
+            'DROP TABLE IF EXISTS "filing_identity_race_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".'
+            "companies"
+        ),
+        'DROP SCHEMA "filing_identity_race_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"',
+    ]
+    assert all("CASCADE" not in statement for statement in connection.statements)
+
+
+@pytest.mark.postgresql
+def test_concurrent_normalized_filing_collision_cannot_commit_two_companies() -> None:
+    database_url = os.getenv("TEST_POSTGRES_URL")
+    if database_url is None:
+        pytest.skip("TEST_POSTGRES_URL is not configured")
+
+    schema_name = f"filing_identity_race_{uuid4().hex}"
+    quoted_schema = _quoted_filing_race_schema(schema_name)
+    admin_engine = create_engine(database_url)
+    schema_engine = None
+    schema_created = False
+    first_company_id = uuid4()
+    second_company_id = uuid4()
+    first_raw_number = "K STRASSE 42"
+    second_raw_number = "\uff2b\u3000Stra\u00dfe\t42"
+    normalized_record = normalized_filing(first_raw_number).model_copy(
+        update={"source_evidence_id": None}
+    )
+    assert normalized_record.filing_number == "kstrasse42"
+    assert normalized_filing(second_raw_number).filing_number == "kstrasse42"
+
+    try:
+        with admin_engine.begin() as connection:
+            connection.execute(text(f"CREATE SCHEMA {quoted_schema}"))
+            schema_created = True
+
+        schema_url = make_url(database_url).update_query_dict(
+            {"options": f"-csearch_path={schema_name}"}
+        )
+        schema_engine = create_engine(schema_url)
+        with schema_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE TABLE companies ("
+                    "id uuid PRIMARY KEY, canonical_name varchar(255) NOT NULL, "
+                    "normalized_name varchar(255) NOT NULL UNIQUE, "
+                    "created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE TABLE regulatory_filings ("
+                    "id uuid PRIMARY KEY, company_id uuid NOT NULL REFERENCES companies(id), "
+                    "source_document_id uuid, filing_type varchar(50) NOT NULL, "
+                    "filing_number varchar(255) NOT NULL, "
+                    "normalized_filing_number varchar(255) NOT NULL, "
+                    "filing_name varchar(255) NOT NULL, filing_authority varchar(255), "
+                    "filing_date date, filing_status varchar(50), detail_url varchar(2000), "
+                    "created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL, "
+                    "CONSTRAINT uq_filing_type_number UNIQUE (filing_type, filing_number))"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_regulatory_filings_normalized_filing_number "
+                    "ON regulatory_filings (normalized_filing_number)"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO companies "
+                    "(id, canonical_name, normalized_name, created_at, updated_at) VALUES "
+                    "(:first_id, 'First', 'first', :now, :now), "
+                    "(:second_id, 'Second', 'second', :now, :now)"
+                ),
+                {
+                    "first_id": first_company_id,
+                    "second_id": second_company_id,
+                    "now": NOW,
+                },
+            )
+
+        first_inserted = Event()
+        release_first = Event()
+
+        @event.listens_for(schema_engine, "before_cursor_execute")
+        def release_owner_before_second_advisory_lock(
+            connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            info = connection.info  # type: ignore[attr-defined]
+            if (
+                info.get("filing_race_role") == "second"
+                and "PG_ADVISORY_XACT_LOCK" in statement.upper()
+            ):
+                release_first.set()
+
+        def write_filing(
+            *, company_id: UUID, raw_number: str, role: str, hold_commit: bool
+        ) -> str:
+            with Session(schema_engine) as database_session:
+                @event.listens_for(database_session, "before_flush")
+                def preserve_distinct_raw_number(
+                    target_session: Session,
+                    _flush_context: object,
+                    _instances: object,
+                ) -> None:
+                    for pending in (*target_session.new, *target_session.dirty):
+                        if isinstance(pending, RegulatoryFiling):
+                            pending.__dict__["filing_number"] = raw_number
+
+                with database_session.begin():
+                    database_session.connection().info["filing_race_role"] = role
+                    PersistenceService(database_session)._upsert_filings(
+                        company_id,
+                        (normalized_record,),
+                        {},
+                        uuid4(),
+                    )
+                    if hold_commit:
+                        first_inserted.set()
+                        if not release_first.wait(timeout=15):
+                            raise TimeoutError("second filing transaction did not progress")
+            return "committed"
+
+        second_error: PersistenceError | None = None
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            first_future = executor.submit(
+                write_filing,
+                company_id=first_company_id,
+                raw_number=first_raw_number,
+                role="first",
+                hold_commit=True,
+            )
+            try:
+                if not first_inserted.wait(timeout=15):
+                    first_future.result(timeout=15)
+                    raise TimeoutError("first filing transaction did not reach insert")
+                try:
+                    second_outcome = write_filing(
+                        company_id=second_company_id,
+                        raw_number=second_raw_number,
+                        role="second",
+                        hold_commit=False,
+                    )
+                except PersistenceError as error:
+                    second_error = error
+                    second_outcome = "conflict"
+            finally:
+                release_first.set()
+            first_outcome = first_future.result(timeout=15)
+
+        assert [first_outcome, second_outcome].count("committed") == 1
+        assert second_error is not None
+        assert second_error.constraint == "uq_filing_type_number"
+        assert first_raw_number not in str(second_error)
+        assert second_raw_number not in str(second_error)
+
+        with Session(schema_engine) as replay_session:
+            with replay_session.begin():
+                PersistenceService(replay_session)._upsert_filings(
+                    first_company_id,
+                    (normalized_record,),
+                    {},
+                    uuid4(),
+                )
+            filings = tuple(replay_session.scalars(select(RegulatoryFiling)))
+        assert len(filings) == 1
+        assert filings[0].company_id == first_company_id
+        assert filings[0].normalized_filing_number == "kstrasse42"
+    finally:
+        if schema_engine is not None:
+            schema_engine.dispose()
+        if schema_created:
+            with admin_engine.begin() as connection:
+                _drop_filing_race_schema(connection, schema_name)
+        admin_engine.dispose()
 
 
 def test_filing_conflict_preserves_previous_collection_time(

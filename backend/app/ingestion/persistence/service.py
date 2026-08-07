@@ -8,7 +8,7 @@ from typing import Any, TypeVar, cast
 from uuid import UUID
 
 from pydantic import ValidationError
-from sqlalchemy import Select, case, select, update
+from sqlalchemy import Select, case, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import DataError, IntegrityError, StatementError
 from sqlalchemy.orm import Session
@@ -37,6 +37,7 @@ from app.models import (
 
 _TEXT_EXCERPT_LIMIT = 4_000
 _MAX_SQL_SMALLINT = 32_767
+_FILING_IDENTITY_LOCK_PREFIX = b"company_search:regulatory_filing:v1\0"
 _KNOWN_CONSTRAINT_MARKERS = {
     "companies.normalized_name": "uq_company_normalized_name",
     "source_documents.provider, source_documents.external_id": (
@@ -563,6 +564,7 @@ class PersistenceService:
                 constraint="uq_filing_type_number",
                 detail="duplicate filing identity in batch",
             )
+        self._lock_filing_identities(records)
 
         for record in records:
             filing = self._owned_filing_for_identity(company_id, record, run_id)
@@ -598,6 +600,29 @@ class PersistenceService:
                     )
             for field, value in values.items():
                 setattr(filing, field, value)
+
+    def _lock_filing_identities(
+        self, records: tuple[NormalizedFilingRecord, ...]
+    ) -> None:
+        if self.session.get_bind().dialect.name != "postgresql":
+            return
+        for record in sorted(
+            records,
+            key=lambda item: (item.filing_type.value, item.filing_number),
+        ):
+            identity = (
+                _FILING_IDENTITY_LOCK_PREFIX
+                + record.filing_type.value.encode("utf-8")
+                + b"\0"
+                + record.filing_number.encode("utf-8")
+            )
+            lock_key = int.from_bytes(
+                sha256(identity).digest()[:8], byteorder="big", signed=True
+            )
+            self.session.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                {"lock_key": lock_key},
+            )
 
     @staticmethod
     def _filing_identity_statement(
