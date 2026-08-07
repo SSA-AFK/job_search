@@ -589,19 +589,33 @@ def test_decision_rechecks_name_owner_after_queue_export(session: Session) -> No
 def test_decision_batch_rolls_back_every_partial_company_and_alias_change(
     session: Session,
 ) -> None:
-    first_target = company_row(session, "First Target")
+    first_target = company_row(
+        session,
+        "Original First",
+        website="https://old.example/",
+    )
+    first_target.city = "old-city"
+    session.commit()
     second_target = company_row(session, "Second Target")
     first_target_id = first_target.id
     second_target_id = second_target.id
     first_item_id = pending_review(
         session,
-        candidate_name="Shared Alias",
-        identity=CompanyIdentityInput(canonical_name="Shared Alias", city="first"),
+        candidate_name="Shared Identity",
+        identity=CompanyIdentityInput(
+            canonical_name="Shared Identity",
+            official_website="https://new.example/",
+            city="new-city",
+        ),
     )
     second_item_id = pending_review(
         session,
-        candidate_name="Shared Alias",
-        identity=CompanyIdentityInput(canonical_name="Shared Alias", city="second"),
+        candidate_name="Shared Identity",
+        identity=CompanyIdentityInput(
+            canonical_name="Shared Identity",
+            official_website="https://second.example/",
+            city="second-city",
+        ),
     )
     statements: list[str] = []
     engine = session.get_bind()
@@ -624,7 +638,7 @@ def test_decision_batch_rolls_back_every_partial_company_and_alias_change(
                 (
                     decision(
                         first_item_id,
-                        action=IdentityReviewAction.LINK_AS_ALIAS,
+                        action=IdentityReviewAction.RENAME_CANONICAL,
                         target_company_id=first_target_id,
                     ),
                     decision(
@@ -637,23 +651,63 @@ def test_decision_batch_rolls_back_every_partial_company_and_alias_change(
     finally:
         event.remove(engine, "after_cursor_execute", capture_mutation)
 
+    company_update_index = next(
+        index for index, sql in enumerate(statements) if sql.startswith("UPDATE COMPANIES")
+    )
+    assert any(
+        sql.startswith("SELECT COMPANIES.ID")
+        and "COMPANIES.NORMALIZED_NAME IN" in sql
+        for sql in statements[company_update_index + 1 :]
+    )
     assert any("INSERT INTO COMPANY_ALIASES" in sql for sql in statements)
     assert any("UPDATE COMPANY_IDENTITY_REVIEW_ITEMS" in sql for sql in statements)
     assert any("INSERT INTO COMPANY_IDENTITY_REVIEW_DECISIONS" in sql for sql in statements)
 
     companies = {
-        company_id: canonical_name
-        for company_id, canonical_name in session.execute(
-            select(Company.id, Company.canonical_name).where(
+        company_id: (
+            canonical_name,
+            normalized_name,
+            website,
+            normalized_website,
+            city,
+        )
+        for (
+            company_id,
+            canonical_name,
+            normalized_name,
+            website,
+            normalized_website,
+            city,
+        ) in session.execute(
+            select(
+                Company.id,
+                Company.canonical_name,
+                Company.normalized_name,
+                Company.website,
+                Company.normalized_website,
+                Company.city,
+            ).where(
                 Company.id.in_((first_target_id, second_target_id))
             )
         )
     }
     assert companies == {
-        first_target_id: "First Target",
-        second_target_id: "Second Target",
+        first_target_id: (
+            "Original First",
+            "originalfirst",
+            "https://old.example/",
+            "https://old.example/",
+            "old-city",
+        ),
+        second_target_id: ("Second Target", "secondtarget", None, "", None),
     }
-    assert tuple(session.scalars(select(CompanyAlias))) == ()
+    assert tuple(
+        session.scalars(
+            select(CompanyAlias).where(
+                CompanyAlias.normalized_alias.in_(("originalfirst", "sharedidentity"))
+            )
+        )
+    ) == ()
     review_states = {
         item_id: (status, resolved_at)
         for item_id, status, resolved_at in session.execute(
@@ -682,13 +736,13 @@ def test_decision_batch_rolls_back_every_partial_company_and_alias_change(
     assert decision_rows == ()
     resulting_name_owners = set(
         session.scalars(
-            select(Company.id).where(Company.normalized_name == "sharedalias")
+            select(Company.id).where(Company.normalized_name == "sharedidentity")
         )
     )
     resulting_name_owners.update(
         session.scalars(
             select(CompanyAlias.company_id).where(
-                CompanyAlias.normalized_alias == "sharedalias"
+                CompanyAlias.normalized_alias == "sharedidentity"
             )
         )
     )
