@@ -24,6 +24,8 @@ EXPECTED_TABLES = {
     "company_aliases",
     "company_manifest_members",
     "company_manifests",
+    "company_identity_review_decisions",
+    "company_identity_review_items",
     "source_documents",
     "company_sources",
     "entry_discovery_observations",
@@ -34,6 +36,11 @@ EXPECTED_TABLES = {
     "crawl_runs",
     "job_entries",
     "job_collection_snapshots",
+}
+
+REVIEW_TABLES = {
+    "company_identity_review_decisions",
+    "company_identity_review_items",
 }
 
 
@@ -790,7 +797,7 @@ def test_gate1_manifest_discovery_round_trip_preserves_stage3a_rows(
 
     command.upgrade(config, "0008_gate1_manifest_discovery")
     inspector = inspect(engine)
-    assert set(inspector.get_table_names()) >= EXPECTED_TABLES
+    assert set(inspector.get_table_names()) >= EXPECTED_TABLES - REVIEW_TABLES
     assert {
         index["name"]
         for index in inspector.get_indexes("job_entries")
@@ -987,6 +994,48 @@ def test_gate1_manifest_discovery_round_trip_preserves_stage3a_rows(
             _expect_integrity_error(connection, observation_insert, parameters)
         assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
 
+    command.upgrade(config, "head")
+    inspector = inspect(engine)
+    assert set(inspector.get_table_names()) >= EXPECTED_TABLES
+    assert {
+        index["name"] for index in inspector.get_indexes("companies")
+    }.isdisjoint({"ix_companies_normalized_name_trgm"})
+    assert {
+        index["name"] for index in inspector.get_indexes("company_aliases")
+    }.isdisjoint({"ix_company_aliases_normalized_alias_trgm"})
+    with engine.connect() as connection:
+        for table_name in (
+            "companies",
+            "job_entries",
+            "job_collection_snapshots",
+            "job_sources",
+            "candidate_facts",
+            "candidate_reviews",
+            "company_manifests",
+            "company_manifest_members",
+            "entry_discovery_observations",
+        ):
+            assert connection.scalar(text(f"SELECT count(*) FROM {table_name}")) >= 1
+        assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
+
+    command.downgrade(config, "0008_gate1_manifest_discovery")
+    inspector = inspect(engine)
+    assert set(inspector.get_table_names()).isdisjoint(REVIEW_TABLES)
+    with engine.connect() as connection:
+        for table_name in (
+            "companies",
+            "job_entries",
+            "job_collection_snapshots",
+            "job_sources",
+            "candidate_facts",
+            "candidate_reviews",
+            "company_manifests",
+            "company_manifest_members",
+            "entry_discovery_observations",
+        ):
+            assert connection.scalar(text(f"SELECT count(*) FROM {table_name}")) >= 1
+        assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
+
     command.downgrade(config, "0007_job_source_snapshot_lifecycle")
     inspector = inspect(engine)
     assert set(inspector.get_table_names()).isdisjoint(
@@ -1064,6 +1113,125 @@ def test_gate1_manifest_discovery_emits_named_postgresql_ddl() -> None:
         "ix_discovery_observations_company_observed",
     ):
         assert f"CREATE INDEX {index_name}" in sql
+
+
+def test_0009_postgresql_sql_contains_bounded_similarity_indexes() -> None:
+    migration_path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "0009_company_identity_review.py"
+    )
+    migration = runpy.run_path(str(migration_path))
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect=postgresql.dialect(),
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    migration["upgrade"].__globals__["op"] = Operations(context)
+
+    migration["upgrade"]()
+
+    sql = " ".join(output.getvalue().split())
+    assert migration["revision"] == "0009_company_identity_review"
+    assert migration["down_revision"] == "0008_gate1_manifest_discovery"
+    assert "CREATE EXTENSION IF NOT EXISTS pg_trgm" in sql
+    assert (
+        "CREATE INDEX ix_companies_normalized_name_trgm ON companies "
+        "USING gist (normalized_name gist_trgm_ops)" in sql
+    )
+    assert (
+        "CREATE INDEX ix_company_aliases_normalized_alias_trgm ON company_aliases "
+        "USING gist (normalized_alias gist_trgm_ops)" in sql
+    )
+    for constraint_name in (
+        "identity_review_status",
+        "identity_review_action",
+        "ck_identity_review_item_hash_format",
+        "ck_identity_review_decision_hash_format",
+        "uq_identity_review_item_stable_hash",
+        "uq_identity_review_decision_hash",
+        "uq_identity_review_decision_item",
+        "fk_company_identity_review_items_first_crawl_run_id",
+        "fk_company_identity_review_decisions_review_item_id",
+        "fk_company_identity_review_decisions_target_company_id",
+        "fk_company_identity_review_decisions_resulting_company_id",
+    ):
+        assert f"CONSTRAINT {constraint_name}" in sql
+    for column_name in (
+        "aliases",
+        "legal_identifiers",
+        "public_evidence_refs",
+        "candidate_matches",
+        "review_reasons",
+    ):
+        assert f"{column_name} JSON NOT NULL" in sql
+    assert (
+        "CREATE INDEX ix_company_identity_review_items_status_created "
+        "ON company_identity_review_items (status, created_at)" in sql
+    )
+    assert sql.count("ON DELETE RESTRICT") == 4
+
+
+def test_0009_postgresql_downgrade_owns_only_review_objects() -> None:
+    migration_path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "0009_company_identity_review.py"
+    )
+    migration = runpy.run_path(str(migration_path))
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect=postgresql.dialect(),
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    migration["downgrade"].__globals__["op"] = Operations(context)
+
+    migration["downgrade"]()
+
+    sql = " ".join(output.getvalue().split())
+    assert "DROP INDEX IF EXISTS ix_companies_normalized_name_trgm" in sql
+    assert "DROP INDEX IF EXISTS ix_company_aliases_normalized_alias_trgm" in sql
+    assert "DROP TABLE company_identity_review_decisions" in sql
+    assert "DROP TABLE company_identity_review_items" in sql
+    assert "DROP EXTENSION" not in sql
+    assert "CASCADE" not in sql
+    for shared_object in (
+        "DROP TABLE companies",
+        "DROP TABLE company_aliases",
+        "DROP TABLE crawl_runs",
+        "DROP INDEX ix_companies_normalized_name",
+        "DROP INDEX ix_company_aliases_normalized_alias",
+    ):
+        assert shared_object not in sql
+
+
+def test_0009_sqlite_sql_skips_postgresql_similarity_objects() -> None:
+    migration_path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "0009_company_identity_review.py"
+    )
+    migration = runpy.run_path(str(migration_path))
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect=sqlite.dialect(),
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    operations = Operations(context)
+    migration["upgrade"].__globals__["op"] = operations
+
+    migration["upgrade"]()
+
+    sql = " ".join(output.getvalue().split())
+    assert "CREATE TABLE company_identity_review_items" in sql
+    assert "CREATE TABLE company_identity_review_decisions" in sql
+    assert "pg_trgm" not in sql
+    assert "gist_trgm_ops" not in sql
+    assert "ix_companies_normalized_name_trgm" not in sql
+    assert "ix_company_aliases_normalized_alias_trgm" not in sql
 
 
 def test_gate1_manifest_discovery_default_sqlite_offline_upgrade_completes() -> None:
