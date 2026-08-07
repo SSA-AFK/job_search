@@ -54,11 +54,13 @@ def persisted_review_item(
     *,
     stable_hash: str,
     crawl_run: CrawlRun | None = None,
+    status: IdentityReviewStatus = IdentityReviewStatus.PENDING,
+    resolved_at: datetime | None = None,
 ) -> CompanyIdentityReviewItem:
     item = CompanyIdentityReviewItem(
         stable_identity_hash=stable_hash,
         first_crawl_run_id=(crawl_run or persisted_crawl_run(session)).id,
-        status=IdentityReviewStatus.PENDING,
+        status=status,
         candidate_name="Example AI",
         normalized_name="exampleai",
         aliases=["Example Artificial Intelligence"],
@@ -77,6 +79,7 @@ def persisted_review_item(
         candidate_matches=[],
         review_reasons=["fuzzy_name_neighbor"],
         created_at=utc(7),
+        resolved_at=resolved_at,
     )
     session.add(item)
     return item
@@ -87,23 +90,41 @@ def persisted_decision(
     *,
     item: CompanyIdentityReviewItem,
     decision_hash: str,
-    company: Company | None = None,
+    target_company: Company | None = None,
+    resulting_company: Company | None = None,
+    reason: str = "Reviewed public evidence.",
+    action: IdentityReviewAction | None = None,
 ) -> CompanyIdentityReviewDecision:
     decision = CompanyIdentityReviewDecision(
         review_item_id=item.id,
-        action=(
+        action=action
+        or (
             IdentityReviewAction.LINK_AS_ALIAS
-            if company is not None
+            if target_company is not None
             else IdentityReviewAction.REJECT
         ),
-        target_company_id=None if company is None else company.id,
-        resulting_company_id=None if company is None else company.id,
-        reason="Reviewed public evidence.",
+        target_company_id=None if target_company is None else target_company.id,
+        resulting_company_id=(
+            None if resulting_company is None else resulting_company.id
+        ),
+        reason=reason,
         decided_at=utc(8),
         decision_hash=decision_hash,
     )
     session.add(decision)
     return decision
+
+
+def persisted_company(session: Session) -> Company:
+    company = Company(
+        canonical_name="Example AI",
+        normalized_name="exampleai",
+        funding_stage="unknown",
+        scale="unknown",
+    )
+    session.add(company)
+    session.flush()
+    return company
 
 
 def test_app_models_base_lazy_loader_registers_review_tables() -> None:
@@ -154,10 +175,13 @@ def test_review_schema_has_named_checks_constraints_and_status_index() -> None:
     assert item_checks >= {
         "identity_review_status",
         "ck_identity_review_item_hash_format",
+        "ck_identity_review_item_status_resolution",
     }
     assert decision_checks >= {
         "identity_review_action",
         "ck_identity_review_decision_hash_format",
+        "ck_identity_review_decision_reason_length",
+        "ck_identity_review_decision_action_target",
     }
 
     item_uniques = {
@@ -264,14 +288,152 @@ def test_review_hash_checks_require_lowercase_hex(
         )
         session.flush()
 
-def test_audit_foreign_keys_prevent_referenced_row_deletion(session: Session) -> None:
-    company = Company(
-        canonical_name="Example AI",
-        normalized_name="exampleai",
-        funding_stage="unknown",
-        scale="unknown",
+
+@pytest.mark.parametrize("reason", ("", "x" * 2001))
+def test_decision_reason_rejects_values_outside_contract_bounds(
+    session: Session,
+    reason: str,
+) -> None:
+    item = persisted_review_item(session, stable_hash="a" * 64)
+    session.flush()
+
+    with pytest.raises(IntegrityError), session.begin_nested():
+        persisted_decision(
+            session,
+            item=item,
+            decision_hash="b" * 64,
+            reason=reason,
+        )
+        session.flush()
+
+
+@pytest.mark.parametrize("reason", ("x", "x" * 2000))
+def test_decision_reason_accepts_contract_boundaries(
+    session: Session,
+    reason: str,
+) -> None:
+    item = persisted_review_item(session, stable_hash="a" * 64)
+    session.flush()
+
+    decision = persisted_decision(
+        session,
+        item=item,
+        decision_hash="b" * 64,
+        reason=reason,
     )
-    session.add(company)
+    session.flush()
+
+    assert session.get(CompanyIdentityReviewDecision, decision.id) is decision
+
+
+@pytest.mark.parametrize(
+    ("action", "has_target"),
+    (
+        (IdentityReviewAction.LINK_AS_ALIAS, False),
+        (IdentityReviewAction.RENAME_CANONICAL, False),
+        (IdentityReviewAction.CREATE_NEW, True),
+        (IdentityReviewAction.REJECT, True),
+    ),
+)
+def test_decision_action_rejects_invalid_target_presence(
+    session: Session,
+    action: IdentityReviewAction,
+    has_target: bool,
+) -> None:
+    item = persisted_review_item(session, stable_hash="a" * 64)
+    company = persisted_company(session) if has_target else None
+    session.flush()
+
+    with pytest.raises(IntegrityError), session.begin_nested():
+        persisted_decision(
+            session,
+            item=item,
+            decision_hash="b" * 64,
+            target_company=company,
+            action=action,
+        )
+        session.flush()
+
+
+@pytest.mark.parametrize(
+    ("action", "has_target"),
+    (
+        (IdentityReviewAction.LINK_AS_ALIAS, True),
+        (IdentityReviewAction.RENAME_CANONICAL, True),
+        (IdentityReviewAction.CREATE_NEW, False),
+        (IdentityReviewAction.REJECT, False),
+    ),
+)
+def test_decision_action_accepts_valid_target_presence(
+    session: Session,
+    action: IdentityReviewAction,
+    has_target: bool,
+) -> None:
+    item = persisted_review_item(session, stable_hash="a" * 64)
+    company = persisted_company(session) if has_target else None
+    session.flush()
+
+    decision = persisted_decision(
+        session,
+        item=item,
+        decision_hash="b" * 64,
+        target_company=company,
+        action=action,
+    )
+    session.flush()
+
+    assert session.get(CompanyIdentityReviewDecision, decision.id) is decision
+
+
+@pytest.mark.parametrize(
+    ("status", "resolved_at"),
+    (
+        (IdentityReviewStatus.PENDING, utc(8)),
+        (IdentityReviewStatus.RESOLVED, None),
+        (IdentityReviewStatus.REJECTED, None),
+    ),
+)
+def test_review_item_rejects_status_resolution_contradictions(
+    session: Session,
+    status: IdentityReviewStatus,
+    resolved_at: datetime | None,
+) -> None:
+    with pytest.raises(IntegrityError), session.begin_nested():
+        persisted_review_item(
+            session,
+            stable_hash="a" * 64,
+            status=status,
+            resolved_at=resolved_at,
+        )
+        session.flush()
+
+
+@pytest.mark.parametrize(
+    ("status", "resolved_at"),
+    (
+        (IdentityReviewStatus.PENDING, None),
+        (IdentityReviewStatus.RESOLVED, utc(8)),
+        (IdentityReviewStatus.REJECTED, utc(8)),
+    ),
+)
+def test_review_item_accepts_consistent_status_resolution(
+    session: Session,
+    status: IdentityReviewStatus,
+    resolved_at: datetime | None,
+) -> None:
+    item = persisted_review_item(
+        session,
+        stable_hash="a" * 64,
+        status=status,
+        resolved_at=resolved_at,
+    )
+    session.flush()
+
+    assert session.get(CompanyIdentityReviewItem, item.id) is item
+
+
+def test_audit_foreign_keys_prevent_referenced_row_deletion(session: Session) -> None:
+    company = persisted_company(session)
     crawl_run = persisted_crawl_run(session)
     item = persisted_review_item(
         session,
@@ -283,7 +445,8 @@ def test_audit_foreign_keys_prevent_referenced_row_deletion(session: Session) ->
         session,
         item=item,
         decision_hash="b" * 64,
-        company=company,
+        target_company=company,
+        resulting_company=company,
     )
     session.flush()
 

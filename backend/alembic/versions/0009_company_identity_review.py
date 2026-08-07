@@ -80,6 +80,11 @@ def upgrade() -> None:
             _lowercase_hex_check("stable_identity_hash"),
             name="ck_identity_review_item_hash_format",
         ),
+        sa.CheckConstraint(
+            "(status = 'pending' AND resolved_at IS NULL) OR "
+            "(status IN ('resolved', 'rejected') AND resolved_at IS NOT NULL)",
+            name="ck_identity_review_item_status_resolution",
+        ),
         sa.ForeignKeyConstraint(
             ["first_crawl_run_id"],
             ["crawl_runs.id"],
@@ -111,6 +116,16 @@ def upgrade() -> None:
         sa.CheckConstraint(
             _lowercase_hex_check("decision_hash"),
             name="ck_identity_review_decision_hash_format",
+        ),
+        sa.CheckConstraint(
+            "length(reason) BETWEEN 1 AND 2000",
+            name="ck_identity_review_decision_reason_length",
+        ),
+        sa.CheckConstraint(
+            "(action IN ('link_as_alias', 'rename_canonical') "
+            "AND target_company_id IS NOT NULL) OR "
+            "(action IN ('create_new', 'reject') AND target_company_id IS NULL)",
+            name="ck_identity_review_decision_action_target",
         ),
         sa.ForeignKeyConstraint(
             ["review_item_id"],
