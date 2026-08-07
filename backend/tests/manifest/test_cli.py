@@ -25,6 +25,7 @@ from app.manifest.contracts import (
     EntryDiscoveryResult,
     ManifestCompany,
 )
+from app.manifest.discovery import EntryDiscoveryCoordinator
 from app.manifest.models import (
     CandidateFact,
     CompanyManifest,
@@ -589,31 +590,31 @@ def _add_discovery_observation(
     minute: int,
     method: str = "official_navigation",
     source_id: str | None = None,
-) -> None:
+) -> UUID:
     with factory() as session:
-        session.add(
-            EntryDiscoveryObservation(
-                manifest_version="d" * 64,
-                company_id=company.company_id,
-                method=method,
-                status=status,
-                source_id=source_id,
-                error_code=error_code,
-                observed_at=datetime(2026, 8, 7, 1, minute, tzinfo=UTC),
-            )
+        observation = EntryDiscoveryObservation(
+            manifest_version="d" * 64,
+            company_id=company.company_id,
+            method=method,
+            status=status,
+            source_id=source_id,
+            error_code=error_code,
+            observed_at=datetime(2026, 8, 7, 1, minute, tzinfo=UTC),
         )
+        session.add(observation)
         session.commit()
+        return observation.id
 
 
 def test_resume_preserves_zhihu_source_stop_without_calling_provider(
     cli_environment: dict[str, str],
 ) -> None:
     factory, companies = _discovery_runner_fixture(cli_environment, companies=1)
-    _add_discovery_observation(
+    observation_id = _add_discovery_observation(
         factory,
         companies[0],
         status=DiscoveryStatus.BLOCKED,
-        error_code="provider_auth_failed",
+        error_code="provider_rate_limited",
         minute=1,
         method="zhihu_global_search",
         source_id="zhihu_global_search",
@@ -635,11 +636,34 @@ def test_resume_preserves_zhihu_source_stop_without_calling_provider(
         request_counter=counter,
         stopped="zhihu_global_search" in state.stopped_source_ids,
     )
+    coordinator = EntryDiscoveryCoordinator(
+        official_discoverer=_StaticCoordinator(
+            EntryDiscoveryResult(
+                status=DiscoveryStatus.NOT_FOUND,
+                method="official_navigation",
+                error_code="recruitment_entry_not_found",
+            )
+        ),
+        fallback_discoverer=subject,
+    )
 
-    result = asyncio.run(subject.discover(companies[0]))
+    counts = asyncio.run(
+        manifest_cli._run_discovery(
+            SessionLocal=factory,
+            manifest_version="d" * 64,
+            companies=companies,
+            state=state,
+            coordinator=coordinator,
+            limit=None,
+        )
+    )
 
-    assert result.status is DiscoveryStatus.BLOCKED
-    assert result.error_code == "fallback_source_stopped"
+    with factory() as session:
+        observations = tuple(session.scalars(select(EntryDiscoveryObservation)))
+    assert counts == {DiscoveryStatus.BLOCKED: 1}
+    assert len(observations) == 1
+    assert observations[0].id == observation_id
+    assert observations[0].error_code == "fallback_source_stopped"
     assert provider.queries == []
     assert starts == 0
 
@@ -673,30 +697,39 @@ def test_resume_reprocesses_retryable_failures_and_skips_stable_observations(
         error_code="recruitment_entry_not_found",
         minute=3,
     )
-    environment = {**cli_environment, "GATE1_LIVE_DISCOVERY_ENABLED": "true"}
-
-    result = run_cli(
-        "discover",
-        "--manifest",
-        "d" * 64,
-        "--resume",
-        "--live",
-        environment=environment,
+    loaded_companies, state = manifest_cli._load_discovery_members(
+        factory, "d" * 64
+    )
+    coordinator = _StaticCoordinator(
+        EntryDiscoveryResult(
+            status=DiscoveryStatus.NOT_FOUND,
+            method="official_navigation",
+            error_code="recruitment_entry_not_found",
+        )
     )
 
-    assert result.returncode == 0
-    payload = assert_sorted_json_object(result.stdout)
-    assert payload["processed"] == 2
-    assert payload["skipped"] == 1
-    with factory() as session:
-        accepted = tuple(
-            session.scalars(
-                select(EntryDiscoveryObservation.company_id).where(
-                    EntryDiscoveryObservation.status == DiscoveryStatus.ACCEPTED
-                )
-            )
+    counts = asyncio.run(
+        manifest_cli._run_discovery(
+            SessionLocal=factory,
+            manifest_version="d" * 64,
+            companies=loaded_companies,
+            state=state,
+            coordinator=coordinator,
+            limit=None,
         )
-    assert set(accepted) == {companies[0].company_id, companies[1].company_id}
+    )
+
+    assert coordinator.calls == 2
+    assert counts == {DiscoveryStatus.NOT_FOUND: 2}
+    with factory() as session:
+        observations = tuple(session.scalars(select(EntryDiscoveryObservation)))
+    assert len(observations) == 3
+    assert {observation.status for observation in observations} == {
+        DiscoveryStatus.NOT_FOUND
+    }
+    assert {observation.error_code for observation in observations} == {
+        "recruitment_entry_not_found"
+    }
 
 
 def test_resume_preserves_existing_access_stop_for_same_domain(
@@ -735,27 +768,20 @@ def test_resume_preserves_existing_access_stop_for_same_domain(
 def test_resume_rebuilds_only_consecutive_rate_limit_state(
     cli_environment: dict[str, str],
 ) -> None:
-    factory, companies = _discovery_runner_fixture(cli_environment, companies=6)
-    _add_discovery_observation(
+    factory, companies = _discovery_runner_fixture(cli_environment, companies=3)
+    first_id = _add_discovery_observation(
         factory,
         companies[0],
         status=DiscoveryStatus.BLOCKED,
         error_code="provider_rate_limited",
         minute=1,
     )
-    _add_discovery_observation(
+    second_id = _add_discovery_observation(
         factory,
         companies[1],
-        status=DiscoveryStatus.NOT_FOUND,
-        error_code="recruitment_entry_not_found",
-        minute=2,
-    )
-    _add_discovery_observation(
-        factory,
-        companies[2],
         status=DiscoveryStatus.BLOCKED,
         error_code="provider_rate_limited",
-        minute=3,
+        minute=2,
     )
     loaded_companies, state = manifest_cli._load_discovery_members(
         factory, "d" * 64
@@ -772,15 +798,35 @@ def test_resume_rebuilds_only_consecutive_rate_limit_state(
         manifest_cli._run_discovery(
             SessionLocal=factory,
             manifest_version="d" * 64,
-            companies=loaded_companies[3:],
+            companies=loaded_companies,
             state=state,
             coordinator=coordinator,
             limit=None,
         )
     )
 
-    assert coordinator.calls == 2
+    assert coordinator.calls == 1
     assert counts == {DiscoveryStatus.BLOCKED: 3}
+    with factory() as session:
+        observations = tuple(
+            session.scalars(
+                select(EntryDiscoveryObservation).order_by(
+                    EntryDiscoveryObservation.company_id
+                )
+            )
+        )
+    assert len(observations) == 3
+    assert {observations[0].id, observations[1].id} == {first_id, second_id}
+    assert [observation.error_code for observation in observations].count(
+        "provider_rate_limited"
+    ) == 1
+    assert [observation.error_code for observation in observations].count(
+        "source_rate_limited"
+    ) == 2
+    _companies, resumed_state = manifest_cli._load_discovery_members(
+        factory, "d" * 64
+    )
+    assert resumed_state.stopped_domains == {"shared.example"}
 
 
 def test_discover_with_both_opt_ins_uses_evidenced_urls_and_resumes_positions(

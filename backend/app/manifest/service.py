@@ -82,6 +82,17 @@ _CONFIDENCE_ORDER = {
     ConfidenceTier.MEDIUM: 1,
     ConfidenceTier.LOW: 2,
 }
+_RETRYABLE_BLOCKED_ERROR_CODES = frozenset(
+    {
+        "connect_timeout",
+        "fallback_request_failed",
+        "http_error",
+        "http_status",
+        "provider_rate_limited",
+        "request_timeout",
+        "total_timeout",
+    }
+)
 
 
 def _result_values(result: EntryDiscoveryResult) -> tuple[object, ...]:
@@ -310,6 +321,137 @@ def record_discovery_result(
             observation_id=observation.id,
             job_entry_id=observation.job_entry_id,
             observation_created=True,
+            entry_created=entry_created,
+        )
+
+
+def is_retryable_discovery_observation(
+    observation: EntryDiscoveryObservation,
+) -> bool:
+    return observation.status is DiscoveryStatus.FAILED or (
+        observation.status is DiscoveryStatus.BLOCKED
+        and observation.error_code in _RETRYABLE_BLOCKED_ERROR_CODES
+    )
+
+
+def transition_retryable_discovery_result(
+    session: Session,
+    *,
+    observation_id: UUID,
+    command: RecordDiscoveryCommand,
+) -> DiscoveryRecordSummary:
+    """Atomically replace one retryable observation with its current result."""
+
+    if session.in_transaction():
+        raise DiscoveryRecordConflict("retry transition requires a clean session")
+    classification = (
+        _accepted_classification(command.result)
+        if command.result.status is DiscoveryStatus.ACCEPTED
+        else command.result.classification
+    )
+
+    with session.begin():
+        manifests = tuple(
+            session.scalars(
+                select(CompanyManifest)
+                .order_by(CompanyManifest.version)
+                .with_for_update()
+            )
+        )
+        manifest = next(
+            (
+                persisted
+                for persisted in manifests
+                if persisted.version == command.manifest_version
+            ),
+            None,
+        )
+        if manifest is None:
+            raise DiscoveryRecordConflict("retry transition manifest does not exist")
+        member = session.scalar(
+            select(CompanyManifestMember)
+            .where(
+                CompanyManifestMember.manifest_version == command.manifest_version,
+                CompanyManifestMember.company_id == command.company_id,
+            )
+            .with_for_update()
+        )
+        if member is None:
+            raise DiscoveryRecordConflict(
+                "retry transition company is not a manifest member"
+            )
+
+        observations = tuple(
+            session.scalars(
+                select(EntryDiscoveryObservation)
+                .where(
+                    EntryDiscoveryObservation.manifest_version
+                    == command.manifest_version,
+                    EntryDiscoveryObservation.company_id == command.company_id,
+                )
+                .order_by(EntryDiscoveryObservation.id)
+                .with_for_update()
+            )
+        )
+        if not observations:
+            raise DiscoveryRecordConflict(
+                "retry transition observation does not exist"
+            )
+        if len(observations) != 1:
+            raise DiscoveryRecordConflict(
+                "retry transition observation state is ambiguous"
+            )
+        observation = observations[0]
+        if observation.id != observation_id:
+            raise DiscoveryRecordConflict(
+                "retry transition observation does not exist"
+            )
+        if not is_retryable_discovery_observation(observation):
+            raise DiscoveryRecordConflict(
+                "retry transition requires a retryable current observation"
+            )
+        if observation.job_entry_id is not None:
+            raise DiscoveryRecordConflict(
+                "retry transition current observation is invalid"
+            )
+        if command.observed_at <= observation.observed_at:
+            raise DiscoveryRecordConflict(
+                "retry transition requires a newer observation time"
+            )
+
+        entry: JobEntry | None = None
+        entry_created = False
+        if command.result.status is DiscoveryStatus.ACCEPTED:
+            assert classification is not None
+            entry, entry_created = _upsert_discovered_entry(
+                session,
+                command=command,
+                classification=classification,
+            )
+
+        result = command.result
+        observation.method = result.method
+        observation.status = result.status
+        observation.candidate_url = (
+            None if result.candidate_url is None else str(result.candidate_url)
+        )
+        observation.normalized_url = (
+            None if result.normalized_url is None else str(result.normalized_url)
+        )
+        observation.source_id = result.source_id
+        observation.ownership_evidence = result.ownership_evidence
+        observation.platform = None if classification is None else classification.platform
+        observation.requires_rendering = (
+            False if classification is None else classification.requires_rendering
+        )
+        observation.error_code = result.error_code
+        observation.job_entry_id = None if entry is None else entry.id
+        observation.observed_at = command.observed_at
+        session.flush()
+        return DiscoveryRecordSummary(
+            observation_id=observation.id,
+            job_entry_id=observation.job_entry_id,
+            observation_created=False,
             entry_created=entry_created,
         )
 

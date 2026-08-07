@@ -54,22 +54,13 @@ from app.manifest.service import (
     DiscoveryRecordConflict,
     ManifestFreezeError,
     freeze_manifest,
+    is_retryable_discovery_observation,
     record_discovery_result,
+    transition_retryable_discovery_result,
 )
 
 _MAX_INPUT_BYTES = 16 * 1024 * 1024
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-_RETRYABLE_OBSERVATION_ERROR_CODES = frozenset(
-    {
-        "connect_timeout",
-        "fallback_request_failed",
-        "http_error",
-        "http_status",
-        "provider_rate_limited",
-        "request_timeout",
-        "total_timeout",
-    }
-)
 
 
 class ManifestCommandError(ValueError):
@@ -82,6 +73,7 @@ class ManifestCommandError(ValueError):
 class _DiscoveryState:
     observed_company_ids: frozenset[UUID]
     terminal_company_ids: set[UUID]
+    retryable_observation_ids: dict[UUID, UUID]
     stopped_domains: set[str]
     stopped_source_ids: set[str]
     consecutive_rate_limits: Counter[str]
@@ -607,13 +599,7 @@ def _official_host(company: ManifestCompany) -> str:
 
 
 def _observation_is_terminal(observation: EntryDiscoveryObservation) -> bool:
-    if observation.status in {
-        DiscoveryStatus.ACCEPTED,
-        DiscoveryStatus.NOT_FOUND,
-        DiscoveryStatus.REVIEW_REQUIRED,
-    }:
-        return True
-    return observation.error_code not in _RETRYABLE_OBSERVATION_ERROR_CODES
+    return not is_retryable_discovery_observation(observation)
 
 
 def _update_domain_state(
@@ -677,6 +663,7 @@ def _load_discovery_members(
             observation.company_id for observation in observations
         ),
         terminal_company_ids=set(),
+        retryable_observation_ids={},
         stopped_domains=set(),
         stopped_source_ids=set(),
         consecutive_rate_limits=Counter(),
@@ -684,8 +671,10 @@ def _load_discovery_members(
     for observation in observations:
         if _observation_is_terminal(observation):
             state.terminal_company_ids.add(observation.company_id)
+            state.retryable_observation_ids.pop(observation.company_id, None)
         else:
             state.terminal_company_ids.discard(observation.company_id)
+            state.retryable_observation_ids[observation.company_id] = observation.id
         if observation.source_id and observation.error_code in {
             "fallback_source_stopped",
             "provider_auth_failed",
@@ -718,6 +707,7 @@ async def _run_discovery(
         state = _DiscoveryState(
             observed_company_ids=already_observed,
             terminal_company_ids=set(already_observed),
+            retryable_observation_ids={},
             stopped_domains=set(),
             stopped_source_ids=set(),
             consecutive_rate_limits=Counter(),
@@ -747,16 +737,22 @@ async def _run_discovery(
                 method=result.method,
                 error_code=result.error_code,
             )
+        command = RecordDiscoveryCommand(
+            manifest_version=manifest_version,
+            company_id=company.company_id,
+            result=result,
+            observed_at=datetime.now(UTC),
+        )
         with SessionLocal() as session:
-            record_discovery_result(
-                session,
-                RecordDiscoveryCommand(
-                    manifest_version=manifest_version,
-                    company_id=company.company_id,
-                    result=result,
-                    observed_at=datetime.now(UTC),
-                ),
-            )
+            observation_id = state.retryable_observation_ids.get(company.company_id)
+            if observation_id is None:
+                record_discovery_result(session, command)
+            else:
+                transition_retryable_discovery_result(
+                    session,
+                    observation_id=observation_id,
+                    command=command,
+                )
         counts[result.status] += 1
     return counts
 

@@ -1,9 +1,9 @@
 import json
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, event, func, select
@@ -11,6 +11,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
+from app.manifest import service as manifest_service
 from app.manifest.contracts import (
     AiCategory,
     AtsClassification,
@@ -418,6 +419,299 @@ def test_exact_discovery_replay_does_not_duplicate_observation_or_entry(
     assert second.entry_created is False
     assert session.scalar(select(func.count()).select_from(EntryDiscoveryObservation)) == 1
     assert session.scalar(select(func.count()).select_from(JobEntry)) == 1
+
+
+def test_retry_transition_replaces_failed_observation_with_accepted_state(
+    session: Session,
+) -> None:
+    seed_discovery_manifest(session)
+    failed = RecordDiscoveryCommand(
+        manifest_version=DISCOVERY_MANIFEST_VERSION,
+        company_id=DISCOVERY_COMPANY_ID,
+        observed_at=DISCOVERY_OBSERVED_AT,
+        result=EntryDiscoveryResult(
+            status=DiscoveryStatus.FAILED,
+            method="official_navigation",
+            error_code="total_timeout",
+        ),
+    )
+    current = record_discovery_result(session, failed)
+    accepted = accepted_discovery_command(
+        observed_at=DISCOVERY_OBSERVED_AT + timedelta(minutes=1)
+    )
+
+    transitioned = manifest_service.transition_retryable_discovery_result(
+        session,
+        observation_id=current.observation_id,
+        command=accepted,
+    )
+
+    observation = session.get(EntryDiscoveryObservation, current.observation_id)
+    assert transitioned.observation_id == current.observation_id
+    assert transitioned.observation_created is False
+    assert transitioned.entry_created is True
+    assert observation is not None
+    assert observation.status is DiscoveryStatus.ACCEPTED
+    assert observation.method == "official_navigation"
+    assert observation.normalized_url == "https://jobs.feishu.cn/acme/careers"
+    assert observation.error_code is None
+    assert observation.job_entry_id == transitioned.job_entry_id
+    assert observation.observed_at == accepted.observed_at
+    assert session.scalar(select(func.count()).select_from(EntryDiscoveryObservation)) == 1
+    assert session.scalar(select(func.count()).select_from(JobEntry)) == 1
+
+
+def test_retry_transition_replaces_rate_limit_with_stopped_source_state(
+    session: Session,
+) -> None:
+    seed_discovery_manifest(session)
+    rate_limited = RecordDiscoveryCommand(
+        manifest_version=DISCOVERY_MANIFEST_VERSION,
+        company_id=DISCOVERY_COMPANY_ID,
+        observed_at=DISCOVERY_OBSERVED_AT,
+        result=EntryDiscoveryResult(
+            status=DiscoveryStatus.BLOCKED,
+            method="zhihu_global_search",
+            source_id="zhihu_global_search",
+            error_code="provider_rate_limited",
+        ),
+    )
+    current = record_discovery_result(session, rate_limited)
+    stopped = rate_limited.model_copy(
+        update={
+            "observed_at": DISCOVERY_OBSERVED_AT + timedelta(minutes=1),
+            "result": EntryDiscoveryResult(
+                status=DiscoveryStatus.BLOCKED,
+                method="zhihu_global_search",
+                source_id="zhihu_global_search",
+                error_code="fallback_source_stopped",
+            ),
+        }
+    )
+
+    transitioned = manifest_service.transition_retryable_discovery_result(
+        session,
+        observation_id=current.observation_id,
+        command=stopped,
+    )
+
+    observation = session.get(EntryDiscoveryObservation, current.observation_id)
+    assert transitioned.observation_id == current.observation_id
+    assert transitioned.job_entry_id is None
+    assert transitioned.observation_created is False
+    assert transitioned.entry_created is False
+    assert observation is not None
+    assert observation.status is DiscoveryStatus.BLOCKED
+    assert observation.source_id == "zhihu_global_search"
+    assert observation.error_code == "fallback_source_stopped"
+    assert observation.observed_at == stopped.observed_at
+    assert session.scalar(select(func.count()).select_from(EntryDiscoveryObservation)) == 1
+    assert session.scalar(select(func.count()).select_from(JobEntry)) == 0
+
+
+@pytest.mark.parametrize(
+    ("status", "error_code"),
+    [
+        (DiscoveryStatus.NOT_FOUND, "recruitment_entry_not_found"),
+        (DiscoveryStatus.BLOCKED, "provider_auth_failed"),
+    ],
+)
+def test_retry_transition_rejects_terminal_or_nonretryable_current_state(
+    session: Session,
+    status: DiscoveryStatus,
+    error_code: str,
+) -> None:
+    seed_discovery_manifest(session)
+    current_command = RecordDiscoveryCommand(
+        manifest_version=DISCOVERY_MANIFEST_VERSION,
+        company_id=DISCOVERY_COMPANY_ID,
+        observed_at=DISCOVERY_OBSERVED_AT,
+        result=EntryDiscoveryResult(
+            status=status,
+            method="official_navigation",
+            error_code=error_code,
+        ),
+    )
+    current = record_discovery_result(session, current_command)
+
+    with pytest.raises(
+        DiscoveryRecordConflict,
+        match="retryable current observation",
+    ):
+        manifest_service.transition_retryable_discovery_result(
+            session,
+            observation_id=current.observation_id,
+            command=accepted_discovery_command(
+                observed_at=DISCOVERY_OBSERVED_AT + timedelta(minutes=1)
+            ),
+        )
+
+    observation = session.get(EntryDiscoveryObservation, current.observation_id)
+    assert observation is not None
+    assert observation.status is status
+    assert observation.error_code == error_code
+    assert session.scalar(select(func.count()).select_from(JobEntry)) == 0
+
+
+def test_retry_transition_rejects_missing_or_ambiguous_current_state(
+    session: Session,
+) -> None:
+    seed_discovery_manifest(session)
+    command = accepted_discovery_command(
+        observed_at=DISCOVERY_OBSERVED_AT + timedelta(minutes=1)
+    )
+
+    with pytest.raises(DiscoveryRecordConflict, match="does not exist"):
+        manifest_service.transition_retryable_discovery_result(
+            session,
+            observation_id=uuid4(),
+            command=command,
+        )
+
+    failed = RecordDiscoveryCommand(
+        manifest_version=DISCOVERY_MANIFEST_VERSION,
+        company_id=DISCOVERY_COMPANY_ID,
+        observed_at=DISCOVERY_OBSERVED_AT,
+        result=EntryDiscoveryResult(
+            status=DiscoveryStatus.FAILED,
+            method="official_navigation",
+            error_code="total_timeout",
+        ),
+    )
+    current = record_discovery_result(session, failed)
+    session.add(
+        EntryDiscoveryObservation(
+            manifest_version=DISCOVERY_MANIFEST_VERSION,
+            company_id=DISCOVERY_COMPANY_ID,
+            method="official_navigation",
+            status=DiscoveryStatus.FAILED,
+            error_code="request_timeout",
+            observed_at=DISCOVERY_OBSERVED_AT + timedelta(seconds=1),
+        )
+    )
+    session.commit()
+
+    with pytest.raises(DiscoveryRecordConflict, match="ambiguous"):
+        manifest_service.transition_retryable_discovery_result(
+            session,
+            observation_id=current.observation_id,
+            command=command,
+        )
+
+    assert session.scalar(select(func.count()).select_from(EntryDiscoveryObservation)) == 2
+    assert session.scalar(select(func.count()).select_from(JobEntry)) == 0
+
+
+def test_retry_transition_rejects_cross_company_or_manifest_observation(
+    session: Session,
+) -> None:
+    seed_discovery_manifest(session)
+    failed = RecordDiscoveryCommand(
+        manifest_version=DISCOVERY_MANIFEST_VERSION,
+        company_id=DISCOVERY_COMPANY_ID,
+        observed_at=DISCOVERY_OBSERVED_AT,
+        result=EntryDiscoveryResult(
+            status=DiscoveryStatus.FAILED,
+            method="official_navigation",
+            error_code="total_timeout",
+        ),
+    )
+    current = record_discovery_result(session, failed)
+    other_company_id = UUID(int=91_002)
+    seed_discovery_manifest(session, company_id=other_company_id, position=2)
+
+    with pytest.raises(DiscoveryRecordConflict, match="does not exist"):
+        manifest_service.transition_retryable_discovery_result(
+            session,
+            observation_id=current.observation_id,
+            command=accepted_discovery_command(
+                company_id=other_company_id,
+                normalized_url="https://jobs.feishu.cn/other/careers",
+                observed_at=DISCOVERY_OBSERVED_AT + timedelta(minutes=1),
+            ),
+        )
+
+    other_manifest_version = "e" * 64
+    session.add(
+        CompanyManifest(
+            version=other_manifest_version,
+            config_fingerprint="b" * 64,
+            member_count=1,
+            canonical_quota={"foundation_models": 1},
+            frozen_at=datetime(2026, 8, 7, tzinfo=UTC),
+        )
+    )
+    session.add(
+        CompanyManifestMember(
+            manifest_version=other_manifest_version,
+            company_id=DISCOVERY_COMPANY_ID,
+            position=1,
+            canonical_name="Discovery Company 1",
+            primary_category=AiCategory.FOUNDATION_MODELS,
+        )
+    )
+    session.commit()
+    other_manifest_command = RecordDiscoveryCommand(
+        manifest_version=other_manifest_version,
+        company_id=DISCOVERY_COMPANY_ID,
+        observed_at=DISCOVERY_OBSERVED_AT + timedelta(minutes=1),
+        result=accepted_discovery_command().result,
+    )
+
+    with pytest.raises(DiscoveryRecordConflict, match="does not exist"):
+        manifest_service.transition_retryable_discovery_result(
+            session,
+            observation_id=current.observation_id,
+            command=other_manifest_command,
+        )
+
+    stored = session.get(EntryDiscoveryObservation, current.observation_id)
+    assert stored is not None
+    assert stored.manifest_version == DISCOVERY_MANIFEST_VERSION
+    assert stored.company_id == DISCOVERY_COMPANY_ID
+    assert stored.status is DiscoveryStatus.FAILED
+
+
+def test_retry_transition_rejects_nonincreasing_timestamp_atomically(
+    session: Session,
+) -> None:
+    seed_discovery_manifest(session)
+    failed = RecordDiscoveryCommand(
+        manifest_version=DISCOVERY_MANIFEST_VERSION,
+        company_id=DISCOVERY_COMPANY_ID,
+        observed_at=DISCOVERY_OBSERVED_AT,
+        result=EntryDiscoveryResult(
+            status=DiscoveryStatus.FAILED,
+            method="official_navigation",
+            error_code="total_timeout",
+        ),
+    )
+    current = record_discovery_result(session, failed)
+
+    with pytest.raises(DiscoveryRecordConflict, match="newer observation time"):
+        manifest_service.transition_retryable_discovery_result(
+            session,
+            observation_id=current.observation_id,
+            command=accepted_discovery_command(observed_at=DISCOVERY_OBSERVED_AT),
+        )
+
+    observation = session.get(EntryDiscoveryObservation, current.observation_id)
+    assert observation is not None
+    assert observation.status is DiscoveryStatus.FAILED
+    assert observation.error_code == "total_timeout"
+    assert session.scalar(select(func.count()).select_from(JobEntry)) == 0
+
+
+def test_retry_transition_requires_clean_session(session: Session) -> None:
+    seed_discovery_manifest(session)
+    session.execute(select(Company.id)).all()
+
+    with pytest.raises(DiscoveryRecordConflict, match="clean session"):
+        manifest_service.transition_retryable_discovery_result(
+            session,
+            observation_id=uuid4(),
+            command=accepted_discovery_command(),
+        )
 
 
 def test_accepted_discovery_upserts_existing_owned_entry_without_resetting_status(
