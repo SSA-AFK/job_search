@@ -24,3 +24,9 @@ def normalize_url(value: str) -> str:
     )
     port = "" if parts.port is None or default_port else f":{parts.port}"
     return urlunsplit((scheme, f"{host}{port}", parts.path, parts.query, ""))
+
+
+def normalize_public_identity_url(value: str) -> str:
+    normalized = normalize_url(value)
+    parts = urlsplit(normalized)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))

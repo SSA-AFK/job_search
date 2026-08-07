@@ -15,6 +15,7 @@ from sqlalchemy import (
     func,
     literal,
     select,
+    text,
     true,
     union_all,
 )
@@ -34,6 +35,18 @@ from app.company_identity.models import (
 from app.models import Company, CompanyAlias, RegulatoryFiling
 
 _MAX_CANDIDATES = 20
+_KNN_RECALL_MULTIPLIER = 2
+_POSTGRESQL_SIMILARITY_CAPABILITY_SQL = text(
+    "SELECT "
+    "EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE extname = 'pg_trgm') "
+    "AND EXISTS ("
+    "SELECT 1 FROM pg_catalog.pg_operator AS operator "
+    "JOIN pg_catalog.pg_type AS left_type ON left_type.oid = operator.oprleft "
+    "JOIN pg_catalog.pg_type AS right_type ON right_type.oid = operator.oprright "
+    "WHERE operator.oprname = '<->' "
+    "AND left_type.typname = 'text' AND right_type.typname = 'text'"
+    ")"
+)
 
 
 class CompanyIdentityRepository(Protocol):
@@ -59,6 +72,9 @@ class SqlAlchemyCompanyIdentityRepository:
         self.session = session
         self.similarity_limit = similarity_limit
         self._dialect_name = session.bind.dialect.name if session.bind is not None else ""
+        self._similarity_available: bool | None = (
+            None if self._dialect_name == "postgresql" else False
+        )
 
     async def find_exact_name_owners(
         self, names: frozenset[str]
@@ -109,13 +125,10 @@ class SqlAlchemyCompanyIdentityRepository:
             )
 
         if identity.legal_identifiers:
-            normalized_filing_number = func.lower(
-                func.replace(RegulatoryFiling.filing_number, " ", "")
-            )
             owner_ids.update(
                 self._bounded_owner_ids(
                     select(RegulatoryFiling.company_id).where(
-                        normalized_filing_number.in_(identity.legal_identifiers)
+                        RegulatoryFiling.filing_number.in_(identity.legal_identifiers)
                     )
                 )
             )
@@ -131,30 +144,65 @@ class SqlAlchemyCompanyIdentityRepository:
             return ()
 
         recalled: list[CompanyIdentityCandidateMatch] = []
+        recall_limit = final_limit * _KNN_RECALL_MULTIPLIER
         for candidate_name in sorted(names):
             canonical_distance = Company.normalized_name.op("<->")(candidate_name)
-            canonical_statement = (
+            canonical_recall = (
                 select(
                     Company.id.label("company_id"),
                     Company.canonical_name.label("canonical_name"),
                     Company.normalized_name.label("normalized_name"),
                     Company.normalized_name.label("matched_name"),
                     literal("fuzzy_canonical").label("match_kind"),
+                    canonical_distance.label("distance"),
                 )
                 .order_by(canonical_distance)
+                .limit(recall_limit)
+                .subquery()
+            )
+            canonical_statement = (
+                select(
+                    canonical_recall.c.company_id,
+                    canonical_recall.c.canonical_name,
+                    canonical_recall.c.normalized_name,
+                    canonical_recall.c.matched_name,
+                    canonical_recall.c.match_kind,
+                )
+                .order_by(
+                    canonical_recall.c.distance,
+                    canonical_recall.c.normalized_name,
+                    canonical_recall.c.company_id,
+                )
                 .limit(final_limit)
             )
             alias_distance = CompanyAlias.normalized_alias.op("<->")(candidate_name)
-            alias_statement = (
+            alias_recall = (
                 select(
                     Company.id.label("company_id"),
                     Company.canonical_name.label("canonical_name"),
                     Company.normalized_name.label("normalized_name"),
                     CompanyAlias.normalized_alias.label("matched_name"),
                     literal("fuzzy_alias").label("match_kind"),
+                    alias_distance.label("distance"),
                 )
                 .join(CompanyAlias, CompanyAlias.company_id == Company.id)
                 .order_by(alias_distance)
+                .limit(recall_limit)
+                .subquery()
+            )
+            alias_statement = (
+                select(
+                    alias_recall.c.company_id,
+                    alias_recall.c.canonical_name,
+                    alias_recall.c.normalized_name,
+                    alias_recall.c.matched_name,
+                    alias_recall.c.match_kind,
+                )
+                .order_by(
+                    alias_recall.c.distance,
+                    alias_recall.c.normalized_name,
+                    alias_recall.c.company_id,
+                )
                 .limit(final_limit)
             )
             recalled.extend(self._candidate_matches(candidate_name, canonical_statement))
@@ -166,7 +214,11 @@ class SqlAlchemyCompanyIdentityRepository:
         return tuple(sorted(best_by_company.values(), key=_candidate_order)[:final_limit])
 
     def similarity_search_available(self) -> bool:
-        return self._dialect_name == "postgresql"
+        if self._similarity_available is None:
+            self._similarity_available = bool(
+                self.session.scalar(_POSTGRESQL_SIMILARITY_CAPABILITY_SQL)
+            )
+        return self._similarity_available
 
     def _bounded_owner_ids(
         self,

@@ -1,5 +1,6 @@
 import asyncio
 from decimal import Decimal
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -11,7 +12,10 @@ from app.company_identity.contracts import (
     IdentityResolutionKind,
     IdentityReviewReason,
 )
-from app.company_identity.repository import CompanyIdentityRepository
+from app.company_identity.repository import (
+    CompanyIdentityRepository,
+    SqlAlchemyCompanyIdentityRepository,
+)
 from app.company_identity.resolver import CompanyIdentityResolver
 
 COMPANY_A = UUID("00000000-0000-0000-0000-000000000001")
@@ -297,6 +301,26 @@ def test_unavailable_similarity_fails_closed_to_review() -> None:
     assert result.kind is IdentityResolutionKind.REVIEW_REQUIRED
     assert result.review_reasons == (IdentityReviewReason.SIMILARITY_SEARCH_UNAVAILABLE,)
     assert repository.similarity_calls == []
+
+
+def test_missing_postgresql_trigram_capability_fails_closed_to_review() -> None:
+    from sqlalchemy.dialects import postgresql
+
+    class MissingTrigramSession:
+        bind = SimpleNamespace(dialect=postgresql.dialect())
+
+        def execute(self, _statement: object):
+            return ()
+
+        def scalar(self, _statement: object) -> bool:
+            return False
+
+    repository = SqlAlchemyCompanyIdentityRepository(MissingTrigramSession())  # type: ignore[arg-type]
+
+    result = resolve(repository, identity("Unknown Company"))
+
+    assert result.kind is IdentityResolutionKind.REVIEW_REQUIRED
+    assert result.review_reasons == (IdentityReviewReason.SIMILARITY_SEARCH_UNAVAILABLE,)
 
 
 def test_resolver_enforces_deterministic_top_twenty_order() -> None:

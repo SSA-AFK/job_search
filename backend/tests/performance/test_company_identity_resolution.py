@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 from uuid import uuid4
 
 import pytest
@@ -10,6 +11,50 @@ from sqlalchemy.orm import Session
 from app.company_identity.contracts import CompanyIdentityInput, IdentityResolutionKind
 from app.company_identity.repository import SqlAlchemyCompanyIdentityRepository
 from app.company_identity.resolver import CompanyIdentityResolver
+
+
+class _RecordingConnection:
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    def execute(self, statement) -> None:
+        self.statements.append(str(statement))
+
+
+def _drop_isolated_schema(connection, quoted_schema: str) -> None:
+    if re.fullmatch(r'"identity_resolution_[0-9a-f]{6,64}"', quoted_schema) is None:
+        raise ValueError("invalid isolated schema name")
+    statements = (
+        f"DROP INDEX IF EXISTS {quoted_schema}.ix_company_aliases_normalized_alias_trgm",
+        f"DROP INDEX IF EXISTS {quoted_schema}.ix_companies_normalized_name_trgm",
+        f"DROP TABLE IF EXISTS {quoted_schema}.company_aliases",
+        f"DROP TABLE IF EXISTS {quoted_schema}.companies",
+        f"DROP SCHEMA {quoted_schema}",
+    )
+    for statement in statements:
+        connection.execute(text(statement))
+
+
+@pytest.mark.performance
+@pytest.mark.postgresql
+def test_isolated_schema_cleanup_drops_only_owned_objects_without_cascade() -> None:
+    connection = _RecordingConnection()
+
+    _drop_isolated_schema(connection, '"identity_resolution_abc123"')
+
+    assert connection.statements == [
+        (
+            'DROP INDEX IF EXISTS "identity_resolution_abc123".'
+            "ix_company_aliases_normalized_alias_trgm"
+        ),
+        (
+            'DROP INDEX IF EXISTS "identity_resolution_abc123".'
+            "ix_companies_normalized_name_trgm"
+        ),
+        'DROP TABLE IF EXISTS "identity_resolution_abc123".company_aliases',
+        'DROP TABLE IF EXISTS "identity_resolution_abc123".companies',
+        'DROP SCHEMA "identity_resolution_abc123"',
+    ]
 
 
 @pytest.mark.performance
@@ -88,8 +133,11 @@ def test_ten_thousand_company_resolution_uses_bounded_trigram_recall() -> None:
                 connection.execute(
                     text(
                         "EXPLAIN (COSTS OFF) "
-                        "SELECT id, canonical_name, normalized_name FROM companies "
-                        "ORDER BY normalized_name <-> 'benchmarkcompany05000x' LIMIT 20"
+                        "SELECT company_id, canonical_name, normalized_name FROM ("
+                        "SELECT id AS company_id, canonical_name, normalized_name, "
+                        "normalized_name <-> 'benchmarkcompany05000x' AS distance "
+                        "FROM companies ORDER BY distance LIMIT 40"
+                        ") AS recall ORDER BY distance, normalized_name, company_id LIMIT 20"
                     )
                 ).scalars()
             )
@@ -117,7 +165,9 @@ def test_ten_thousand_company_resolution_uses_bounded_trigram_recall() -> None:
             not in statement
             for statement in statements
         )
-        similarity_statements = [statement for statement in statements if "<->" in statement]
+        similarity_statements = [
+            statement for statement in statements if "<->" in statement and "ORDER BY" in statement
+        ]
         assert len(similarity_statements) == 2
         assert all("ORDER BY" in statement and "LIMIT" in statement for statement in similarity_statements)
     finally:
@@ -125,5 +175,5 @@ def test_ten_thousand_company_resolution_uses_bounded_trigram_recall() -> None:
             schema_engine.dispose()
         if schema_created:
             with admin_engine.begin() as connection:
-                connection.execute(text(f"DROP SCHEMA {quoted_schema} CASCADE"))
+                _drop_isolated_schema(connection, quoted_schema)
         admin_engine.dispose()

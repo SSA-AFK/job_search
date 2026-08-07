@@ -10,7 +10,6 @@ from enum import StrEnum
 from hashlib import sha256
 from types import MappingProxyType
 from typing import Self
-from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
 from pydantic import (
@@ -23,7 +22,7 @@ from pydantic import (
     model_validator,
 )
 
-from app.core.normalization import normalize_name, normalize_url
+from app.core.normalization import normalize_name, normalize_public_identity_url
 
 _MAX_NAME_LENGTH = 200
 _MAX_ALIASES = 100
@@ -86,9 +85,7 @@ def _normalized_identifier(value: str) -> str:
 
 
 def _public_url(value: str) -> str:
-    normalized = normalize_url(value)
-    parts = urlsplit(normalized)
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    return normalize_public_identity_url(value)
 
 
 def _unique_normalized(values: tuple[str, ...], *, limit: int) -> tuple[str, ...]:

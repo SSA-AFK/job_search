@@ -373,6 +373,31 @@ def test_duplicate_filing_in_batch_rolls_back_every_write(
     assert count_rows(session, JobPosting) == 0
 
 
+def test_equivalent_unicode_filing_numbers_replay_one_normalized_identity(
+    session: Session, persistence: PersistenceService
+) -> None:
+    first = persistence.persist(
+        normalized_batch(
+            jobs=(),
+            filings=(normalized_filing("  Ｋ\u3000Straße\t42 "),),
+        ),
+        run_id=uuid4(),
+    )
+    second = persistence.persist(
+        normalized_batch(
+            jobs=(),
+            filings=(normalized_filing("K STRASSE 42"),),
+        ).with_fetched_at(LATER),
+        run_id=uuid4(),
+    )
+
+    stored = session.scalar(select(RegulatoryFiling))
+    assert stored is not None
+    assert second.company_id == first.company_id
+    assert count_rows(session, RegulatoryFiling) == 1
+    assert stored.filing_number == "kstrasse42"
+
+
 def test_filing_conflict_preserves_previous_collection_time(
     session: Session, persistence: PersistenceService
 ) -> None:
@@ -656,7 +681,7 @@ def test_filing_unique_race_reselects_same_company_winner(
     stored = non_autoflush_session.scalar(
         select(RegulatoryFiling).where(
             RegulatoryFiling.filing_type == FilingType.ICP,
-            RegulatoryFiling.filing_number == "ICP-RACE",
+            RegulatoryFiling.filing_number == "icp-race",
         )
     )
     assert stored is not None

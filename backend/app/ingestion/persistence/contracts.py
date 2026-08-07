@@ -15,6 +15,7 @@ from pydantic import (
     model_validator,
 )
 
+from app.core.normalization import normalize_name
 from app.ingestion.contracts import RawDocument, require_statically_public_url
 from app.ingestion.extraction.schemas import FilingCandidate
 from app.ingestion.normalization.company import NormalizedCompanyCandidate
@@ -127,6 +128,14 @@ class NormalizedFilingRecord(FrozenDTO):
     filing_status: str | None = Field(default=None, max_length=50)
     detail_url: ExternalUrl | None = None
     source_evidence_id: EvidenceId | None = None
+
+    @field_validator("filing_number")
+    @classmethod
+    def normalize_filing_identity(cls, value: str) -> str:
+        normalized = normalize_name(value)
+        if not normalized:
+            raise ValueError("filing_number is required")
+        return normalized
 
     @classmethod
     def from_candidate(

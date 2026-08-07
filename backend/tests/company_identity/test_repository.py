@@ -115,13 +115,21 @@ class _EmptyResult:
 
 
 class _PostgreSQLRecordingSession:
-    def __init__(self) -> None:
+    def __init__(self, *, similarity_capable: bool = True) -> None:
         self.bind = SimpleNamespace(dialect=postgresql.dialect())
         self.statements: list[object] = []
+        self.similarity_capable = similarity_capable
+        self.capability_checks = 0
+        self.capability_statements: list[object] = []
 
     def execute(self, statement: object) -> _EmptyResult:
         self.statements.append(statement)
         return _EmptyResult()
+
+    def scalar(self, statement: object) -> bool:
+        self.capability_checks += 1
+        self.capability_statements.append(statement)
+        return self.similarity_capable
 
 
 def test_postgresql_similarity_sql_is_knn_bounded_per_source() -> None:
@@ -152,6 +160,45 @@ def test_postgresql_similarity_sql_is_knn_bounded_per_source() -> None:
         )
     assert any("FROM COMPANIES" in sql for sql in compiled_statements)
     assert any("COMPANY_ALIASES" in sql for sql in compiled_statements)
+
+
+def test_postgresql_missing_trigram_capability_is_cached_as_unavailable() -> None:
+    session = _PostgreSQLRecordingSession(similarity_capable=False)
+    repository = SqlAlchemyCompanyIdentityRepository(session)  # type: ignore[arg-type]
+
+    assert repository.similarity_search_available() is False
+    assert repository.similarity_search_available() is False
+    assert session.capability_checks == 1
+    capability_sql = str(session.capability_statements[0]).lower()
+    assert "pg_catalog.pg_extension" in capability_sql
+    assert "pg_catalog.pg_operator" in capability_sql
+    assert "pg_trgm" in capability_sql
+
+
+def test_postgresql_boundary_ties_are_stably_cropped_after_fixed_knn_recall() -> None:
+    session = _PostgreSQLRecordingSession()
+    repository = SqlAlchemyCompanyIdentityRepository(session, similarity_limit=20)  # type: ignore[arg-type]
+
+    asyncio.run(repository.find_similar_names(frozenset({"same-distance"}), limit=20))
+
+    assert len(session.statements) == 2
+    for statement in session.statements:
+        compiled_sql = " ".join(
+            str(
+                statement.compile(
+                    dialect=postgresql.dialect(),
+                    compile_kwargs={"literal_binds": True},
+                )
+            )
+            .upper()
+            .split()
+        )
+        assert compiled_sql.count("LIMIT") == 2
+        assert "LIMIT 40" in compiled_sql
+        assert "LIMIT 20" in compiled_sql
+        assert "ORDER BY ANON_1.DISTANCE, ANON_1.NORMALIZED_NAME, ANON_1.COMPANY_ID" in (
+            compiled_sql
+        )
 
 
 def resolved_review(
@@ -312,6 +359,71 @@ def test_evidence_owners_include_current_records_and_only_resolved_review_histor
     assert legal_current_and_history == frozenset({COMPANY_B})
     assert stale == frozenset()
     assert rejected == frozenset()
+
+
+def test_company_website_is_identity_normalized_before_persistence() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        stored = company(
+            COMPANY_A,
+            "alpha",
+            website="HTTPS://Alpha.Example/path?campaign=ignored#fragment",
+        )
+        session.add(stored)
+        session.commit()
+        session.refresh(stored)
+
+        owners = asyncio.run(
+            SqlAlchemyCompanyIdentityRepository(session).find_evidence_owner_ids(
+                CompanyIdentityInput(
+                    canonical_name="Candidate",
+                    official_website="https://alpha.example/path",
+                )
+            )
+        )
+
+    assert stored.website == "https://alpha.example/path"
+    assert owners == frozenset({COMPANY_A})
+
+
+def test_filing_number_uses_identity_normalization_before_persistence() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    statements: list[str] = []
+    event.listen(
+        engine,
+        "before_cursor_execute",
+        lambda _conn, _cursor, statement, _parameters, _context, _many: statements.append(
+            statement
+        ),
+    )
+    with Session(engine) as session:
+        session.add(company(COMPANY_A, "alpha"))
+        stored = RegulatoryFiling(
+            company_id=COMPANY_A,
+            filing_type=FilingType.BUSINESS_LICENSE,
+            filing_number="  Ｋ\u3000Straße\t42 ",
+            filing_name="Alpha filing",
+        )
+        session.add(stored)
+        session.commit()
+        session.refresh(stored)
+        statements.clear()
+
+        owners = asyncio.run(
+            SqlAlchemyCompanyIdentityRepository(session).find_evidence_owner_ids(
+                CompanyIdentityInput(
+                    canonical_name="Candidate",
+                    legal_identifiers=("K STRASSE 42",),
+                )
+            )
+        )
+
+    assert stored.filing_number == "kstrasse42"
+    assert owners == frozenset({COMPANY_A})
+    assert statements
+    assert all("LOWER(" not in statement.upper() for statement in statements)
 
 
 def test_evidence_queries_are_sql_bounded_and_deduplicated() -> None:
