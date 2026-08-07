@@ -149,13 +149,15 @@ def _matching_observation(
     )
     if not same_identity:
         return None
+    if len(same_identity) != 1:
+        raise DiscoveryRecordConflict("discovery observation conflicts with stored result")
     expected = _result_values(result)
-    for observation in same_identity:
-        if (
-            _observation_values(observation) == expected
-            and observation.observed_at == command.observed_at
-        ):
-            return observation
+    observation = same_identity[0]
+    if (
+        _observation_values(observation) == expected
+        and observation.observed_at == command.observed_at
+    ):
+        return observation
     raise DiscoveryRecordConflict("discovery observation conflicts with stored result")
 
 

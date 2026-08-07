@@ -1,5 +1,6 @@
 """Database-backed reporting for a frozen manifest and its entry census."""
 
+import re
 from collections import Counter
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -15,6 +16,7 @@ from app.manifest.models import (
 )
 
 _RATE_QUANTUM = Decimal("0.0001")
+_CODE_COMMIT_PATTERN = re.compile(r"[0-9a-f]{7,40}")
 
 
 class ManifestReportError(ValueError):
@@ -24,7 +26,7 @@ class ManifestReportError(ValueError):
 class ManifestCoverageReport(AtsCensus):
     """Immutable, explicitly denominated manifest discovery census."""
 
-    code_commit: str
+    code_commit: str = Field(pattern=r"^[0-9a-f]{7,40}$")
     config_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     discovered_companies: int = Field(ge=0)
     discovery_company_denominator: int = Field(ge=0)
@@ -63,6 +65,8 @@ class ManifestReportService:
         code_commit: str,
         config_fingerprint: str,
     ) -> ManifestCoverageReport:
+        if _CODE_COMMIT_PATTERN.fullmatch(code_commit) is None:
+            raise ManifestReportError("code commit is invalid")
         manifest = self.session.get(CompanyManifest, manifest_version)
         if manifest is None:
             raise ManifestReportError("manifest does not exist")

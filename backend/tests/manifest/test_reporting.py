@@ -16,7 +16,7 @@ from app.manifest.models import (
     CompanyManifestMember,
     EntryDiscoveryObservation,
 )
-from app.manifest.reporting import ManifestReportService
+from app.manifest.reporting import ManifestReportError, ManifestReportService
 from app.models import Base, Company, JobEntry
 
 MANIFEST_VERSION = "c" * 64
@@ -252,3 +252,31 @@ def test_report_rejects_noncanonical_config_fingerprint(
             code_commit="abc1234",
             config_fingerprint=fingerprint,
         )
+
+
+@pytest.mark.parametrize(
+    "code_commit",
+    [
+        "abc123",
+        "a" * 41,
+        "ABC1234",
+        "postgresql://user:secret@database/jobs",
+        "Bearer secret-token",
+    ],
+)
+def test_report_rejects_noncanonical_code_commit_without_echoing_hostile_input(
+    session: Session,
+    code_commit: str,
+) -> None:
+    seed_manifest(session, member_count=0)
+
+    with pytest.raises(ManifestReportError, match="code commit is invalid") as captured:
+        ManifestReportService(session).build(
+            MANIFEST_VERSION,
+            code_commit=code_commit,
+            config_fingerprint="a" * 64,
+        )
+
+    diagnostic = str(captured.value)
+    assert code_commit not in diagnostic
+    assert "secret" not in diagnostic.lower()

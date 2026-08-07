@@ -487,6 +487,36 @@ def test_same_normalized_url_with_changed_observation_conflicts_atomically(
     assert session.scalar(select(func.count()).select_from(EntryDiscoveryObservation)) == 1
 
 
+def test_exact_replay_rejects_mixed_duplicate_observation_identity(
+    session: Session,
+) -> None:
+    seed_discovery_manifest(session)
+    command = accepted_discovery_command()
+    exact = record_discovery_result(session, command)
+    session.add(
+        EntryDiscoveryObservation(
+            manifest_version=command.manifest_version,
+            company_id=command.company_id,
+            method=command.result.method,
+            status=command.result.status,
+            candidate_url=str(command.result.candidate_url),
+            normalized_url=str(command.result.normalized_url),
+            ownership_evidence=command.result.ownership_evidence,
+            platform="moka",
+            requires_rendering=True,
+            job_entry_id=exact.job_entry_id,
+            observed_at=command.observed_at,
+        )
+    )
+    session.commit()
+
+    with pytest.raises(DiscoveryRecordConflict, match="conflicts"):
+        record_discovery_result(session, command)
+
+    assert session.scalar(select(func.count()).select_from(EntryDiscoveryObservation)) == 2
+    assert session.scalar(select(func.count()).select_from(JobEntry)) == 1
+
+
 def test_accepted_discovery_rejects_mismatched_normalized_url_identity(
     session: Session,
 ) -> None:
