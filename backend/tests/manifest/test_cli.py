@@ -5,7 +5,7 @@ import json
 import os
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -15,6 +15,7 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.ingestion.contracts import ProviderQuery, ProviderResult
+from app.manifest import cli as manifest_cli
 from app.manifest.cli import _run_discovery, _ZhihuFallbackDiscoverer
 from app.manifest.contracts import (
     AiCategory,
@@ -382,6 +383,25 @@ def test_manifest_freeze_and_report_replace_individual_artifacts_atomically(
     assert json.loads(report_path.read_text(encoding="utf-8")) == report_stdout
     assert list(tmp_path.glob("*.tmp")) == []
 
+    rejected_fingerprint = "b" * 64
+    conflicting = run_cli(
+        "report",
+        "--manifest-file",
+        str(manifest_path),
+        "--code-commit",
+        "abc1234",
+        "--config-fingerprint",
+        rejected_fingerprint,
+        environment=cli_environment,
+    )
+
+    assert conflicting.returncode == 2
+    assert conflicting.stdout == ""
+    assert conflicting.stderr == (
+        "manifest command failed: report fingerprint conflicts with frozen manifest\n"
+    )
+    assert rejected_fingerprint not in conflicting.stderr
+
 
 def test_discover_requires_double_opt_in(cli_environment: dict[str, str]) -> None:
     environment = {**cli_environment, "GATE1_LIVE_DISCOVERY_ENABLED": "true"}
@@ -447,18 +467,33 @@ class _EmptyZhihuProvider:
         return ProviderResult(documents=())
 
 
+class _RetryingZhihuProvider:
+    def __init__(self, before_request: Callable[[], Awaitable[None]]) -> None:
+        self._before_request = before_request
+        self.attempts = 0
+
+    async def search(self, _query: ProviderQuery) -> ProviderResult:
+        for _ in range(4):
+            await self._before_request()
+            self.attempts += 1
+        return ProviderResult(documents=())
+
+
 def test_zhihu_fallback_shares_start_limiter_and_stops_at_budget() -> None:
-    provider = _EmptyZhihuProvider()
     starts = 0
 
     async def before_search() -> None:
         nonlocal starts
         starts += 1
 
+    counter = manifest_cli._ZhihuRequestBudget(
+        request_budget=2,
+        before_request=before_search,
+    )
+    provider = _RetryingZhihuProvider(counter.before_request)
     subject = _ZhihuFallbackDiscoverer(
         provider,
-        request_budget=1,
-        before_search=before_search,
+        request_counter=counter,
     )
     company = ManifestCompany(
         company_id=UUID(int=99),
@@ -467,15 +502,13 @@ def test_zhihu_fallback_shares_start_limiter_and_stops_at_budget() -> None:
         official_website="https://budgeted.example/about",
     )
 
-    first = asyncio.run(subject.discover(company))
-    second = asyncio.run(subject.discover(company))
+    result = asyncio.run(subject.discover(company))
 
-    assert first.status is DiscoveryStatus.NOT_FOUND
-    assert second.status is DiscoveryStatus.BLOCKED
-    assert second.error_code == "request_budget_exhausted"
-    assert subject.requests == 1
-    assert starts == 1
-    assert len(provider.queries) == 1
+    assert result.status is DiscoveryStatus.BLOCKED
+    assert result.error_code == "request_budget_exhausted"
+    assert subject.requests == 2
+    assert starts == 2
+    assert provider.attempts == 2
 
 
 class _StaticCoordinator:
@@ -489,7 +522,7 @@ class _StaticCoordinator:
 
 
 def _discovery_runner_fixture(
-    cli_environment: dict[str, str], *, companies: int
+    cli_environment: dict[str, str], *, companies: int, shared_host: bool = True
 ) -> tuple[sessionmaker[Session], tuple[ManifestCompany, ...]]:
     engine = create_engine(cli_environment["DATABASE_URL"])
     factory = sessionmaker(bind=engine, expire_on_commit=False)
@@ -499,8 +532,16 @@ def _discovery_runner_fixture(
             company_id=UUID(int=20_000 + position),
             canonical_name=f"Shared Host {position}",
             primary_category=AiCategory.FOUNDATION_MODELS,
-            official_website="https://shared.example/about",
-            recruitment_url=f"https://shared.example/jobs/{position}",
+            official_website=(
+                "https://shared.example/about"
+                if shared_host
+                else f"https://company-{position}.example/about"
+            ),
+            recruitment_url=(
+                f"https://shared.example/jobs/{position}"
+                if shared_host
+                else f"https://company-{position}.example/jobs"
+            ),
         )
         for position in range(1, companies + 1)
     )
@@ -537,6 +578,209 @@ def _discovery_runner_fixture(
         )
         session.commit()
     return factory, values
+
+
+def _add_discovery_observation(
+    factory: sessionmaker[Session],
+    company: ManifestCompany,
+    *,
+    status: DiscoveryStatus,
+    error_code: str,
+    minute: int,
+    method: str = "official_navigation",
+    source_id: str | None = None,
+) -> None:
+    with factory() as session:
+        session.add(
+            EntryDiscoveryObservation(
+                manifest_version="d" * 64,
+                company_id=company.company_id,
+                method=method,
+                status=status,
+                source_id=source_id,
+                error_code=error_code,
+                observed_at=datetime(2026, 8, 7, 1, minute, tzinfo=UTC),
+            )
+        )
+        session.commit()
+
+
+def test_resume_preserves_zhihu_source_stop_without_calling_provider(
+    cli_environment: dict[str, str],
+) -> None:
+    factory, companies = _discovery_runner_fixture(cli_environment, companies=1)
+    _add_discovery_observation(
+        factory,
+        companies[0],
+        status=DiscoveryStatus.BLOCKED,
+        error_code="provider_auth_failed",
+        minute=1,
+        method="zhihu_global_search",
+        source_id="zhihu_global_search",
+    )
+    _loaded, state = manifest_cli._load_discovery_members(factory, "d" * 64)
+    starts = 0
+
+    async def before_request() -> None:
+        nonlocal starts
+        starts += 1
+
+    counter = manifest_cli._ZhihuRequestBudget(
+        request_budget=2,
+        before_request=before_request,
+    )
+    provider = _EmptyZhihuProvider()
+    subject = _ZhihuFallbackDiscoverer(
+        provider,
+        request_counter=counter,
+        stopped="zhihu_global_search" in state.stopped_source_ids,
+    )
+
+    result = asyncio.run(subject.discover(companies[0]))
+
+    assert result.status is DiscoveryStatus.BLOCKED
+    assert result.error_code == "fallback_source_stopped"
+    assert provider.queries == []
+    assert starts == 0
+
+
+def test_resume_reprocesses_retryable_failures_and_skips_stable_observations(
+    cli_environment: dict[str, str],
+) -> None:
+    factory, companies = _discovery_runner_fixture(
+        cli_environment,
+        companies=3,
+        shared_host=False,
+    )
+    _add_discovery_observation(
+        factory,
+        companies[0],
+        status=DiscoveryStatus.FAILED,
+        error_code="total_timeout",
+        minute=1,
+    )
+    _add_discovery_observation(
+        factory,
+        companies[1],
+        status=DiscoveryStatus.BLOCKED,
+        error_code="provider_rate_limited",
+        minute=2,
+    )
+    _add_discovery_observation(
+        factory,
+        companies[2],
+        status=DiscoveryStatus.NOT_FOUND,
+        error_code="recruitment_entry_not_found",
+        minute=3,
+    )
+    environment = {**cli_environment, "GATE1_LIVE_DISCOVERY_ENABLED": "true"}
+
+    result = run_cli(
+        "discover",
+        "--manifest",
+        "d" * 64,
+        "--resume",
+        "--live",
+        environment=environment,
+    )
+
+    assert result.returncode == 0
+    payload = assert_sorted_json_object(result.stdout)
+    assert payload["processed"] == 2
+    assert payload["skipped"] == 1
+    with factory() as session:
+        accepted = tuple(
+            session.scalars(
+                select(EntryDiscoveryObservation.company_id).where(
+                    EntryDiscoveryObservation.status == DiscoveryStatus.ACCEPTED
+                )
+            )
+        )
+    assert set(accepted) == {companies[0].company_id, companies[1].company_id}
+
+
+def test_resume_preserves_existing_access_stop_for_same_domain(
+    cli_environment: dict[str, str],
+) -> None:
+    factory, companies = _discovery_runner_fixture(cli_environment, companies=2)
+    _add_discovery_observation(
+        factory,
+        companies[0],
+        status=DiscoveryStatus.BLOCKED,
+        error_code="provider_access_denied",
+        minute=1,
+    )
+    environment = {**cli_environment, "GATE1_LIVE_DISCOVERY_ENABLED": "true"}
+
+    result = run_cli(
+        "discover",
+        "--manifest",
+        "d" * 64,
+        "--resume",
+        "--live",
+        environment=environment,
+    )
+
+    assert result.returncode == 0
+    assert assert_sorted_json_object(result.stdout)["processed"] == 1
+    with factory() as session:
+        second_error = session.scalar(
+            select(EntryDiscoveryObservation.error_code).where(
+                EntryDiscoveryObservation.company_id == companies[1].company_id
+            )
+        )
+    assert second_error == "source_access_stopped"
+
+
+def test_resume_rebuilds_only_consecutive_rate_limit_state(
+    cli_environment: dict[str, str],
+) -> None:
+    factory, companies = _discovery_runner_fixture(cli_environment, companies=6)
+    _add_discovery_observation(
+        factory,
+        companies[0],
+        status=DiscoveryStatus.BLOCKED,
+        error_code="provider_rate_limited",
+        minute=1,
+    )
+    _add_discovery_observation(
+        factory,
+        companies[1],
+        status=DiscoveryStatus.NOT_FOUND,
+        error_code="recruitment_entry_not_found",
+        minute=2,
+    )
+    _add_discovery_observation(
+        factory,
+        companies[2],
+        status=DiscoveryStatus.BLOCKED,
+        error_code="provider_rate_limited",
+        minute=3,
+    )
+    loaded_companies, state = manifest_cli._load_discovery_members(
+        factory, "d" * 64
+    )
+    coordinator = _StaticCoordinator(
+        EntryDiscoveryResult(
+            status=DiscoveryStatus.BLOCKED,
+            method="official_navigation",
+            error_code="provider_rate_limited",
+        )
+    )
+
+    counts = asyncio.run(
+        manifest_cli._run_discovery(
+            SessionLocal=factory,
+            manifest_version="d" * 64,
+            companies=loaded_companies[3:],
+            state=state,
+            coordinator=coordinator,
+            limit=None,
+        )
+    )
+
+    assert coordinator.calls == 2
+    assert counts == {DiscoveryStatus.BLOCKED: 3}
 
 
 def test_discover_with_both_opt_ins_uses_evidenced_urls_and_resumes_positions(

@@ -149,7 +149,11 @@ class OfficialEntryDiscoverer:
             )
 
         root_url, official_host = official
-        if not await self._robots_policy.can_fetch(root_url):
+        try:
+            root_allowed = await self._robots_policy.can_fetch(root_url)
+        except ProviderError as error:
+            return self._failure(method="official_navigation", code=error.code)
+        if not root_allowed:
             return self._failure(
                 method="official_navigation", code="robots_disallowed"
             )
@@ -202,7 +206,11 @@ class OfficialEntryDiscoverer:
             if fetched >= _MAX_CANDIDATE_PAGES:
                 break
             fetched += 1
-            if not await self._robots_policy.can_fetch(url):
+            try:
+                candidate_allowed = await self._robots_policy.can_fetch(url)
+            except ProviderError as error:
+                return self._failure(method="official_navigation", code=error.code)
+            if not candidate_allowed:
                 last_error = "robots_disallowed"
                 continue
             try:

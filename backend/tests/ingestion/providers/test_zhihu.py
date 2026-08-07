@@ -91,6 +91,10 @@ def recorded_delays() -> list[float]:
     return []
 
 
+async def _record_delay(delays: list[float], delay: float) -> None:
+    delays.append(delay)
+
+
 @pytest.fixture
 def provider(frozen_time: datetime, recorded_delays: list[float]) -> ZhihuGlobalSearchProvider:
     async def record_sleep(delay: float) -> None:
@@ -303,6 +307,71 @@ async def test_retries_retryable_statuses_three_times(
     assert len(result.documents) == 1
     assert route.call_count == 4
     assert recorded_delays == [0.5, 1.0, 2.0]
+
+
+@pytest.mark.anyio
+async def test_invokes_request_start_hook_for_every_transport_attempt(
+    frozen_time: datetime,
+    recorded_delays: list[float],
+    respx_mock: respx.MockRouter,
+) -> None:
+    starts: list[int] = []
+
+    async def before_request() -> None:
+        starts.append(len(starts) + 1)
+
+    provider = ZhihuGlobalSearchProvider(
+        enabled=True,
+        access_secret="test-secret",
+        clock=lambda: frozen_time,
+        sleep=lambda delay: _record_delay(recorded_delays, delay),
+        jitter=lambda: 0.0,
+        before_request=before_request,
+    )
+    route = respx_mock.get(ENDPOINT).mock(
+        side_effect=[
+            httpx.Response(429),
+            httpx.Response(429),
+            httpx.Response(429),
+            httpx.Response(200, json=zhihu_payload()),
+        ]
+    )
+
+    await provider.search(ProviderQuery(query="Example Company"))
+
+    assert starts == [1, 2, 3, 4]
+    assert route.call_count == 4
+
+
+@pytest.mark.anyio
+async def test_request_start_hook_can_stop_before_next_transport_attempt(
+    frozen_time: datetime,
+    recorded_delays: list[float],
+    respx_mock: respx.MockRouter,
+) -> None:
+    starts = 0
+
+    async def enforce_budget() -> None:
+        nonlocal starts
+        if starts >= 2:
+            raise ProviderError(code="request_budget_exhausted", retryable=False)
+        starts += 1
+
+    provider = ZhihuGlobalSearchProvider(
+        enabled=True,
+        access_secret="test-secret",
+        clock=lambda: frozen_time,
+        sleep=lambda delay: _record_delay(recorded_delays, delay),
+        jitter=lambda: 0.0,
+        before_request=enforce_budget,
+    )
+    route = respx_mock.get(ENDPOINT).mock(return_value=httpx.Response(429))
+
+    with pytest.raises(ProviderError, match="request_budget_exhausted"):
+        await provider.search(ProviderQuery(query="Example Company"))
+
+    assert starts == 2
+    assert route.call_count == 2
 
 
 @pytest.mark.anyio

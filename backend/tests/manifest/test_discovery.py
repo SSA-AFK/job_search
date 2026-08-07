@@ -303,6 +303,35 @@ async def test_robots_denial_returns_blocked_without_fetching_page() -> None:
         (429, "provider_rate_limited"),
     ],
 )
+async def test_robots_access_and_rate_limits_preserve_stop_code(
+    status_code: int, error_code: str
+) -> None:
+    respx.get("https://acme.cn/robots.txt").mock(
+        return_value=httpx.Response(status_code)
+    )
+    root = respx.get("https://acme.cn/").mock(
+        return_value=httpx.Response(
+            200, headers={"content-type": "text/plain"}, text="must not fetch"
+        )
+    )
+
+    result = await discoverer().discover(company())
+
+    assert result.status is DiscoveryStatus.BLOCKED
+    assert result.error_code == error_code
+    assert root.call_count == 0
+
+
+@pytest.mark.anyio
+@respx.mock
+@pytest.mark.parametrize(
+    ("status_code", "error_code"),
+    [
+        (401, "provider_access_denied"),
+        (403, "provider_access_denied"),
+        (429, "provider_rate_limited"),
+    ],
+)
 async def test_access_and_rate_limit_responses_stop_discovery(
     status_code: int, error_code: str
 ) -> None:

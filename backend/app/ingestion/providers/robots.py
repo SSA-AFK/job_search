@@ -31,7 +31,12 @@ class RobotsPolicy:
                         document = await self._http_client.get_text(
                             robots_url, allowed_hosts={normalized_host}
                         )
-                    except ProviderError:
+                    except ProviderError as error:
+                        if error.code in {
+                            "provider_access_denied",
+                            "provider_rate_limited",
+                        }:
+                            raise
                         self._rules_by_origin[origin_key] = None
                     else:
                         parser = RobotFileParser()

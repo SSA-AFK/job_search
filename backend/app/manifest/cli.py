@@ -9,7 +9,7 @@ import subprocess
 import sys
 from collections import Counter
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from hashlib import sha256
@@ -59,12 +59,32 @@ from app.manifest.service import (
 
 _MAX_INPUT_BYTES = 16 * 1024 * 1024
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+_RETRYABLE_OBSERVATION_ERROR_CODES = frozenset(
+    {
+        "connect_timeout",
+        "fallback_request_failed",
+        "http_error",
+        "http_status",
+        "provider_rate_limited",
+        "request_timeout",
+        "total_timeout",
+    }
+)
 
 
 class ManifestCommandError(ValueError):
     def __init__(self, message: str, *, exit_code: int = 2) -> None:
         super().__init__(message)
         self.exit_code = exit_code
+
+
+@dataclass
+class _DiscoveryState:
+    observed_company_ids: frozenset[UUID]
+    terminal_company_ids: set[UUID]
+    stopped_domains: set[str]
+    stopped_source_ids: set[str]
+    consecutive_rate_limits: Counter[str]
 
 
 class _SafeArgumentParser(argparse.ArgumentParser):
@@ -373,12 +393,18 @@ def _report(args: argparse.Namespace) -> dict[str, object]:
     _load_settings()
     SessionLocal = _session_factory()
     version, stored_fingerprint = _selected_manifest(args, SessionLocal)
-    fingerprint = args.config_fingerprint or stored_fingerprint
+    if (
+        args.config_fingerprint is not None
+        and args.config_fingerprint != stored_fingerprint
+    ):
+        raise ManifestCommandError(
+            "report fingerprint conflicts with frozen manifest"
+        )
     with SessionLocal() as session:
         report = ManifestReportService(session).build(
             version,
             code_commit=_code_commit(args.code_commit),
-            config_fingerprint=fingerprint,
+            config_fingerprint=stored_fingerprint,
         )
     payload = report.model_dump(mode="json")
     if args.output is not None:
@@ -386,19 +412,41 @@ def _report(args: argparse.Namespace) -> dict[str, object]:
     return payload
 
 
+class _ZhihuRequestBudget:
+    def __init__(
+        self,
+        *,
+        request_budget: int,
+        before_request: Callable[[], Awaitable[None]],
+    ) -> None:
+        self._request_budget = request_budget
+        self._before_request = before_request
+        self.requests = 0
+
+    async def before_request(self) -> None:
+        from app.ingestion.errors import ProviderError
+
+        if self.requests >= self._request_budget:
+            raise ProviderError(code="request_budget_exhausted", retryable=False)
+        await self._before_request()
+        self.requests += 1
+
+
 class _ZhihuFallbackDiscoverer:
     def __init__(
         self,
         provider: Any,
         *,
-        request_budget: int,
-        before_search: Callable[[], Awaitable[None]],
+        request_counter: _ZhihuRequestBudget,
+        stopped: bool = False,
     ) -> None:
         self._provider = provider
-        self._request_budget = request_budget
-        self._before_search = before_search
-        self.requests = 0
-        self.stopped = False
+        self._request_counter = request_counter
+        self.stopped = stopped
+
+    @property
+    def requests(self) -> int:
+        return self._request_counter.requests
 
     async def discover(self, company: ManifestCompany) -> EntryDiscoveryResult:
         from app.ingestion.contracts import ProviderQuery
@@ -419,12 +467,6 @@ class _ZhihuFallbackDiscoverer:
                 source_id="zhihu_global_search",
                 error_code="official_website_missing",
             )
-        if self.requests >= self._request_budget:
-            self.stopped = True
-            return self._blocked("request_budget_exhausted")
-
-        await self._before_search()
-        self.requests += 1
         try:
             result = await self._provider.search(
                 ProviderQuery(
@@ -435,7 +477,11 @@ class _ZhihuFallbackDiscoverer:
                 )
             )
         except ProviderError as error:
-            if error.code in {"provider_auth_failed", "provider_rate_limited"}:
+            if error.code in {
+                "provider_auth_failed",
+                "provider_rate_limited",
+                "request_budget_exhausted",
+            }:
                 self.stopped = True
                 return self._blocked(error.code)
             return EntryDiscoveryResult(
@@ -490,7 +536,12 @@ class _DisabledFallbackDiscoverer:
         )
 
 
-def _discovery_composition(settings: Any, registry: SourceRegistry) -> tuple[Any, Any | None]:
+def _discovery_composition(
+    settings: Any,
+    registry: SourceRegistry,
+    *,
+    stopped_source_ids: frozenset[str] | set[str] = frozenset(),
+) -> tuple[Any, Any | None]:
     from app.ingestion.providers.http import SafeHttpClient
     from app.ingestion.providers.robots import RobotsPolicy
     from app.manifest.discovery import (
@@ -522,21 +573,22 @@ def _discovery_composition(settings: Any, registry: SourceRegistry) -> tuple[Any
             budget = min(budget, registered_budget)
         if budget < 1:
             raise ManifestCommandError("Zhihu request budget is invalid")
-        async def wait_before_search() -> None:
+        async def wait_before_request() -> None:
             await limiter.wait(ZhihuGlobalSearchProvider.endpoint)
 
-        async def bounded_retry_sleep(seconds: float) -> None:
-            await asyncio.sleep(max(seconds, settings.gate1_domain_min_interval_seconds))
-
+        request_counter = _ZhihuRequestBudget(
+            request_budget=budget,
+            before_request=wait_before_request,
+        )
         provider = ZhihuGlobalSearchProvider(
             enabled=True,
             access_secret=settings.zhihu_access_secret,
-            sleep=bounded_retry_sleep,
+            before_request=request_counter.before_request,
         )
         budgeted_fallback = _ZhihuFallbackDiscoverer(
             provider,
-            request_budget=budget,
-            before_search=wait_before_search,
+            request_counter=request_counter,
+            stopped="zhihu_global_search" in stopped_source_ids,
         )
         fallback = budgeted_fallback
     return (
@@ -548,9 +600,49 @@ def _discovery_composition(settings: Any, registry: SourceRegistry) -> tuple[Any
     )
 
 
+def _official_host(company: ManifestCompany) -> str:
+    if company.official_website is None:
+        return ""
+    return (urlsplit(str(company.official_website)).hostname or "").lower().rstrip(".")
+
+
+def _observation_is_terminal(observation: EntryDiscoveryObservation) -> bool:
+    if observation.status in {
+        DiscoveryStatus.ACCEPTED,
+        DiscoveryStatus.NOT_FOUND,
+        DiscoveryStatus.REVIEW_REQUIRED,
+    }:
+        return True
+    return observation.error_code not in _RETRYABLE_OBSERVATION_ERROR_CODES
+
+
+def _update_domain_state(
+    state: _DiscoveryState,
+    *,
+    official_host: str,
+    method: str,
+    error_code: str | None,
+) -> None:
+    if not official_host or method != "official_navigation":
+        return
+    if error_code in {"provider_access_denied", "source_access_stopped"}:
+        state.stopped_domains.add(official_host)
+        return
+    if error_code == "source_rate_limited":
+        state.consecutive_rate_limits[official_host] = 3
+        state.stopped_domains.add(official_host)
+        return
+    if error_code == "provider_rate_limited":
+        state.consecutive_rate_limits[official_host] += 1
+        if state.consecutive_rate_limits[official_host] >= 3:
+            state.stopped_domains.add(official_host)
+        return
+    state.consecutive_rate_limits[official_host] = 0
+
+
 def _load_discovery_members(
     SessionLocal: Any, manifest_version: str
-) -> tuple[tuple[ManifestCompany, ...], frozenset[UUID]]:
+) -> tuple[tuple[ManifestCompany, ...], _DiscoveryState]:
     with SessionLocal() as session:
         members = tuple(
             session.scalars(
@@ -563,6 +655,9 @@ def _load_discovery_members(
             session.scalars(
                 select(EntryDiscoveryObservation).where(
                     EntryDiscoveryObservation.manifest_version == manifest_version
+                ).order_by(
+                    EntryDiscoveryObservation.observed_at,
+                    EntryDiscoveryObservation.id,
                 )
             )
         )
@@ -576,7 +671,37 @@ def _load_discovery_members(
         )
         for member in members
     )
-    return companies, frozenset(observation.company_id for observation in observations)
+    companies_by_id = {company.company_id: company for company in companies}
+    state = _DiscoveryState(
+        observed_company_ids=frozenset(
+            observation.company_id for observation in observations
+        ),
+        terminal_company_ids=set(),
+        stopped_domains=set(),
+        stopped_source_ids=set(),
+        consecutive_rate_limits=Counter(),
+    )
+    for observation in observations:
+        if _observation_is_terminal(observation):
+            state.terminal_company_ids.add(observation.company_id)
+        else:
+            state.terminal_company_ids.discard(observation.company_id)
+        if observation.source_id and observation.error_code in {
+            "fallback_source_stopped",
+            "provider_auth_failed",
+            "provider_rate_limited",
+            "request_budget_exhausted",
+        }:
+            state.stopped_source_ids.add(observation.source_id)
+        company = companies_by_id.get(observation.company_id)
+        if company is not None:
+            _update_domain_state(
+                state,
+                official_host=_official_host(company),
+                method=observation.method,
+                error_code=observation.error_code,
+            )
+    return companies, state
 
 
 async def _run_discovery(
@@ -584,42 +709,44 @@ async def _run_discovery(
     SessionLocal: Any,
     manifest_version: str,
     companies: tuple[ManifestCompany, ...],
-    already_observed: frozenset[UUID],
     coordinator: Any,
     limit: int | None,
+    state: _DiscoveryState | None = None,
+    already_observed: frozenset[UUID] = frozenset(),
 ) -> Counter[DiscoveryStatus]:
+    if state is None:
+        state = _DiscoveryState(
+            observed_company_ids=already_observed,
+            terminal_company_ids=set(already_observed),
+            stopped_domains=set(),
+            stopped_source_ids=set(),
+            consecutive_rate_limits=Counter(),
+        )
     counts: Counter[DiscoveryStatus] = Counter()
-    stopped_domains: set[str] = set()
-    rate_limits: Counter[str] = Counter()
     for company in companies:
-        if company.company_id in already_observed:
+        if company.company_id in state.terminal_company_ids:
             continue
         if limit is not None and sum(counts.values()) >= limit:
             break
-        official_host = (
-            ""
-            if company.official_website is None
-            else (urlsplit(str(company.official_website)).hostname or "").lower().rstrip(".")
-        )
-        if official_host in stopped_domains:
+        official_host = _official_host(company)
+        if official_host in state.stopped_domains:
             result = EntryDiscoveryResult(
                 status=DiscoveryStatus.BLOCKED,
                 method="official_navigation",
                 error_code=(
                     "source_rate_limited"
-                    if rate_limits[official_host] >= 3
+                    if state.consecutive_rate_limits[official_host] >= 3
                     else "source_access_stopped"
                 ),
             )
         else:
             result = await coordinator.discover(company)
-            if result.method == "official_navigation" and official_host:
-                if result.error_code == "provider_access_denied":
-                    stopped_domains.add(official_host)
-                elif result.error_code == "provider_rate_limited":
-                    rate_limits[official_host] += 1
-                    if rate_limits[official_host] >= 3:
-                        stopped_domains.add(official_host)
+            _update_domain_state(
+                state,
+                official_host=official_host,
+                method=result.method,
+                error_code=result.error_code,
+            )
         with SessionLocal() as session:
             record_discovery_result(
                 session,
@@ -641,24 +768,28 @@ def _discover(args: argparse.Namespace) -> dict[str, object]:
     registry = _load_registry(_registry_path(args, settings))
     SessionLocal = _session_factory()
     version, _fingerprint = _selected_manifest(args, SessionLocal)
-    companies, observed = _load_discovery_members(SessionLocal, version)
-    if observed and not args.resume:
+    companies, state = _load_discovery_members(SessionLocal, version)
+    if state.observed_company_ids and not args.resume:
         raise ManifestCommandError("discovery observations already exist; use --resume")
-    coordinator, fallback = _discovery_composition(settings, registry)
+    coordinator, fallback = _discovery_composition(
+        settings,
+        registry,
+        stopped_source_ids=state.stopped_source_ids,
+    )
     counts = asyncio.run(
         _run_discovery(
             SessionLocal=SessionLocal,
             manifest_version=version,
             companies=companies,
-            already_observed=observed,
             coordinator=coordinator,
             limit=args.limit,
+            state=state,
         )
     )
     return {
         "manifest_version": version,
         "processed": sum(counts.values()),
-        "skipped": len(observed),
+        "skipped": len(state.terminal_company_ids),
         "status_counts": {status.value: counts[status] for status in DiscoveryStatus},
         "zhihu_requests": 0 if fallback is None else fallback.requests,
     }
