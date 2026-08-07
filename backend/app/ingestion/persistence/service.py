@@ -124,23 +124,44 @@ class PersistenceService:
                 detail="invalid persistence boundary data",
             ) from exc
         self._require_clean_entry(run_id)
+        identity_names = self._company_identity_names(batch.company)
         try:
-            with self.session.begin():
+            transaction = self.session.begin()
+            try:
                 self._materialize_outer_transaction()
-                if expected_claim_token is not None:
-                    self._lock_claim(run_id, expected_claim_token)
-                documents = self._upsert_documents(batch.documents, run_id)
-                company = self._upsert_company(batch.company, run_id)
-                self._upsert_company_evidence(company, batch.company, documents, run_id)
-                job_ids, warnings = self._upsert_jobs(company.id, batch.jobs, documents, run_id)
-                self._upsert_filings(company.id, batch.filings, documents, run_id)
-                company.last_collected_at = batch.collected_at
-                result = PersistenceResult(
-                    company_id=company.id,
-                    documents_written=len({document.id for document in documents.values()}),
-                    jobs_written=len(job_ids),
-                    warnings=warnings,
-                )
+                with serialized_company_identity_names(
+                    self.session, identity_names
+                ), transaction:
+                    if expected_claim_token is not None:
+                        self._lock_claim(run_id, expected_claim_token)
+                    documents = self._upsert_documents(batch.documents, run_id)
+                    company = self._upsert_company_locked(
+                        batch.company,
+                        run_id,
+                        identity_names=identity_names,
+                    )
+                    self._upsert_company_evidence(
+                        company, batch.company, documents, run_id
+                    )
+                    job_ids, warnings = self._upsert_jobs(
+                        company.id, batch.jobs, documents, run_id
+                    )
+                    self._upsert_filings(
+                        company.id, batch.filings, documents, run_id
+                    )
+                    company.last_collected_at = batch.collected_at
+                    result = PersistenceResult(
+                        company_id=company.id,
+                        documents_written=len(
+                            {document.id for document in documents.values()}
+                        ),
+                        jobs_written=len(job_ids),
+                        warnings=warnings,
+                    )
+            except BaseException:
+                if self.session.in_transaction():
+                    self.session.rollback()
+                raise
             if self.cache is not None:
                 self.cache.invalidate_company(result.company_id)
             return result
@@ -292,24 +313,34 @@ class PersistenceService:
         )
 
     def _upsert_company(self, record: NormalizedCompanyRecord, run_id: UUID) -> Company:
-        normalized = record.candidate
-        candidate = normalized.candidate
-        identity_names = tuple(
-            dict.fromkeys(
-                name
-                for name in (
-                    normalized.normalized_name,
-                    *(normalize_name(alias) for alias in candidate.aliases),
-                )
-                if name
-            )
-        )
+        identity_names = self._company_identity_names(record)
         with serialized_company_identity_names(self.session, identity_names):
             return self._upsert_company_locked(
                 record,
                 run_id,
                 identity_names=identity_names,
             )
+
+    @staticmethod
+    def _company_identity_names(
+        record: NormalizedCompanyRecord,
+    ) -> tuple[str, ...]:
+        normalized = record.candidate
+        return tuple(
+            sorted(
+                {
+                    name
+                    for name in (
+                        normalized.normalized_name,
+                        *(
+                            normalize_name(alias)
+                            for alias in normalized.candidate.aliases
+                        ),
+                    )
+                    if name
+                }
+            )
+        )
 
     def _upsert_company_locked(
         self,
@@ -334,7 +365,7 @@ class PersistenceService:
             )
 
         allowed_owner_ids = set() if company is None else {company.id}
-        for identity_name in sorted(identity_names):
+        for identity_name in identity_names:
             owner_ids = self._company_identity_name_owner_ids(identity_name)
             if owner_ids - allowed_owner_ids:
                 raise PersistenceError(

@@ -1,6 +1,8 @@
 import os
 import re
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from hashlib import sha256
@@ -19,6 +21,7 @@ from app.ingestion.contracts import RawDocument
 from app.ingestion.extraction.schemas import CompanyCandidate, JobCandidate
 from app.ingestion.normalization.company import normalize_company
 from app.ingestion.normalization.job import normalize_job
+from app.ingestion.persistence import service as persistence_service_module
 from app.ingestion.persistence.contracts import (
     CompanyFieldEvidence,
     NormalizedBatch,
@@ -675,6 +678,155 @@ def test_same_company_may_own_candidate_name_as_canonical_and_alias(
     assert result.company_id == company.id
     assert count_rows(session, Company) == 1
     assert count_rows(session, CompanyAlias) == 1
+
+
+def test_sqlite_company_identity_lock_is_held_until_outer_commit(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'company-identity-lock-lifetime.sqlite3'}",
+        connect_args={"check_same_thread": False, "timeout": 10},
+    )
+    Base.metadata.create_all(engine)
+    first_after_identity_upsert = Event()
+    release_first = Event()
+    second_started = Event()
+    second_entered_identity_upsert = Event()
+    first_lock_entry_transaction_states: list[bool] = []
+    first_lock_exit_transaction_states: list[bool] = []
+    serialized_company_identity_names = (
+        persistence_service_module.serialized_company_identity_names
+    )
+
+    @contextmanager
+    def observe_name_lock_lifetime(
+        session: Session, names: Sequence[str]
+    ) -> Iterator[None]:
+        is_first = session.info.get("company_identity_lock_role") == "first"
+        if is_first:
+            first_lock_entry_transaction_states.append(session.in_transaction())
+        with serialized_company_identity_names(session, names):
+            yield
+        if is_first:
+            first_lock_exit_transaction_states.append(session.in_transaction())
+
+    monkeypatch.setattr(
+        persistence_service_module,
+        "serialized_company_identity_names",
+        observe_name_lock_lifetime,
+    )
+
+    class PausingPersistence(PersistenceService):
+        def _upsert_company_evidence(
+            self,
+            company: Company,
+            record: NormalizedCompanyRecord,
+            documents: dict[str, SourceDocument],
+            run_id: UUID,
+        ) -> None:
+            first_after_identity_upsert.set()
+            if not release_first.wait(timeout=15):
+                raise TimeoutError("second writer did not reach the identity lock")
+            super()._upsert_company_evidence(company, record, documents, run_id)
+
+    class ObservingPersistence(PersistenceService):
+        def _upsert_company_locked(
+            self,
+            record: NormalizedCompanyRecord,
+            run_id: UUID,
+            *,
+            identity_names: tuple[str, ...],
+        ) -> Company:
+            second_entered_identity_upsert.set()
+            return super()._upsert_company_locked(
+                record,
+                run_id,
+                identity_names=identity_names,
+            )
+
+    def identity_batch(company: NormalizedCompanyRecord) -> NormalizedBatch:
+        return normalized_batch(company=company, jobs=(), filings=())
+
+    try:
+        with Session(engine, expire_on_commit=False) as setup:
+            PersistenceService(setup).persist(
+                identity_batch(normalized_company(name="Seed")),
+                run_id=uuid4(),
+            )
+            alias_target = Company(
+                canonical_name="Alias Target",
+                normalized_name="aliastarget",
+            )
+            setup.add(alias_target)
+            setup.commit()
+            alias_target_id = alias_target.id
+
+        def write_canonical() -> UUID:
+            with Session(engine) as writer:
+                writer.info["company_identity_lock_role"] = "first"
+                return PausingPersistence(writer).persist(
+                    identity_batch(normalized_company(name="Shared Identity")),
+                    run_id=uuid4(),
+                ).company_id
+
+        def write_alias() -> PersistenceError | None:
+            second_started.set()
+            try:
+                with Session(engine) as writer:
+                    ObservingPersistence(writer).persist(
+                        identity_batch(
+                            normalized_company(
+                                name="Alias Target",
+                                company_id=alias_target_id,
+                                aliases=("Shared Identity",),
+                            )
+                        ),
+                        run_id=uuid4(),
+                    )
+            except PersistenceError as error:
+                return error
+            return None
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first_future = executor.submit(write_canonical)
+            if not first_after_identity_upsert.wait(timeout=15):
+                first_future.result(timeout=15)
+                raise TimeoutError("first writer did not reach the outer transaction hook")
+            second_future = executor.submit(write_alias)
+            try:
+                assert second_started.wait(timeout=5)
+                assert not second_entered_identity_upsert.wait(timeout=0.2)
+            finally:
+                release_first.set()
+            canonical_company_id = first_future.result(timeout=15)
+            second_error = second_future.result(timeout=15)
+
+        assert second_entered_identity_upsert.is_set()
+        assert second_error is not None
+        assert second_error.constraint == "uq_company_alias_normalized_alias"
+        with Session(engine) as verification:
+            canonical_owner_ids = set(
+                verification.scalars(
+                    select(Company.id).where(
+                        Company.normalized_name == "sharedidentity"
+                    )
+                )
+            )
+            alias_owner_ids = set(
+                verification.scalars(
+                    select(CompanyAlias.company_id).where(
+                        CompanyAlias.normalized_alias == "sharedidentity"
+                    )
+                )
+            )
+        assert canonical_owner_ids == {canonical_company_id}
+        assert alias_owner_ids == set()
+        assert first_lock_entry_transaction_states == [True]
+        assert first_lock_exit_transaction_states == [False]
+    finally:
+        release_first.set()
+        Base.metadata.drop_all(engine)
+        engine.dispose()
 
 
 def test_normalized_filing_collision_across_companies_rolls_back(
