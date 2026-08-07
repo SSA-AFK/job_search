@@ -31,14 +31,16 @@ class Company(Base, TimestampMixin):
     city: Mapped[str | None] = mapped_column(String(50))
     logo_url: Mapped[str | None] = mapped_column(String(1000))
     website: Mapped[str | None] = mapped_column(String(1000))
-    normalized_website: Mapped[str | None] = mapped_column(String(1000))
+    normalized_website: Mapped[str] = mapped_column(
+        String(1000), nullable=False, default=""
+    )
     description: Mapped[str | None] = mapped_column(Text)
     last_collected_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
     @validates("website")
     def normalize_identity_website(self, _key: str, value: str | None) -> str | None:
         if value is None:
-            self.normalized_website = None
+            self.normalized_website = ""
             return None
         normalized = normalize_public_identity_url(value)
         if len(normalized) > 1_000:

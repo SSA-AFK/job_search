@@ -8,7 +8,7 @@ from typing import Any, TypeVar, cast
 from uuid import UUID
 
 from pydantic import ValidationError
-from sqlalchemy import Select, select, update
+from sqlalchemy import Select, case, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import DataError, IntegrityError, StatementError
 from sqlalchemy.orm import Session
@@ -565,18 +565,7 @@ class PersistenceService:
             )
 
         for record in records:
-            filing = self.session.scalar(
-                select(RegulatoryFiling).where(
-                    RegulatoryFiling.filing_type == record.filing_type,
-                    RegulatoryFiling.normalized_filing_number == record.filing_number,
-                )
-            )
-            if filing is not None and filing.company_id != company_id:
-                raise PersistenceError(
-                    run_id=run_id,
-                    constraint="uq_filing_type_number",
-                    detail="filing identity belongs to another company",
-                )
+            filing = self._owned_filing_for_identity(company_id, record, run_id)
             values = {
                 "company_id": company_id,
                 "source_document_id": (
@@ -594,25 +583,58 @@ class PersistenceService:
             }
             if filing is None:
                 candidate_filing = RegulatoryFiling(**values)
-                inserted_filing, _created = self._insert_or_reselect(
+                self._insert_or_reselect(
                     candidate_filing,
-                    select(RegulatoryFiling).where(
-                        RegulatoryFiling.filing_type == record.filing_type,
-                        RegulatoryFiling.normalized_filing_number
-                        == record.filing_number,
-                    ),
+                    self._filing_identity_statement(record),
                     run_id=run_id,
                     constraint="uq_filing_type_number",
                 )
-                filing = inserted_filing
-            if filing.company_id != company_id:
-                raise PersistenceError(
-                    run_id=run_id,
-                    constraint="uq_filing_type_number",
-                    detail="filing identity belongs to another company",
-                )
+                filing = self._owned_filing_for_identity(company_id, record, run_id)
+                if filing is None:
+                    raise PersistenceError(
+                        run_id=run_id,
+                        constraint="uq_filing_type_number",
+                        detail="filing identity could not be reselected",
+                    )
             for field, value in values.items():
                 setattr(filing, field, value)
+
+    @staticmethod
+    def _filing_identity_statement(
+        record: NormalizedFilingRecord,
+    ) -> Select[tuple[RegulatoryFiling]]:
+        return (
+            select(RegulatoryFiling)
+            .where(
+                RegulatoryFiling.filing_type == record.filing_type,
+                RegulatoryFiling.normalized_filing_number == record.filing_number,
+            )
+            .order_by(
+                case(
+                    (RegulatoryFiling.filing_number == record.filing_number, 0),
+                    else_=1,
+                ),
+                RegulatoryFiling.filing_number,
+                RegulatoryFiling.id,
+            )
+        )
+
+    def _owned_filing_for_identity(
+        self,
+        company_id: UUID,
+        record: NormalizedFilingRecord,
+        run_id: UUID,
+    ) -> RegulatoryFiling | None:
+        matches = tuple(self.session.scalars(self._filing_identity_statement(record)))
+        if not matches:
+            return None
+        if {filing.company_id for filing in matches} != {company_id}:
+            raise PersistenceError(
+                run_id=run_id,
+                constraint="uq_filing_type_number",
+                detail="filing identity has ambiguous company ownership",
+            )
+        return matches[0]
 
     def _insert_or_reselect(
         self,

@@ -18,6 +18,17 @@ down_revision: str | None = "0008_gate1_manifest_discovery"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+_POSTGRESQL_OFFLINE_BACKFILL_GUARD = """
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM companies WHERE website IS NOT NULL)
+       OR EXISTS (SELECT 1 FROM regulatory_filings) THEN
+        RAISE EXCEPTION '0009 normalized evidence backfill requires online migration';
+    END IF;
+END
+$$
+"""
+
 identity_review_status = sa.Enum(
     "pending",
     "resolved",
@@ -77,7 +88,6 @@ def _backfill_normalized_evidence() -> None:
             sa.select(companies.c.id, companies.c.website)
             .where(
                 companies.c.website.is_not(None),
-                companies.c.normalized_website.is_(None),
             )
             .order_by(companies.c.id)
             .limit(500)
@@ -90,21 +100,21 @@ def _backfill_normalized_evidence() -> None:
         for company_id, website in rows:
             try:
                 normalized_website = normalize_public_identity_url(website)
-            except ValueError:
-                continue
-            if len(normalized_website) <= 1_000:
-                connection.execute(
-                    sa.update(companies)
-                    .where(companies.c.id == company_id)
-                    .values(normalized_website=normalized_website)
-                )
+            except (UnicodeError, ValueError) as exc:
+                raise RuntimeError("company website backfill is not normalizable") from exc
+            if len(normalized_website) > 1_000:
+                raise RuntimeError("company website backfill exceeds normalized length")
+            connection.execute(
+                sa.update(companies)
+                .where(companies.c.id == company_id)
+                .values(normalized_website=normalized_website)
+            )
         last_company_id = rows[-1][0]
 
     last_filing_id = None
     while True:
         statement = (
             sa.select(filings.c.id, filings.c.filing_number)
-            .where(filings.c.normalized_filing_number.is_(None))
             .order_by(filings.c.id)
             .limit(500)
         )
@@ -115,23 +125,39 @@ def _backfill_normalized_evidence() -> None:
             break
         for filing_id, filing_number in rows:
             normalized_filing_number = normalize_name(filing_number)
-            if normalized_filing_number and len(normalized_filing_number) <= 255:
-                connection.execute(
-                    sa.update(filings)
-                    .where(filings.c.id == filing_id)
-                    .values(normalized_filing_number=normalized_filing_number)
-                )
+            if not normalized_filing_number:
+                raise RuntimeError("filing number backfill is not normalizable")
+            if len(normalized_filing_number) > 255:
+                raise RuntimeError("filing number backfill exceeds normalized length")
+            connection.execute(
+                sa.update(filings)
+                .where(filings.c.id == filing_id)
+                .values(normalized_filing_number=normalized_filing_number)
+            )
         last_filing_id = rows[-1][0]
 
 
 def upgrade() -> None:
+    if _is_postgresql() and op.get_context().as_sql:
+        op.execute(_POSTGRESQL_OFFLINE_BACKFILL_GUARD)
+
     op.add_column(
         "companies",
-        sa.Column("normalized_website", sa.String(1000), nullable=True),
+        sa.Column(
+            "normalized_website",
+            sa.String(1000),
+            server_default=sa.text("''"),
+            nullable=False,
+        ),
     )
     op.add_column(
         "regulatory_filings",
-        sa.Column("normalized_filing_number", sa.String(255), nullable=True),
+        sa.Column(
+            "normalized_filing_number",
+            sa.String(255),
+            server_default=sa.text("''"),
+            nullable=False,
+        ),
     )
     _backfill_normalized_evidence()
     op.create_index(

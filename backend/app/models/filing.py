@@ -37,7 +37,7 @@ class RegulatoryFiling(Base, TimestampMixin):
         )
     )
     filing_number: Mapped[str] = mapped_column(String(255))
-    normalized_filing_number: Mapped[str | None] = mapped_column(String(255))
+    normalized_filing_number: Mapped[str] = mapped_column(String(255), nullable=False)
     filing_name: Mapped[str] = mapped_column(String(255))
     filing_authority: Mapped[str | None] = mapped_column(String(255))
     filing_date: Mapped[date | None] = mapped_column(Date)

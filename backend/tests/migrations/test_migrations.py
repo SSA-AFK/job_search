@@ -13,7 +13,7 @@ from alembic.operations import Operations
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import URL, make_url
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from alembic import command
 
@@ -1144,10 +1144,13 @@ def test_0009_postgresql_sql_contains_bounded_similarity_indexes() -> None:
         "CREATE INDEX ix_company_aliases_normalized_alias_trgm ON company_aliases "
         "USING gist (normalized_alias gist_trgm_ops)" in sql
     )
-    assert "ALTER TABLE companies ADD COLUMN normalized_website VARCHAR(1000)" in sql
+    assert (
+        "ALTER TABLE companies ADD COLUMN normalized_website VARCHAR(1000) "
+        "DEFAULT '' NOT NULL" in sql
+    )
     assert (
         "ALTER TABLE regulatory_filings ADD COLUMN "
-        "normalized_filing_number VARCHAR(255)" in sql
+        "normalized_filing_number VARCHAR(255) DEFAULT '' NOT NULL" in sql
     )
     assert (
         "CREATE INDEX ix_companies_normalized_website "
@@ -1157,6 +1160,13 @@ def test_0009_postgresql_sql_contains_bounded_similarity_indexes() -> None:
         "CREATE INDEX ix_regulatory_filings_normalized_filing_number "
         "ON regulatory_filings (normalized_filing_number)" in sql
     )
+    assert (
+        "DO $$ BEGIN IF EXISTS (SELECT 1 FROM companies WHERE website IS NOT NULL) "
+        "OR EXISTS (SELECT 1 FROM regulatory_filings) THEN RAISE EXCEPTION "
+        "'0009 normalized evidence backfill requires online migration'; "
+        "END IF; END $$" in sql
+    )
+    assert sql.index("DO $$") < sql.index("ALTER TABLE companies ADD COLUMN")
     for constraint_name in (
         "identity_review_status",
         "identity_review_action",
@@ -1269,6 +1279,8 @@ def test_0009_backfills_normalized_evidence_for_legacy_rows(tmp_path: Path) -> N
     engine = create_engine(database_url)
     company_id = str(uuid4())
     filing_id = str(uuid4())
+    other_company_id = str(uuid4())
+    other_filing_id = str(uuid4())
     created_at = "2026-08-07 00:00:00+00:00"
 
     command.upgrade(config, "0008_gate1_manifest_discovery")
@@ -1284,6 +1296,30 @@ def test_0009_backfills_normalized_evidence_for_legacy_rows(tmp_path: Path) -> N
             {
                 "id": company_id,
                 "website": "HTTPS://Legacy.Example/path?campaign=old#fragment",
+                "created_at": created_at,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO companies "
+                "(id, canonical_name, normalized_name, funding_stage, scale, "
+                "created_at, updated_at) VALUES "
+                "(:id, 'Other Legacy Company', 'otherlegacycompany', 'unknown', "
+                "'unknown', :created_at, :created_at)"
+            ),
+            {"id": other_company_id, "created_at": created_at},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO regulatory_filings "
+                "(id, company_id, filing_type, filing_number, filing_name, "
+                "created_at, updated_at) VALUES "
+                "(:id, :company_id, 'business_license', 'K STRASSE 42', "
+                "'Other legacy filing', :created_at, :created_at)"
+            ),
+            {
+                "id": other_filing_id,
+                "company_id": other_company_id,
                 "created_at": created_at,
             },
         )
@@ -1316,6 +1352,25 @@ def test_0009_backfills_normalized_evidence_for_legacy_rows(tmp_path: Path) -> N
             ),
             {"id": filing_id},
         ) == "kstrasse42"
+        assert connection.scalar(
+            text(
+                "SELECT normalized_filing_number FROM regulatory_filings "
+                "WHERE id = :id"
+            ),
+            {"id": other_filing_id},
+        ) == "kstrasse42"
+        normalized_filing_column = next(
+            column
+            for column in inspect(connection).get_columns("regulatory_filings")
+            if column["name"] == "normalized_filing_number"
+        )
+        assert normalized_filing_column["nullable"] is False
+        normalized_website_column = next(
+            column
+            for column in inspect(connection).get_columns("companies")
+            if column["name"] == "normalized_website"
+        )
+        assert normalized_website_column["nullable"] is False
         assert {index["name"] for index in inspect(connection).get_indexes("companies")} >= {
             "ix_companies_normalized_website"
         }
@@ -1332,6 +1387,65 @@ def test_0009_backfills_normalized_evidence_for_legacy_rows(tmp_path: Path) -> N
     assert "normalized_filing_number" not in {
         column["name"] for column in inspector.get_columns("regulatory_filings")
     }
+
+
+@pytest.mark.postgresql
+def test_0009_postgresql_offline_guard_rejects_legacy_evidence() -> None:
+    database_url = os.getenv("TEST_POSTGRES_URL")
+    if database_url is None:
+        pytest.skip("TEST_POSTGRES_URL is not configured")
+
+    migration_path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "0009_company_identity_review.py"
+    )
+    guard_sql = runpy.run_path(str(migration_path))[
+        "_POSTGRESQL_OFFLINE_BACKFILL_GUARD"
+    ]
+    schema_name = f"stage3a_test_{uuid4().hex}"
+    quoted_schema_name = _quoted_isolated_schema_name(schema_name)
+    schema_url = _isolated_postgresql_url(database_url, schema_name)
+    config = Config(Path(__file__).parents[2] / "alembic.ini")
+    _set_alembic_sqlalchemy_url(config, schema_url)
+    admin_engine = create_engine(database_url)
+    schema_engine = None
+    schema_created = False
+
+    try:
+        with admin_engine.begin() as connection:
+            connection.execute(text(f"CREATE SCHEMA {quoted_schema_name}"))
+        schema_created = True
+        command.upgrade(config, "0008_gate1_manifest_discovery")
+        schema_engine = create_engine(schema_url)
+        with schema_engine.begin() as connection:
+            connection.execute(text(guard_sql))
+            connection.execute(
+                text(
+                    "INSERT INTO companies "
+                    "(id, canonical_name, normalized_name, funding_stage, scale, "
+                    "website, created_at, updated_at) VALUES "
+                    "(:id, 'Legacy Guard', 'legacyguard', 'unknown', 'unknown', "
+                    ":website, :created_at, :created_at)"
+                ),
+                {
+                    "id": str(uuid4()),
+                    "website": "https://legacy.example/path?query=old",
+                    "created_at": "2026-08-07 00:00:00+00:00",
+                },
+            )
+        with pytest.raises(
+            DBAPIError,
+            match="0009 normalized evidence backfill requires online migration",
+        ), schema_engine.begin() as connection:
+            connection.execute(text(guard_sql))
+    finally:
+        if schema_engine is not None:
+            schema_engine.dispose()
+        if schema_created:
+            _cleanup_isolated_postgresql_schema(admin_engine, config, schema_name)
+        admin_engine.dispose()
 
 
 def test_gate1_manifest_discovery_default_sqlite_offline_upgrade_completes() -> None:

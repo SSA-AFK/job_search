@@ -412,6 +412,122 @@ def test_equivalent_unicode_filing_numbers_replay_one_normalized_identity(
     assert stored.normalized_filing_number == "kstrasse42"
 
 
+def test_normalized_filing_collision_across_companies_rolls_back(
+    session: Session, persistence: PersistenceService
+) -> None:
+    first = persistence.persist(normalized_batch(jobs=(), filings=()), run_id=uuid4())
+    current = session.get(Company, first.company_id)
+    assert current is not None
+    previous_collection_time = current.last_collected_at
+    other = Company(canonical_name="Other", normalized_name="other")
+    session.add(other)
+    session.flush()
+    created_at = "2026-08-07 00:00:00+00:00"
+    session.execute(
+        text(
+            "INSERT INTO regulatory_filings "
+            "(id, company_id, filing_type, filing_number, normalized_filing_number, "
+            "filing_name, created_at, updated_at) VALUES "
+            "(:id, :company_id, 'icp', :filing_number, 'kstrasse42', "
+            ":filing_name, :created_at, :created_at)"
+        ),
+        (
+            {
+                "id": str(uuid4()),
+                "company_id": str(current.id),
+                "filing_number": "K STRASSE 42",
+                "filing_name": "Current legacy filing",
+                "created_at": created_at,
+            },
+            {
+                "id": str(uuid4()),
+                "company_id": str(other.id),
+                "filing_number": "Ｋ\u3000Straße\t42",
+                "filing_name": "Other legacy filing",
+                "created_at": created_at,
+            },
+        ),
+    )
+    session.commit()
+    run_id = uuid4()
+
+    with pytest.raises(PersistenceError) as raised:
+        persistence.persist(
+            normalized_batch(
+                jobs=(),
+                filings=(normalized_filing("K STRASSE 42"),),
+            ).with_fetched_at(LATER),
+            run_id=run_id,
+        )
+
+    assert raised.value.run_id == run_id
+    assert raised.value.constraint == "uq_filing_type_number"
+    assert count_rows(session, RegulatoryFiling) == 2
+    session.refresh(current)
+    assert current.last_collected_at == previous_collection_time
+
+
+def test_same_company_normalized_filing_collision_selects_stable_record(
+    session: Session, persistence: PersistenceService
+) -> None:
+    first = persistence.persist(normalized_batch(jobs=(), filings=()), run_id=uuid4())
+    fullwidth_id = uuid4()
+    ascii_id = uuid4()
+    canonical_id = uuid4()
+    created_at = "2026-08-07 00:00:00+00:00"
+    session.execute(
+        text(
+            "INSERT INTO regulatory_filings "
+            "(id, company_id, filing_type, filing_number, normalized_filing_number, "
+            "filing_name, created_at, updated_at) VALUES "
+            "(:id, :company_id, 'icp', :filing_number, 'kstrasse42', "
+            ":filing_name, :created_at, :created_at)"
+        ),
+        (
+            {
+                "id": str(fullwidth_id),
+                "company_id": str(first.company_id),
+                "filing_number": "Ｋ\u3000Straße\t42",
+                "filing_name": "Fullwidth legacy filing",
+                "created_at": created_at,
+            },
+            {
+                "id": str(ascii_id),
+                "company_id": str(first.company_id),
+                "filing_number": "K STRASSE 42",
+                "filing_name": "ASCII legacy filing",
+                "created_at": created_at,
+            },
+            {
+                "id": str(canonical_id),
+                "company_id": str(first.company_id),
+                "filing_number": "kstrasse42",
+                "filing_name": "Canonical legacy filing",
+                "created_at": created_at,
+            },
+        ),
+    )
+    session.commit()
+
+    persistence.persist(
+        normalized_batch(
+            jobs=(),
+            filings=(normalized_filing("K STRASSE 42"),),
+        ).with_fetched_at(LATER),
+        run_id=uuid4(),
+    )
+
+    ascii_filing = session.get(RegulatoryFiling, ascii_id)
+    fullwidth_filing = session.get(RegulatoryFiling, fullwidth_id)
+    canonical_filing = session.get(RegulatoryFiling, canonical_id)
+    assert ascii_filing is not None
+    assert fullwidth_filing is not None
+    assert canonical_filing is not None
+    assert ascii_filing.filing_name == "ASCII legacy filing"
+    assert fullwidth_filing.filing_name == "Fullwidth legacy filing"
+    assert canonical_filing.filing_name == "Example ICP filing"
+
+
 def test_filing_conflict_preserves_previous_collection_time(
     session: Session, persistence: PersistenceService
 ) -> None:
