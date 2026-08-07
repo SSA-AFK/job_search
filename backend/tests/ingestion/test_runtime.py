@@ -54,16 +54,36 @@ class SemanticJudge:
         return DuplicateDecision(False)
 
 
-@pytest.mark.parametrize("reused", [("run", "dedup"), ("run", "write"), ("dedup", "write")])
+@pytest.mark.parametrize(
+    "reused",
+    [
+        ("run", "dedup"),
+        ("run", "review"),
+        ("run", "write"),
+        ("dedup", "review"),
+        ("dedup", "write"),
+        ("review", "write"),
+    ],
+)
 def test_runtime_rejects_each_reused_session_pair(reused: tuple[str, str]) -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
-    with Session(engine) as first, Session(engine) as second, Session(engine) as third, pytest.raises(ValueError, match="distinct sessions"):
-        sessions = {"run": first, "dedup": second, "write": third}
+    with Session(engine) as first, Session(engine) as second, Session(
+        engine
+    ) as third, Session(engine) as fourth, pytest.raises(
+        ValueError, match="distinct sessions"
+    ):
+        sessions = {
+            "run": first,
+            "dedup": second,
+            "review": third,
+            "write": fourth,
+        }
         sessions[reused[1]] = sessions[reused[0]]
         build_ingestion_orchestrator(
             run_state_session=sessions["run"],
             dedup_read_session=sessions["dedup"],
+            identity_review_write_session=sessions["review"],
             persistence_write_session=sessions["write"],
             providers=(),
             extractor=None,  # type: ignore[arg-type]
@@ -75,13 +95,21 @@ def test_runtime_rejects_each_reused_session_pair(reused: tuple[str, str]) -> No
 async def test_runtime_runs_real_three_session_pipeline_and_terminal_retry(tmp_path) -> None:
     engine = create_engine(f"sqlite:///{tmp_path / 'runtime.sqlite3'}")
     Base.metadata.create_all(engine)
-    with Session(engine, expire_on_commit=False) as state, Session(engine, expire_on_commit=False) as dedup, Session(engine, expire_on_commit=False) as write:
+    with Session(engine, expire_on_commit=False) as state, Session(
+        engine, expire_on_commit=False
+    ) as dedup, Session(engine, expire_on_commit=False) as review, Session(
+        engine, expire_on_commit=False
+    ) as write:
         request, run = CollectionRepository(state).create_request("Acme", "acme")
+        state.add(Company(canonical_name="Acme", normalized_name="acme"))
         state.commit()
         provider = Provider()
         extractor = Extractor()
         orchestrator = build_ingestion_orchestrator(
-            run_state_session=state, dedup_read_session=dedup, persistence_write_session=write,
+            run_state_session=state,
+            dedup_read_session=dedup,
+            identity_review_write_session=review,
+            persistence_write_session=write,
             providers=(provider,), extractor=extractor, semantic_judge=SemanticJudge(),
         )
 
@@ -131,9 +159,16 @@ async def test_runtime_runs_real_three_session_pipeline_and_terminal_retry(tmp_p
         async def extract_jobs(self, _company, _documents):
             raise AssertionError("terminal retry must not call extraction")
 
-    with Session(engine, expire_on_commit=False) as state, Session(engine, expire_on_commit=False) as dedup, Session(engine, expire_on_commit=False) as write:
+    with Session(engine, expire_on_commit=False) as state, Session(
+        engine, expire_on_commit=False
+    ) as dedup, Session(engine, expire_on_commit=False) as review, Session(
+        engine, expire_on_commit=False
+    ) as write:
         retry = build_ingestion_orchestrator(
-            run_state_session=state, dedup_read_session=dedup, persistence_write_session=write,
+            run_state_session=state,
+            dedup_read_session=dedup,
+            identity_review_write_session=review,
+            persistence_write_session=write,
             providers=(FailProvider(),), extractor=FailExtractor(), semantic_judge=SemanticJudge(),
         )
         counts_before_retry = {

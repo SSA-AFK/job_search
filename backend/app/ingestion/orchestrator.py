@@ -5,12 +5,21 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import Protocol
 from uuid import UUID
 
 from pydantic import HttpUrl
 from sqlalchemy.exc import OperationalError
 
+from app.company_identity.contracts import (
+    CompanyIdentityInput,
+    CompanyIdentityResolution,
+    CompanyIdentityReviewDraft,
+    IdentityResolutionKind,
+    IdentityReviewRecordSummary,
+    PublicEvidenceReference,
+)
 from app.core.normalization import normalize_name, normalize_url
 from app.ingestion.contracts import (
     Provider,
@@ -18,7 +27,6 @@ from app.ingestion.contracts import (
     RawDocument,
     WebsiteDependentProvider,
 )
-from app.ingestion.deduplication.company import CompanyDeduplicator, CompanyMatch
 from app.ingestion.deduplication.job import JobDeduplicator
 from app.ingestion.errors import (
     ProviderError,
@@ -31,12 +39,14 @@ from app.ingestion.extraction.schemas import (
     CompanyCandidate,
     CompanyProfileCandidate,
     CompanyRef,
+    FilingCandidate,
     JobCandidate,
     ProfileExtraction,
 )
 from app.ingestion.normalization.company import normalize_company
 from app.ingestion.normalization.job import normalize_job
 from app.ingestion.persistence.contracts import (
+    BatchBuildOutcome,
     CompanyFieldEvidence,
     CompanyFieldName,
     NormalizedBatch,
@@ -94,6 +104,18 @@ class CollectionRequestState(Protocol):
     query: str
 
 
+class CompanyIdentityResolutionSource(Protocol):
+    async def resolve(
+        self, identity: CompanyIdentityInput
+    ) -> CompanyIdentityResolution: ...
+
+
+class IdentityReviewRecorder(Protocol):
+    def record(
+        self, *, crawl_run_id: UUID, draft: CompanyIdentityReviewDraft
+    ) -> IdentityReviewRecordSummary: ...
+
+
 class CrawlRunRepository(Protocol):
     def claim_queued(self, run_id: UUID) -> CrawlRunClaim | None: ...
 
@@ -136,10 +158,10 @@ class NormalizedBatchBuilder:
     def __init__(
         self,
         *,
-        company_deduplicator: CompanyDeduplicator | None = None,
+        identity_resolver: CompanyIdentityResolutionSource | None = None,
         job_deduplicator: JobDeduplicator | None = None,
     ) -> None:
-        self.company_deduplicator = company_deduplicator
+        self.identity_resolver = identity_resolver
         self.job_deduplicator = job_deduplicator
 
     async def build(
@@ -150,7 +172,7 @@ class NormalizedBatchBuilder:
         jobs: Sequence[JobCandidate],
         documents: Sequence[RawDocument],
         discovered: CompanyCandidate | None = None,
-    ) -> NormalizedBatch:
+    ) -> BatchBuildOutcome:
         collected_at = utc_now()
         evidence_ids = assign_evidence_ids(documents)
         document_by_evidence = dict(zip(evidence_ids, documents, strict=True))
@@ -179,16 +201,44 @@ class NormalizedBatchBuilder:
             raise _PipelineError("invalid_evidence")
         company_candidate = CompanyCandidate(
             name=discovery.name,
+            aliases=discovery.aliases,
             website=profile_candidate.website or discovery.website,
             description=profile_description or discovery_description,
             evidence_ids=discovery.evidence_ids,
             confidence=discovery.confidence,
         )
-        company_match = (
-            await self.company_deduplicator.resolve(company_candidate)
-            if self.company_deduplicator is not None
-            else CompanyMatch("new", None)
+        normalized_filings: list[NormalizedFilingRecord] = []
+        for filing in profile.filings:
+            self._require_known_evidence(filing.evidence_ids, document_by_evidence)
+            normalized_filings.append(
+                NormalizedFilingRecord.from_candidate(
+                    filing, source_evidence_id=filing.evidence_ids[0]
+                )
+            )
+        identity = self._identity_input(
+            company_candidate=company_candidate,
+            profile_candidate=profile_candidate,
+            filings=profile.filings,
+            documents=document_by_evidence,
         )
+        resolution = (
+            await self.identity_resolver.resolve(identity)
+            if self.identity_resolver is not None
+            else None
+        )
+        if (
+            resolution is not None
+            and resolution.kind is IdentityResolutionKind.REVIEW_REQUIRED
+        ):
+            return BatchBuildOutcome.review_required(
+                CompanyIdentityReviewDraft(
+                    identity=identity,
+                    candidate_matches=resolution.candidate_matches,
+                    review_reasons=resolution.review_reasons,
+                    observed_at=collected_at,
+                )
+            )
+        company_id = None if resolution is None else resolution.company_id
         field_evidence = self._field_evidence(
             discovery, profile_candidate, profile_description
         )
@@ -218,8 +268,10 @@ class NormalizedBatchBuilder:
             if resolved_job.apply_url is None:
                 raise _PipelineError("invalid_evidence")
             job_id = None
-            if company_match.company_id is not None and self.job_deduplicator is not None:
-                job_id = (await self.job_deduplicator.resolve(company_match.company_id, resolved_job)).job_posting_id
+            if company_id is not None and self.job_deduplicator is not None:
+                job_id = (
+                    await self.job_deduplicator.resolve(company_id, resolved_job)
+                ).job_posting_id
             normalized_jobs.append(
                 NormalizedJobRecord(
                     candidate=normalize_job(resolved_job),
@@ -230,31 +282,69 @@ class NormalizedBatchBuilder:
                     seen_at=collected_at,
                 )
             )
-        normalized_filings: list[NormalizedFilingRecord] = []
-        for filing in profile.filings:
-            self._require_known_evidence(filing.evidence_ids, document_by_evidence)
-            normalized_filings.append(
-                NormalizedFilingRecord.from_candidate(
-                    filing, source_evidence_id=filing.evidence_ids[0]
-                )
+        return BatchBuildOutcome.ready(
+            NormalizedBatch(
+                documents=tuple(
+                    NormalizedDocument(
+                        evidence_id=evidence_id,
+                        document=document,
+                        fetched_at=collected_at,
+                    )
+                    for evidence_id, document in zip(
+                        evidence_ids, documents, strict=True
+                    )
+                ),
+                company=NormalizedCompanyRecord(
+                    candidate=normalize_company(company_candidate),
+                    company_id=company_id,
+                    field_evidence=field_evidence,
+                ),
+                jobs=tuple(normalized_jobs),
+                filings=tuple(normalized_filings),
+                collected_at=collected_at,
             )
-        return NormalizedBatch(
-            documents=tuple(
-                NormalizedDocument(
+        )
+
+    @staticmethod
+    def _identity_input(
+        *,
+        company_candidate: CompanyCandidate,
+        profile_candidate: CompanyProfileCandidate,
+        filings: Sequence[FilingCandidate],
+        documents: dict[str, RawDocument],
+    ) -> CompanyIdentityInput:
+        confidence_by_evidence: dict[str, Decimal] = {}
+        evidence_sources: list[tuple[Sequence[str], float]] = [
+            (company_candidate.evidence_ids, company_candidate.confidence),
+            (profile_candidate.evidence_ids, profile_candidate.confidence),
+            *((filing.evidence_ids, filing.confidence) for filing in filings),
+        ]
+        for source_evidence_ids, source_confidence in evidence_sources:
+            confidence = Decimal(str(source_confidence))
+            for evidence_id in source_evidence_ids:
+                previous = confidence_by_evidence.get(evidence_id)
+                if previous is None or confidence > previous:
+                    confidence_by_evidence[evidence_id] = confidence
+        return CompanyIdentityInput(
+            canonical_name=company_candidate.name,
+            aliases=company_candidate.aliases,
+            official_website=(
+                None
+                if company_candidate.website is None
+                else str(company_candidate.website)
+            ),
+            legal_identifiers=tuple(
+                filing.filing_number for filing in filings
+            ),
+            evidence=tuple(
+                PublicEvidenceReference(
+                    provider=documents[evidence_id].provider,
+                    url=str(documents[evidence_id].url),
                     evidence_id=evidence_id,
-                    document=document,
-                    fetched_at=collected_at,
+                    confidence=confidence,
                 )
-                for evidence_id, document in zip(evidence_ids, documents, strict=True)
+                for evidence_id, confidence in confidence_by_evidence.items()
             ),
-            company=NormalizedCompanyRecord(
-                candidate=normalize_company(company_candidate),
-                company_id=company_match.company_id,
-                field_evidence=field_evidence,
-            ),
-            jobs=tuple(normalized_jobs),
-            filings=tuple(normalized_filings),
-            collected_at=collected_at,
         )
 
     @staticmethod
@@ -299,12 +389,14 @@ class IngestionOrchestrator:
         batch_builder: NormalizedBatchBuilder,
         persistence: PersistenceService,
         runs: CrawlRunRepository,
+        identity_review_recorder: IdentityReviewRecorder,
     ) -> None:
         self.providers = list(providers)
         self.extractor = extractor
         self.batch_builder = batch_builder
         self.persistence = persistence
         self.runs = runs
+        self.identity_review_recorder = identity_review_recorder
 
     async def run(self, run_id: UUID) -> IngestionResult:
         try:
@@ -435,14 +527,14 @@ class IngestionOrchestrator:
             jobs = await self.extractor.extract_jobs(company, documents)
             jobs_found = len(jobs)
             stage = "normalization"
-            batch = await self.batch_builder.build(
+            outcome = await self.batch_builder.build(
                 company=company,
                 profile=profile,
                 jobs=jobs,
                 documents=documents,
                 discovered=selected,
             )
-            stage = "persistence"
+            stage = "claim_check"
             if not self.runs.owns_claim(
                 run.id, expected_claim_token=claim_token
             ):
@@ -452,6 +544,28 @@ class IngestionOrchestrator:
                     if current is None
                     else IngestionResult.from_run(current)
                 )
+            if outcome.review_draft is not None:
+                stage = "identity_review"
+                self.identity_review_recorder.record(
+                    crawl_run_id=run.id,
+                    draft=outcome.review_draft,
+                )
+                code = "company_identity_review_required"
+                return self._finish(
+                    run,
+                    expected_claim_token=claim_token,
+                    status=CollectionStatus.FAILED,
+                    providers_attempted=providers_attempted,
+                    documents_found=len(documents),
+                    jobs_found=jobs_found,
+                    persistence=None,
+                    error_code=code,
+                    diagnostics=(*diagnostics, _Diagnostic("identity_resolution", code)),
+                )
+            batch = outcome.batch
+            if batch is None:
+                raise _PipelineError("invalid_batch_outcome")
+            stage = "persistence"
             persisted = self.persistence.persist(
                 batch, run.id, expected_claim_token=claim_token
             )

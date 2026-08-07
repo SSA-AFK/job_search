@@ -53,16 +53,20 @@ def load_runtime_components() -> RuntimeComponents:
     return components
 
 
-def build_runtime_orchestrator() -> tuple[IngestionOrchestrator, tuple[Session, Session, Session]]:
+def build_runtime_orchestrator() -> tuple[
+    IngestionOrchestrator, tuple[Session, Session, Session, Session]
+]:
     """Create the caller-owned distinct sessions required by the ingestion runtime."""
     sessions: list[Session] = []
     try:
-        for _ in range(3):
+        for _ in range(4):
             sessions.append(SessionLocal())
         components = load_runtime_components()
         orchestrator = compose_orchestrator(
-            run_state_session=sessions[0], dedup_read_session=sessions[1],
-            persistence_write_session=sessions[2],
+            run_state_session=sessions[0],
+            dedup_read_session=sessions[1],
+            identity_review_write_session=sessions[2],
+            persistence_write_session=sessions[3],
             providers=components.providers,
             extractor=components.extractor,
             semantic_judge=components.semantic_judge,
@@ -71,7 +75,7 @@ def build_runtime_orchestrator() -> tuple[IngestionOrchestrator, tuple[Session, 
         for session in sessions:
             session.close()
         raise
-    return orchestrator, (sessions[0], sessions[1], sessions[2])
+    return orchestrator, (sessions[0], sessions[1], sessions[2], sessions[3])
 
 
 def _result_payload(result: IngestionResult) -> dict[str, Any]:

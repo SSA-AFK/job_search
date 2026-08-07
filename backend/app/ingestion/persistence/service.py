@@ -14,7 +14,8 @@ from sqlalchemy.exc import DataError, IntegrityError, StatementError
 from sqlalchemy.orm import Session
 
 from app.cache.base import CompanyCache
-from app.core.normalization import normalize_url
+from app.core.normalization import normalize_name, normalize_url
+from app.ingestion.extraction.schemas import CompanyCandidate
 from app.ingestion.persistence.contracts import (
     NormalizedBatch,
     NormalizedCompanyRecord,
@@ -27,6 +28,7 @@ from app.models import (
     CollectionRequest,
     CollectionStatus,
     Company,
+    CompanyAlias,
     CompanySource,
     CrawlRun,
     JobPosting,
@@ -40,6 +42,7 @@ _MAX_SQL_SMALLINT = 32_767
 _FILING_IDENTITY_LOCK_PREFIX = b"company_search:regulatory_filing:v1\0"
 _KNOWN_CONSTRAINT_MARKERS = {
     "companies.normalized_name": "uq_company_normalized_name",
+    "company_aliases.normalized_alias": "uq_company_alias_normalized_alias",
     "source_documents.provider, source_documents.external_id": (
         "uq_source_document_provider_external_id"
     ),
@@ -319,13 +322,60 @@ class PersistenceService:
                 constraint="uq_company_normalized_name",
             )
             company = inserted_company
-        company.canonical_name = candidate.name
-        company.normalized_name = normalized.normalized_name
         if candidate.website is not None:
             company.website = str(candidate.website)
         if candidate.description is not None:
             company.description = candidate.description
+        self._upsert_company_aliases(company, candidate, run_id)
         return company
+
+    def _upsert_company_aliases(
+        self,
+        company: Company,
+        candidate: CompanyCandidate,
+        run_id: UUID,
+    ) -> None:
+        aliases_by_normalized: dict[str, str] = {}
+        for display_alias in (candidate.name, *candidate.aliases):
+            normalized_alias = normalize_name(display_alias)
+            if normalized_alias and normalized_alias != company.normalized_name:
+                aliases_by_normalized.setdefault(normalized_alias, display_alias)
+
+        for normalized_alias in sorted(aliases_by_normalized):
+            canonical_owner = self.session.scalar(
+                select(Company).where(Company.normalized_name == normalized_alias)
+            )
+            if canonical_owner is not None and canonical_owner.id != company.id:
+                raise PersistenceError(
+                    run_id=run_id,
+                    constraint="uq_company_alias_normalized_alias",
+                    detail="company alias is owned by another company",
+                )
+            stored_alias = self.session.scalar(
+                select(CompanyAlias).where(
+                    CompanyAlias.normalized_alias == normalized_alias
+                )
+            )
+            if stored_alias is None:
+                inserted_alias, _created = self._insert_or_reselect(
+                    CompanyAlias(
+                        company_id=company.id,
+                        alias=aliases_by_normalized[normalized_alias],
+                        normalized_alias=normalized_alias,
+                    ),
+                    select(CompanyAlias).where(
+                        CompanyAlias.normalized_alias == normalized_alias
+                    ),
+                    run_id=run_id,
+                    constraint="uq_company_alias_normalized_alias",
+                )
+                stored_alias = inserted_alias
+            if stored_alias.company_id != company.id:
+                raise PersistenceError(
+                    run_id=run_id,
+                    constraint="uq_company_alias_normalized_alias",
+                    detail="company alias is owned by another company",
+                )
 
     def _upsert_company_evidence(
         self,

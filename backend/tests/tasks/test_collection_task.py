@@ -16,7 +16,7 @@ from app.ingestion.extraction.schemas import (
     ProfileExtraction,
 )
 from app.ingestion.runtime import build_ingestion_orchestrator
-from app.models import Base, CollectionStatus, CrawlRun
+from app.models import Base, CollectionStatus, Company, CrawlRun
 
 
 class Provider:
@@ -62,7 +62,7 @@ class DocumentProvider:
         )
 
 
-def test_collection_task_reuses_same_run_and_closes_three_sessions(tmp_path, monkeypatch) -> None:
+def test_collection_task_reuses_same_run_and_closes_four_sessions(tmp_path, monkeypatch) -> None:
     from app.tasks.collection import RuntimeComponents, run_ingestion
 
     engine = create_engine(f"sqlite:///{tmp_path / 'task.sqlite3'}")
@@ -96,7 +96,7 @@ def test_collection_task_reuses_same_run_and_closes_three_sessions(tmp_path, mon
 
     assert first["run_id"] == str(run.id)
     assert second["status"] == CollectionStatus.FAILED.value
-    assert len(created_sessions) == 6
+    assert len(created_sessions) == 8
     assert all(session.was_closed for session in created_sessions)
     with Session(engine) as session:
         persisted = session.get(CrawlRun, run.id)
@@ -181,16 +181,18 @@ def test_collection_task_requeues_real_running_run_before_retry(tmp_path, monkey
     Base.metadata.create_all(engine)
     with Session(engine, expire_on_commit=False) as session:
         request, run = CollectionRepository(session).create_request("Acme", "acme")
+        session.add(Company(canonical_name="Acme", normalized_name="acme"))
         session.commit()
 
     monkeypatch.setattr("app.tasks.collection.SessionLocal", lambda: Session(engine, expire_on_commit=False))
 
     def runtime_factory():
-        sessions = tuple(Session(engine, expire_on_commit=False) for _ in range(3))
+        sessions = tuple(Session(engine, expire_on_commit=False) for _ in range(4))
         orchestrator = build_ingestion_orchestrator(
             run_state_session=sessions[0],
             dedup_read_session=sessions[1],
-            persistence_write_session=sessions[2],
+            identity_review_write_session=sessions[2],
+            persistence_write_session=sessions[3],
             providers=(DocumentProvider(),),
             extractor=Extractor(),
             semantic_judge=SemanticJudge(),
@@ -232,16 +234,18 @@ def test_collection_task_terminalizes_real_running_run_after_retry_exhaustion(
     Base.metadata.create_all(engine)
     with Session(engine, expire_on_commit=False) as session:
         request, run = CollectionRepository(session).create_request("Acme", "acme")
+        session.add(Company(canonical_name="Acme", normalized_name="acme"))
         session.commit()
 
     monkeypatch.setattr("app.tasks.collection.SessionLocal", lambda: Session(engine, expire_on_commit=False))
 
     def runtime_factory():
-        sessions = tuple(Session(engine, expire_on_commit=False) for _ in range(3))
+        sessions = tuple(Session(engine, expire_on_commit=False) for _ in range(4))
         orchestrator = build_ingestion_orchestrator(
             run_state_session=sessions[0],
             dedup_read_session=sessions[1],
-            persistence_write_session=sessions[2],
+            identity_review_write_session=sessions[2],
+            persistence_write_session=sessions[3],
             providers=(DocumentProvider(),),
             extractor=Extractor(),
             semantic_judge=SemanticJudge(),
@@ -311,11 +315,12 @@ def test_collection_task_retries_real_terminal_write_infrastructure_failure(tmp_
             raise ValueError("deterministic extraction failure")
 
     def runtime_factory():
-        sessions = tuple(Session(engine, expire_on_commit=False) for _ in range(3))
+        sessions = tuple(Session(engine, expire_on_commit=False) for _ in range(4))
         orchestrator = build_ingestion_orchestrator(
             run_state_session=sessions[0],
             dedup_read_session=sessions[1],
-            persistence_write_session=sessions[2],
+            identity_review_write_session=sessions[2],
+            persistence_write_session=sessions[3],
             providers=(DocumentProvider(),),
             extractor=FailingExtractor(),
             semantic_judge=SemanticJudge(),
@@ -359,7 +364,7 @@ def test_collection_task_recovers_real_running_state_with_a_fresh_session(tmp_pa
         session.commit()
 
     def runtime_factory():
-        sessions = tuple(Session(engine, expire_on_commit=False) for _ in range(3))
+        sessions = tuple(Session(engine, expire_on_commit=False) for _ in range(4))
         commit = sessions[0].commit
 
         def commit_then_lose_connection() -> None:
@@ -370,7 +375,8 @@ def test_collection_task_recovers_real_running_state_with_a_fresh_session(tmp_pa
         orchestrator = build_ingestion_orchestrator(
             run_state_session=sessions[0],
             dedup_read_session=sessions[1],
-            persistence_write_session=sessions[2],
+            identity_review_write_session=sessions[2],
+            persistence_write_session=sessions[3],
             providers=(DocumentProvider(),),
             extractor=Extractor(),
             semantic_judge=SemanticJudge(),

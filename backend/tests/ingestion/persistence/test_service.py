@@ -32,6 +32,7 @@ from app.models import (
     Base,
     CollectionStatus,
     Company,
+    CompanyAlias,
     CompanySource,
     FilingType,
     JobPosting,
@@ -125,14 +126,18 @@ def normalized_company(
     *,
     name: str = "Example",
     company_id: UUID | None = None,
+    aliases: tuple[str, ...] = (),
+    website: str = "https://example.com",
+    description: str = "Company description",
     field_evidence: tuple[CompanyFieldEvidence, ...] = (),
 ) -> NormalizedCompanyRecord:
     return NormalizedCompanyRecord(
         candidate=normalize_company(
             CompanyCandidate(
                 name=name,
-                website="https://example.com",
-                description="Company description",
+                aliases=aliases,
+                website=website,
+                description=description,
                 evidence_ids=["doc-1"],
                 confidence=0.9,
             )
@@ -439,6 +444,8 @@ def test_equivalent_unicode_filing_numbers_replay_one_normalized_identity(
         ),
         run_id=uuid4(),
     )
+
+
     stored = session.scalar(select(RegulatoryFiling))
     assert stored is not None
     session.execute(
@@ -466,6 +473,92 @@ def test_equivalent_unicode_filing_numbers_replay_one_normalized_identity(
     assert count_rows(session, RegulatoryFiling) == 1
     assert stored.filing_number == "  Ｋ\u3000Straße\t42 "
     assert stored.normalized_filing_number == "kstrasse42"
+
+
+def test_existing_company_keeps_identity_and_upserts_candidate_aliases(
+    session: Session,
+) -> None:
+    company = Company(
+        canonical_name="OpenAI",
+        normalized_name="openai",
+        website="https://old.example",
+        description="Old profile",
+    )
+    session.add(company)
+    session.commit()
+    record = normalized_company(
+        name="OpenAI China",
+        company_id=company.id,
+        aliases=("OpenAI Asia",),
+        website="https://new.example",
+        description="New profile",
+    )
+
+    PersistenceService(session).persist(
+        normalized_batch(company=record, jobs=(), filings=()),
+        run_id=uuid4(),
+    )
+
+    session.refresh(company)
+    assert (company.canonical_name, company.normalized_name) == ("OpenAI", "openai")
+    assert company.website == "https://new.example/"
+    assert company.description == "New profile"
+    assert set(
+        session.scalars(
+            select(CompanyAlias.normalized_alias).where(
+                CompanyAlias.company_id == company.id
+            )
+        )
+    ) == {"openaichina", "openaiasia"}
+
+
+def test_alias_owned_by_another_company_rolls_back_entire_batch(
+    session: Session,
+) -> None:
+    target = Company(
+        canonical_name="OpenAI",
+        normalized_name="openai",
+        description="Old profile",
+    )
+    other = Company(canonical_name="Other", normalized_name="other")
+    session.add_all((target, other))
+    session.flush()
+    session.add(
+        CompanyAlias(
+            company_id=other.id,
+            alias="OpenAI China",
+            normalized_alias="openaichina",
+        )
+    )
+    session.commit()
+    target_id = target.id
+    other_id = other.id
+    before_documents = count_rows(session, SourceDocument)
+    session.rollback()
+
+    with pytest.raises(PersistenceError) as raised:
+        PersistenceService(session).persist(
+            normalized_batch(
+                company=normalized_company(
+                    name="OpenAI China",
+                    company_id=target_id,
+                    description="Must roll back",
+                ),
+                jobs=(),
+                filings=(),
+            ),
+            run_id=uuid4(),
+        )
+
+    assert raised.value.constraint == "uq_company_alias_normalized_alias"
+    session.refresh(target)
+    assert target.description == "Old profile"
+    assert count_rows(session, SourceDocument) == before_documents
+    assert session.scalar(
+        select(CompanyAlias.company_id).where(
+            CompanyAlias.normalized_alias == "openaichina"
+        )
+    ) == other_id
 
 
 def test_normalized_filing_collision_across_companies_rolls_back(
@@ -1051,6 +1144,7 @@ def test_company_unique_race_reselects_winner_without_poisoning_outer_transactio
         )
 
     assert resolved.id == winner.id
+    assert (winner.canonical_name, winner.normalized_name) == ("Winner", "example")
     assert count_rows(non_autoflush_session, Company) == 2
 
 

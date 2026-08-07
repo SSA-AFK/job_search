@@ -4,8 +4,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 
 from app.ingestion.deduplication.company import CompanyDeduplicator
-from app.ingestion.extraction.schemas import CompanyCandidate
-from app.ingestion.extraction.schemas import EmploymentType
+from app.ingestion.extraction.schemas import CompanyCandidate, EmploymentType
 from app.ingestion.repositories import (
     SqlAlchemyCompanyDeduplicationRepository,
     SqlAlchemyJobDeduplicationRepository,
