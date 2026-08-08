@@ -160,6 +160,15 @@ def test_atomic_write_collision_never_unlinks_unowned_temp(
         temporary.unlink(missing_ok=True)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="exercises the native Windows rename path")
+def test_atomic_write_supports_non_bmp_windows_basename(tmp_path: Path) -> None:
+    output = tmp_path / "artifact-\U0001f600.json"
+
+    manifest_cli._atomic_write(output, b"new")
+
+    assert output.read_bytes() == b"new"
+
+
 def test_atomic_write_rejects_temp_path_substitution_without_touching_foreign_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -168,38 +177,90 @@ def test_atomic_write_rejects_temp_path_substitution_without_touching_foreign_fi
     fixed_uuid = UUID(int=2)
     temporary = output.with_name(f"{output.name}.{fixed_uuid.hex}.tmp")
     displaced_owned_temp = tmp_path / "displaced-owned.tmp"
-    real_open = Path.open
     monkeypatch.setattr(manifest_cli, "uuid4", lambda: fixed_uuid)
 
-    class _SubstitutingWriter:
-        def __init__(self, writer: Any) -> None:
-            self._writer = writer
+    def substitute_temporary() -> None:
+        temporary.replace(displaced_owned_temp)
+        temporary.write_bytes(b"foreign")
 
-        def __enter__(self) -> Any:
-            return self._writer.__enter__()
-
-        def __exit__(self, *args: object) -> object:
-            result = self._writer.__exit__(*args)
-            temporary.replace(displaced_owned_temp)
-            temporary.write_bytes(b"foreign")
-            return result
-
-    def substituting_open(
-        candidate: Path, mode: str = "r", *args: object, **kwargs: object
-    ) -> Any:
-        writer = real_open(candidate, mode, *args, **kwargs)
-        if candidate == temporary and mode == "xb":
-            return _SubstitutingWriter(writer)
-        return writer
-
-    monkeypatch.setattr(Path, "open", substituting_open)
     try:
         with pytest.raises(manifest_cli.ManifestCommandError, match="artifact write failed"):
-            manifest_cli._atomic_write(output, b"new")
+            manifest_cli._atomic_write(
+                output,
+                b"new",
+                hooks=manifest_cli._AtomicWriteHooks(before_replace=substitute_temporary),
+            )
 
         assert output.read_bytes() == b"stale"
         assert temporary.read_bytes() == b"foreign"
-        assert displaced_owned_temp.read_bytes() == b"new"
+        assert not displaced_owned_temp.exists()
+    finally:
+        temporary.unlink(missing_ok=True)
+        displaced_owned_temp.unlink(missing_ok=True)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="exercises handle-relative Windows rename")
+def test_windows_atomic_replace_never_moves_substituted_temp_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "artifact.json"
+    output.write_bytes(b"stale")
+    fixed_uuid = UUID(int=6)
+    temporary = output.with_name(f"{output.name}.{fixed_uuid.hex}.tmp")
+    displaced_owned_temp = tmp_path / "displaced-owned.tmp"
+    real_rename_handle = manifest_cli._windows_rename_handle
+    monkeypatch.setattr(manifest_cli, "uuid4", lambda: fixed_uuid)
+
+    def substitute_then_rename_owned_handle(
+        handle: int, parent_handle: int, destination_name: str
+    ) -> None:
+        temporary.replace(displaced_owned_temp)
+        temporary.write_bytes(b"foreign")
+        real_rename_handle(handle, parent_handle, destination_name)
+
+    monkeypatch.setattr(manifest_cli, "_windows_rename_handle", substitute_then_rename_owned_handle)
+    try:
+        manifest_cli._atomic_write(output, b"new")
+
+        assert output.read_bytes() == b"new"
+        assert temporary.read_bytes() == b"foreign"
+        assert not displaced_owned_temp.exists()
+    finally:
+        temporary.unlink(missing_ok=True)
+        displaced_owned_temp.unlink(missing_ok=True)
+
+
+def test_owned_cleanup_uses_handle_after_temp_path_substitution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "artifact.json"
+    output.write_bytes(b"stale")
+    fixed_uuid = UUID(int=7)
+    temporary = output.with_name(f"{output.name}.{fixed_uuid.hex}.tmp")
+    displaced_owned_temp = tmp_path / "displaced-owned.tmp"
+    monkeypatch.setattr(manifest_cli, "uuid4", lambda: fixed_uuid)
+
+    def fail_replace() -> None:
+        raise OSError("simulated replace failure")
+
+    def substitute_before_cleanup() -> None:
+        temporary.replace(displaced_owned_temp)
+        temporary.write_bytes(b"foreign")
+
+    try:
+        with pytest.raises(manifest_cli.ManifestCommandError, match="artifact write failed"):
+            manifest_cli._atomic_write(
+                output,
+                b"new",
+                hooks=manifest_cli._AtomicWriteHooks(
+                    before_replace=fail_replace,
+                    before_cleanup=substitute_before_cleanup,
+                ),
+            )
+
+        assert temporary.read_bytes() == b"foreign"
+        assert not displaced_owned_temp.exists()
+        assert output.read_bytes() == b"stale"
     finally:
         temporary.unlink(missing_ok=True)
         displaced_owned_temp.unlink(missing_ok=True)
@@ -263,27 +324,33 @@ def test_atomic_write_rejects_parent_substitution_before_temp_creation(
     displaced_parent = tmp_path / "validated-parent"
     fixed_uuid = UUID(int=3)
     temporary = output.with_name(f"{output.name}.{fixed_uuid.hex}.tmp")
-    real_open = Path.open
-    swapped = False
     monkeypatch.setattr(manifest_cli, "uuid4", lambda: fixed_uuid)
+    monkeypatch.setattr(manifest_cli, "_REPOSITORY_ROOT", displaced_parent)
+    substitution_blocked = False
 
-    def parent_substituting_open(
-        candidate: Path, mode: str = "r", *args: object, **kwargs: object
-    ) -> Any:
-        nonlocal swapped
-        if candidate == temporary and mode == "xb" and not swapped:
+    def substitute_parent() -> None:
+        nonlocal substitution_blocked
+        try:
             parent.replace(displaced_parent)
             parent.mkdir()
-            swapped = True
-        return real_open(candidate, mode, *args, **kwargs)
+        except PermissionError:
+            substitution_blocked = True
+            raise
 
-    monkeypatch.setattr(Path, "open", parent_substituting_open)
     try:
         with pytest.raises(manifest_cli.ManifestCommandError, match="artifact write failed"):
-            manifest_cli._atomic_write(output, b"new", require_external=True)
+            manifest_cli._atomic_write(
+                output,
+                b"new",
+                require_external=True,
+                hooks=manifest_cli._AtomicWriteHooks(after_parent_pinned=substitute_parent),
+            )
 
-        assert (displaced_parent / output.name).read_bytes() == b"stale"
-        assert not output.exists()
+        stale_output = output if substitution_blocked else displaced_parent / output.name
+        assert stale_output.read_bytes() == b"stale"
+        assert not (displaced_parent / temporary.name).exists()
+        if not substitution_blocked:
+            assert not output.exists()
         assert not temporary.exists()
     finally:
         output.unlink(missing_ok=True)
@@ -336,38 +403,32 @@ def test_atomic_write_rejects_parent_substitution_before_replace_and_cleans_owne
     displaced_parent = tmp_path / "validated-parent"
     fixed_uuid = UUID(int=5)
     temporary = output.with_name(f"{output.name}.{fixed_uuid.hex}.tmp")
-    real_open = Path.open
     monkeypatch.setattr(manifest_cli, "uuid4", lambda: fixed_uuid)
+    substitution_blocked = False
 
-    class _ParentSubstitutingWriter:
-        def __init__(self, writer: Any) -> None:
-            self._writer = writer
-
-        def __enter__(self) -> Any:
-            return self._writer.__enter__()
-
-        def __exit__(self, *args: object) -> object:
-            result = self._writer.__exit__(*args)
+    def substitute_parent() -> None:
+        nonlocal substitution_blocked
+        try:
             parent.replace(displaced_parent)
             parent.mkdir()
-            return result
+        except PermissionError:
+            substitution_blocked = True
+            raise
 
-    def parent_substituting_open(
-        candidate: Path, mode: str = "r", *args: object, **kwargs: object
-    ) -> Any:
-        writer = real_open(candidate, mode, *args, **kwargs)
-        if candidate == temporary and mode == "xb":
-            return _ParentSubstitutingWriter(writer)
-        return writer
-
-    monkeypatch.setattr(Path, "open", parent_substituting_open)
     try:
         with pytest.raises(manifest_cli.ManifestCommandError, match="artifact write failed"):
-            manifest_cli._atomic_write(output, b"new", require_external=True)
+            manifest_cli._atomic_write(
+                output,
+                b"new",
+                require_external=True,
+                hooks=manifest_cli._AtomicWriteHooks(before_replace=substitute_parent),
+            )
 
-        assert (displaced_parent / output.name).read_bytes() == b"stale"
+        stale_output = output if substitution_blocked else displaced_parent / output.name
+        assert stale_output.read_bytes() == b"stale"
         assert not (displaced_parent / temporary.name).exists()
-        assert not output.exists()
+        if not substitution_blocked:
+            assert not output.exists()
     finally:
         output.unlink(missing_ok=True)
         temporary.unlink(missing_ok=True)
@@ -378,33 +439,28 @@ def test_atomic_write_rejects_parent_substitution_before_replace_and_cleans_owne
             displaced_parent.replace(parent)
 
 
-def test_atomic_write_cleans_owned_temp_if_opened_handle_resolves_into_repository(
+def test_atomic_write_cleans_owned_temp_if_classified_as_repository(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     output = tmp_path / "artifact.json"
     output.write_bytes(b"stale")
     fixed_uuid = UUID(int=4)
     temporary = output.with_name(f"{output.name}.{fixed_uuid.hex}.tmp")
-    repository_probe = BACKEND_ROOT / f"task7-{fixed_uuid.hex}.tmp"
-    real_open = Path.open
+    real_is_repository_path = manifest_cli._is_repository_path
     monkeypatch.setattr(manifest_cli, "uuid4", lambda: fixed_uuid)
 
-    def repository_redirected_open(
-        candidate: Path, mode: str = "r", *args: object, **kwargs: object
-    ) -> Any:
-        if candidate == temporary and mode == "xb":
-            return real_open(repository_probe, mode, *args, **kwargs)
-        return real_open(candidate, mode, *args, **kwargs)
+    def classify_temporary_as_repository(candidate: Path) -> bool:
+        return candidate.name == temporary.name or real_is_repository_path(candidate)
 
-    monkeypatch.setattr(Path, "open", repository_redirected_open)
+    monkeypatch.setattr(manifest_cli, "_is_repository_path", classify_temporary_as_repository)
     try:
         with pytest.raises(manifest_cli.ManifestCommandError, match="artifact write failed"):
             manifest_cli._atomic_write(output, b"new", require_external=True)
 
         assert output.read_bytes() == b"stale"
-        assert not repository_probe.exists()
+        assert not temporary.exists()
     finally:
-        repository_probe.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
 
 
 def _candidate(**overrides: object) -> dict[str, object]:

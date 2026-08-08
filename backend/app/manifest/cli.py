@@ -99,6 +99,20 @@ class _ExternalOutputPath:
     parent_identity: tuple[int, int]
 
 
+@dataclass(frozen=True)
+class _PinnedDirectoryHandle:
+    current_path: Callable[[], Path]
+    identity: tuple[int, int]
+    native_handle: int
+
+
+@dataclass(frozen=True)
+class _AtomicWriteHooks:
+    after_parent_pinned: Callable[[], None] | None = None
+    before_replace: Callable[[], None] | None = None
+    before_cleanup: Callable[[], None] | None = None
+
+
 class _SafeArgumentParser(argparse.ArgumentParser):
     def error(self, _message: str) -> NoReturn:
         print("manifest command failed: invalid arguments", file=sys.stderr)
@@ -284,7 +298,7 @@ def _opened_file_path(file: BinaryIO) -> Path:
 @contextmanager
 def _pinned_directory(
     path: Path,
-) -> Iterator[tuple[Callable[[], Path], tuple[int, int]]]:
+) -> Iterator[_PinnedDirectoryHandle]:
     if os.name == "nt":
         import ctypes
         from ctypes import wintypes
@@ -304,7 +318,7 @@ def _pinned_directory(
         handle = create_file(
             str(path),
             0x80,
-            0x1 | 0x2 | 0x4,
+            0x1 | 0x2,
             None,
             3,
             0x02000000,
@@ -312,41 +326,403 @@ def _pinned_directory(
         )
         if handle == wintypes.HANDLE(-1).value:
             raise OSError(ctypes.get_last_error(), "parent directory is unavailable")
-        close_handle = kernel32.CloseHandle
-        close_handle.argtypes = (wintypes.HANDLE,)
-        close_handle.restype = wintypes.BOOL
         try:
-            yield lambda: _windows_handle_path(handle), _windows_handle_identity(handle)
+            yield _PinnedDirectoryHandle(
+                current_path=lambda: _windows_handle_path(handle),
+                identity=_windows_handle_identity(handle),
+                native_handle=handle,
+            )
         finally:
-            close_handle(handle)
+            _close_windows_handle(handle)
         return
 
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0)
     descriptor = os.open(path, flags)
     try:
         status = os.fstat(descriptor)
-        yield lambda: _descriptor_path(descriptor), (status.st_dev, status.st_ino)
+        yield _PinnedDirectoryHandle(
+            current_path=lambda: _descriptor_path(descriptor),
+            identity=(status.st_dev, status.st_ino),
+            native_handle=descriptor,
+        )
     finally:
         os.close(descriptor)
 
 
 def _directory_identity(path: Path) -> tuple[int, int]:
-    with _pinned_directory(path) as (_current_path, identity):
-        return identity
+    with _pinned_directory(path) as directory:
+        return directory.identity
 
 
 def _is_repository_path(path: Path) -> bool:
     return path.is_relative_to(_REPOSITORY_ROOT)
 
 
-def _unlink_owned_path(path: Path, identity: tuple[int, int] | None) -> None:
-    if identity is None:
-        return
+def _windows_create_relative_file(parent_handle: int, name: str) -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    class _UnicodeString(ctypes.Structure):
+        _fields_ = (
+            ("length", wintypes.USHORT),
+            ("maximum_length", wintypes.USHORT),
+            ("buffer", wintypes.LPWSTR),
+        )
+
+    class _ObjectAttributes(ctypes.Structure):
+        _fields_ = (
+            ("length", wintypes.ULONG),
+            ("root_directory", wintypes.HANDLE),
+            ("object_name", ctypes.POINTER(_UnicodeString)),
+            ("attributes", wintypes.ULONG),
+            ("security_descriptor", wintypes.LPVOID),
+            ("security_quality_of_service", wintypes.LPVOID),
+        )
+
+    class _IoStatusBlock(ctypes.Structure):
+        _fields_ = (("status", wintypes.LPVOID), ("information", ctypes.c_size_t))
+
+    name_buffer = ctypes.create_unicode_buffer(name)
+    name_bytes = len(name.encode("utf-16-le"))
+    unicode_name = _UnicodeString(
+        length=name_bytes,
+        maximum_length=ctypes.sizeof(name_buffer),
+        buffer=ctypes.cast(name_buffer, wintypes.LPWSTR),
+    )
+    attributes = _ObjectAttributes(
+        length=ctypes.sizeof(_ObjectAttributes),
+        root_directory=parent_handle,
+        object_name=ctypes.pointer(unicode_name),
+        attributes=0x40,
+        security_descriptor=None,
+        security_quality_of_service=None,
+    )
+    status_block = _IoStatusBlock()
+    handle = wintypes.HANDLE()
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    create_file = ntdll.NtCreateFile
+    create_file.argtypes = (
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.ULONG,
+        ctypes.POINTER(_ObjectAttributes),
+        ctypes.POINTER(_IoStatusBlock),
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.LPVOID,
+        wintypes.ULONG,
+    )
+    create_file.restype = wintypes.LONG
+    status = create_file(
+        ctypes.byref(handle),
+        0x40000000 | 0x00010000 | 0x00100000 | 0x80,
+        ctypes.byref(attributes),
+        ctypes.byref(status_block),
+        None,
+        0x80,
+        0x1 | 0x2 | 0x4,
+        2,
+        0x40 | 0x20,
+        None,
+        0,
+    )
+    if status < 0 or handle.value is None:
+        raise OSError(f"native exclusive create failed: 0x{status & 0xFFFFFFFF:08x}")
+    return handle.value
+
+
+def _windows_write_handle(handle: int, content: bytes) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    write_file = kernel32.WriteFile
+    write_file.argtypes = (
+        wintypes.HANDLE,
+        wintypes.LPCVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    )
+    write_file.restype = wintypes.BOOL
+    offset = 0
+    while offset < len(content):
+        chunk = content[offset : offset + 1024 * 1024]
+        buffer = ctypes.create_string_buffer(chunk)
+        written = wintypes.DWORD()
+        if not write_file(handle, buffer, len(chunk), ctypes.byref(written), None):
+            raise OSError(ctypes.get_last_error(), "artifact write failed")
+        if written.value != len(chunk):
+            raise OSError("artifact write was incomplete")
+        offset += written.value
+    flush_file = kernel32.FlushFileBuffers
+    flush_file.argtypes = (wintypes.HANDLE,)
+    flush_file.restype = wintypes.BOOL
+    if not flush_file(handle):
+        raise OSError(ctypes.get_last_error(), "artifact flush failed")
+
+
+def _windows_path_identity(path: Path) -> tuple[int, int]:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(str(path), 0x80, 0x1 | 0x2 | 0x4, None, 3, 0, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise OSError(ctypes.get_last_error(), "file identity is unavailable")
     try:
-        if _file_identity_from_path(path) == identity:
-            path.unlink()
-    except OSError:
-        pass
+        return _windows_handle_identity(handle)
+    finally:
+        _close_windows_handle(handle)
+
+
+def _windows_rename_handle(
+    handle: int,
+    parent_handle: int,
+    destination_name: str,
+) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    encoded_name = destination_name.encode("utf-16-le")
+    name_code_units = len(encoded_name) // ctypes.sizeof(wintypes.WCHAR)
+
+    class _IoStatusBlock(ctypes.Structure):
+        _fields_ = (("status", wintypes.LPVOID), ("information", ctypes.c_size_t))
+
+    class _FileRenameInformation(ctypes.Structure):
+        _fields_ = (
+            ("replace_if_exists", wintypes.BOOLEAN),
+            ("root_directory", wintypes.HANDLE),
+            ("file_name_length", wintypes.DWORD),
+            ("file_name", wintypes.WCHAR * name_code_units),
+        )
+
+    information = _FileRenameInformation()
+    information.replace_if_exists = 1
+    information.root_directory = parent_handle
+    information.file_name_length = len(encoded_name)
+    information.file_name = destination_name
+    status_block = _IoStatusBlock()
+    ntdll = ctypes.WinDLL("ntdll")
+    set_information = ntdll.NtSetInformationFile
+    set_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(_IoStatusBlock),
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.c_int,
+    )
+    set_information.restype = wintypes.LONG
+    status = set_information(
+        handle,
+        ctypes.byref(status_block),
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+        10,
+    )
+    if status < 0:
+        raise OSError(f"native artifact replace failed: 0x{status & 0xFFFFFFFF:08x}")
+
+
+def _windows_dispose_handle(handle: int) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    class _FileDispositionInformation(ctypes.Structure):
+        _fields_ = (("delete_file", ctypes.c_ubyte),)
+
+    information = _FileDispositionInformation(delete_file=1)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    set_information = kernel32.SetFileInformationByHandle
+    set_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    )
+    set_information.restype = wintypes.BOOL
+    if not set_information(handle, 4, ctypes.byref(information), ctypes.sizeof(information)):
+        raise OSError(ctypes.get_last_error(), "owned temp cleanup failed")
+
+
+def _close_windows_handle(handle: int) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    if not close_handle(handle):
+        raise OSError(ctypes.get_last_error(), "file handle close failed")
+
+
+def _atomic_write_windows(
+    path: Path,
+    content: bytes,
+    *,
+    directory: _PinnedDirectoryHandle,
+    parent: Path,
+    temporary_name: str,
+    require_external: bool,
+    hooks: _AtomicWriteHooks,
+) -> None:
+    handle: int | None = None
+    replaced = False
+    try:
+        if directory.current_path() != parent:
+            raise ManifestCommandError("artifact write failed", exit_code=1)
+        handle = _windows_create_relative_file(directory.native_handle, temporary_name)
+        owned_identity = _windows_handle_identity(handle)
+        opened_path = _windows_handle_path(handle)
+        if _windows_handle_identity(directory.native_handle) != _directory_identity(
+            opened_path.parent
+        ) or (require_external and _is_repository_path(opened_path)):
+            raise ManifestCommandError("artifact write failed", exit_code=1)
+        _windows_write_handle(handle, content)
+        if hooks.before_replace is not None:
+            hooks.before_replace()
+        current_parent = directory.current_path()
+        current_temporary = current_parent / temporary_name
+        if (
+            current_parent != parent
+            or _windows_path_identity(current_temporary) != owned_identity
+            or (require_external and _is_repository_path(current_parent))
+        ):
+            raise ManifestCommandError("artifact write failed", exit_code=1)
+        _windows_rename_handle(handle, directory.native_handle, path.name)
+        replaced = True
+    finally:
+        if handle is not None:
+            try:
+                if not replaced:
+                    if hooks.before_cleanup is not None:
+                        hooks.before_cleanup()
+                    _windows_dispose_handle(handle)
+            finally:
+                _close_windows_handle(handle)
+
+
+def _posix_relative_identity(directory: int, name: str) -> tuple[int, int]:
+    status = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    return status.st_dev, status.st_ino
+
+
+def _posix_write_descriptor(descriptor: int, content: bytes) -> None:
+    offset = 0
+    while offset < len(content):
+        written = os.write(descriptor, content[offset:])
+        if written == 0:
+            raise OSError("artifact write was incomplete")
+        offset += written
+    os.fsync(descriptor)
+
+
+def _posix_cleanup_owned_file(
+    descriptor: int,
+    *,
+    directory: _PinnedDirectoryHandle,
+    owned_identity: tuple[int, int],
+    before_cleanup: Callable[[], None] | None,
+) -> None:
+    if before_cleanup is not None:
+        before_cleanup()
+    for _ in range(2):
+        try:
+            opened_path = _descriptor_path(descriptor)
+            if opened_path.parent != directory.current_path():
+                return
+            if (
+                _posix_relative_identity(directory.native_handle, opened_path.name)
+                != owned_identity
+            ):
+                return
+            if _descriptor_path(descriptor) != opened_path:
+                continue
+            os.unlink(opened_path.name, dir_fd=directory.native_handle)
+            return
+        except OSError:
+            return
+
+
+def _atomic_write_posix(
+    path: Path,
+    content: bytes,
+    *,
+    directory: _PinnedDirectoryHandle,
+    parent: Path,
+    temporary_name: str,
+    require_external: bool,
+    hooks: _AtomicWriteHooks,
+) -> None:
+    """Write relative to a pinned, operator-controlled directory descriptor."""
+    descriptor: int | None = None
+    replaced = False
+    owned_identity: tuple[int, int] | None = None
+    try:
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(
+            temporary_name,
+            flags,
+            0o666,
+            dir_fd=directory.native_handle,
+        )
+        status = os.fstat(descriptor)
+        owned_identity = status.st_dev, status.st_ino
+        opened_path = _descriptor_path(descriptor)
+        if opened_path.parent != directory.current_path() or (
+            require_external and _is_repository_path(opened_path)
+        ):
+            raise ManifestCommandError("artifact write failed", exit_code=1)
+        _posix_write_descriptor(descriptor, content)
+        if hooks.before_replace is not None:
+            hooks.before_replace()
+        current_parent = directory.current_path()
+        if (
+            current_parent != parent
+            or _posix_relative_identity(directory.native_handle, temporary_name) != owned_identity
+            or (require_external and _is_repository_path(current_parent))
+        ):
+            raise ManifestCommandError("artifact write failed", exit_code=1)
+        os.replace(
+            temporary_name,
+            path.name,
+            src_dir_fd=directory.native_handle,
+            dst_dir_fd=directory.native_handle,
+        )
+        replaced = True
+    finally:
+        if descriptor is not None:
+            try:
+                if not replaced and owned_identity is not None:
+                    _posix_cleanup_owned_file(
+                        descriptor,
+                        directory=directory,
+                        owned_identity=owned_identity,
+                        before_cleanup=hooks.before_cleanup,
+                    )
+            finally:
+                os.close(descriptor)
 
 
 def _atomic_write(
@@ -355,64 +731,38 @@ def _atomic_write(
     *,
     require_external: bool = False,
     expected_parent_identity: tuple[int, int] | None = None,
+    hooks: _AtomicWriteHooks | None = None,
 ) -> None:
+    hooks = hooks or _AtomicWriteHooks()
     temporary_name = f"{path.name}.{uuid4().hex}.tmp"
-    owned_identity: tuple[int, int] | None = None
-    opened_path: Path | None = None
-    cleanup_candidates: set[Path] = set()
     try:
         requested_parent = path.parent.resolve(strict=True)
-        with _pinned_directory(requested_parent) as (
-            pinned_parent_path,
-            parent_identity,
-        ):
-            try:
-                parent = pinned_parent_path()
-                if (
-                    parent != requested_parent
-                    or (
-                        expected_parent_identity is not None
-                        and parent_identity != expected_parent_identity
-                    )
-                    or (require_external and _is_repository_path(parent))
-                ):
-                    raise ManifestCommandError("artifact write failed", exit_code=1)
-                temporary = parent / temporary_name
-                cleanup_candidates.add(temporary)
-                with temporary.open("xb") as output:
-                    owned_identity = _file_identity_from_handle(output)
-                    opened_path = _opened_file_path(output)
-                    cleanup_candidates.add(opened_path)
-                    current_temporary = temporary.resolve(strict=True)
-                    if require_external and _is_repository_path(opened_path):
-                        raise ManifestCommandError("artifact write failed", exit_code=1)
-                    if (
-                        _directory_identity(opened_path.parent) != parent_identity
-                        or current_temporary != opened_path
-                        or _file_identity_from_path(current_temporary) != owned_identity
-                    ):
-                        raise ManifestCommandError("artifact write failed", exit_code=1)
-                    output.write(content)
-                    output.flush()
-                current_parent = pinned_parent_path()
-                current_temporary = current_parent / temporary_name
-                cleanup_candidates.add(current_temporary)
-                if (
-                    current_parent != parent
-                    or _directory_identity(current_parent) != parent_identity
-                    or (require_external and _is_repository_path(current_parent))
-                    or current_temporary.resolve(strict=True) != opened_path
-                    or _file_identity_from_path(current_temporary) != owned_identity
-                ):
-                    raise ManifestCommandError("artifact write failed", exit_code=1)
-                current_temporary.replace(current_parent / path.name)
-            finally:
-                try:
-                    cleanup_candidates.add(pinned_parent_path() / temporary_name)
-                except OSError:
-                    pass
-                for candidate in cleanup_candidates:
-                    _unlink_owned_path(candidate, owned_identity)
+        with _pinned_directory(requested_parent) as directory:
+            parent = directory.current_path()
+            parent_identity = directory.identity
+            if (
+                parent != requested_parent
+                or (
+                    expected_parent_identity is not None
+                    and parent_identity != expected_parent_identity
+                )
+                or (require_external and _is_repository_path(parent))
+            ):
+                raise ManifestCommandError("artifact write failed", exit_code=1)
+            if hooks.after_parent_pinned is not None:
+                hooks.after_parent_pinned()
+            if directory.current_path() != parent:
+                raise ManifestCommandError("artifact write failed", exit_code=1)
+            writer = _atomic_write_windows if os.name == "nt" else _atomic_write_posix
+            writer(
+                path,
+                content,
+                directory=directory,
+                parent=parent,
+                temporary_name=temporary_name,
+                require_external=require_external,
+                hooks=hooks,
+            )
     except ManifestCommandError:
         raise
     except OSError as error:
