@@ -419,6 +419,46 @@ def test_missing_similarity_capability_is_reported_fail_closed(session: Session)
     assert finding.company_ids == (COMPANY_A,)
 
 
+def test_alias_only_identity_sources_report_missing_similarity_fail_closed(
+    session: Session,
+) -> None:
+    session.add(
+        CompanyAlias(
+            company_id=ORPHAN_COMPANY,
+            alias="Orphan Similarity Source",
+            normalized_alias="orphansimilaritysource",
+        )
+    )
+    session.commit()
+    service = CompanyIdentityAuditService(
+        session, DeterministicAuditRepository(session, similarity_available=False)
+    )
+
+    first = service.build()
+    second = service.build()
+
+    assert second.model_dump_json() == first.model_dump_json()
+    assert (
+        first.scanned_companies,
+        first.scanned_aliases,
+        first.scanned_review_items,
+    ) == (0, 1, 0)
+    assert first.finding_counts == {
+        IdentityAuditSeverity.CRITICAL: 0,
+        IdentityAuditSeverity.IMPORTANT: 2,
+        IdentityAuditSeverity.MINOR: 0,
+    }
+    assert [finding.code for finding in first.findings] == [
+        "orphan_alias",
+        "similarity_search_unavailable",
+    ]
+    unavailable = first.findings[1]
+    assert unavailable.severity is IdentityAuditSeverity.IMPORTANT
+    assert unavailable.company_ids == (ORPHAN_COMPANY,)
+
+
+# Pending review rows retain reasons, not prior exact-owner UUID sets. These tests
+# cover only current ownership/cardinality changes that those reasons can prove.
 def test_unchanged_ambiguous_exact_pending_review_is_not_called_owner_changed(
     session: Session,
 ) -> None:

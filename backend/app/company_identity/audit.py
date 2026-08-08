@@ -142,7 +142,12 @@ class _FilingRow:
 
 
 class CompanyIdentityAuditService:
-    """Build a stable public report without changing database or ORM state."""
+    """Build a stable public report without changing database or ORM state.
+
+    Pending-review findings cover only new current-owner conflicts or cardinality
+    changes provable from persisted review reasons. They do not reconstruct arbitrary
+    historical owner UUID transitions.
+    """
 
     def __init__(self, session: Session, repository: CompanyIdentityRepository) -> None:
         self._session = session
@@ -247,6 +252,9 @@ class CompanyIdentityAuditService:
             )
 
             name_owners = _name_owners(company_rows, alias_rows)
+            identity_owner_ids = frozenset(
+                owner_id for owner_ids in name_owners.values() for owner_id in owner_ids
+            )
             pending_names = {
                 name
                 for pending_row in pending_rows
@@ -316,11 +324,11 @@ class CompanyIdentityAuditService:
                 display_names_by_company=cluster_display_by_company,
             )
 
-        if company_rows and not similarity_available:
+        if name_owners and not similarity_available:
             _append_specs(
                 specs,
                 code="similarity_search_unavailable",
-                company_ids=company_ids,
+                company_ids=identity_owner_ids,
                 identity_key="repository_capability",
                 display_names=(),
                 evidence_codes=("similarity_capability",),
