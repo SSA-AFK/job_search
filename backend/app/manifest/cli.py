@@ -22,6 +22,18 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.company_identity.cli import (
+    company_identity_audit_payload,
+    identity_review_apply_payload,
+    identity_review_export_payload,
+)
+from app.company_identity.contracts import IdentityReviewDecisionInput
+from app.company_identity.repository import SqlAlchemyCompanyIdentityRepository
+from app.company_identity.service import (
+    IdentityOwnerChanged,
+    IdentityReviewConflict,
+    IdentitySearchUnavailable,
+)
 from app.manifest.candidates import (
     CandidateEvidenceConflict,
     UnregisteredSourceError,
@@ -112,6 +124,15 @@ def _parser() -> argparse.ArgumentParser:
     review_apply = commands.add_parser("review-apply")
     review_apply.add_argument("decisions", type=Path)
 
+    identity_review_export = commands.add_parser("identity-review-export")
+    identity_review_export.add_argument("output", type=Path)
+
+    identity_review_apply = commands.add_parser("identity-review-apply")
+    identity_review_apply.add_argument("decisions", type=Path)
+
+    company_identity_audit = commands.add_parser("company-identity-audit")
+    company_identity_audit.add_argument("output", type=Path)
+
     manifest_freeze = commands.add_parser("manifest-freeze")
     manifest_freeze.add_argument("--manifest-out", type=Path, required=True)
     manifest_freeze.add_argument("--quota-out", type=Path, required=True)
@@ -182,9 +203,11 @@ def _atomic_write(path: Path, content: bytes) -> None:
 
 def _read_bounded(path: Path, *, error_message: str) -> bytes:
     try:
-        if path.stat().st_size > _MAX_INPUT_BYTES:
+        with path.open("rb") as input_file:
+            content = input_file.read(_MAX_INPUT_BYTES + 1)
+        if len(content) > _MAX_INPUT_BYTES:
             raise ManifestCommandError(error_message)
-        return path.read_bytes()
+        return content
     except ManifestCommandError:
         raise
     except OSError as error:
@@ -238,6 +261,29 @@ def _require_external_candidate_path(path: Path) -> Path:
     return resolved
 
 
+def _require_external_identity_input(path: Path) -> Path:
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise ManifestCommandError("identity review input is invalid") from error
+    if resolved.is_relative_to(_REPOSITORY_ROOT):
+        raise ManifestCommandError("identity work path must be outside repository")
+    return resolved
+
+
+def _require_external_identity_output(path: Path) -> Path:
+    try:
+        if path.exists() or path.is_symlink():
+            resolved = path.resolve(strict=True)
+        else:
+            resolved = path.parent.resolve(strict=True) / path.name
+    except OSError as error:
+        raise ManifestCommandError("identity output is invalid") from error
+    if resolved.is_relative_to(_REPOSITORY_ROOT):
+        raise ManifestCommandError("identity work path must be outside repository")
+    return resolved
+
+
 def _candidate_facts(path: Path) -> tuple[CandidateFactInput, ...]:
     content = _read_bounded(path, error_message="candidate input is invalid")
     try:
@@ -263,6 +309,19 @@ def _review_decisions(path: Path) -> tuple[ReviewDecisionInput, ...]:
         return tuple(ReviewDecisionInput.model_validate(value) for value in payload)
     except (TypeError, ValueError, ValidationError) as error:
         raise ManifestCommandError("review input is invalid") from error
+
+
+def _identity_review_decisions(path: Path) -> tuple[IdentityReviewDecisionInput, ...]:
+    content = _read_bounded(path, error_message="identity review input is invalid")
+    try:
+        payload = json.loads(content.decode("utf-8"))
+        if not isinstance(payload, list):
+            raise TypeError("identity review input must be an array")
+        return tuple(
+            IdentityReviewDecisionInput.model_validate(value) for value in payload
+        )
+    except (TypeError, UnicodeError, ValueError, ValidationError) as error:
+        raise ManifestCommandError("identity review input is invalid") from error
 
 
 def _registry_check(args: argparse.Namespace) -> dict[str, object]:
@@ -304,6 +363,37 @@ def _review_apply(args: argparse.Namespace) -> dict[str, object]:
     with SessionLocal() as session:
         summary = apply_review_decisions(session, decisions)
     return {"applied": summary.applied, "replayed": summary.replayed}
+
+
+def _identity_review_export(args: argparse.Namespace) -> dict[str, object]:
+    _load_settings()
+    output = _require_external_identity_output(args.output)
+    SessionLocal = _session_factory()
+    with SessionLocal() as session:
+        items = identity_review_export_payload(session)
+    _atomic_write(output, _json_bytes(items))
+    return {"exported": len(items), "output": output.name}
+
+
+def _identity_review_apply(args: argparse.Namespace) -> dict[str, object]:
+    _load_settings()
+    decisions_path = _require_external_identity_input(args.decisions)
+    decisions = _identity_review_decisions(decisions_path)
+    SessionLocal = _session_factory()
+    with SessionLocal() as session:
+        summary = identity_review_apply_payload(session, decisions)
+    return {"applied": summary.applied, "replayed": summary.replayed}
+
+
+def _company_identity_audit(args: argparse.Namespace) -> dict[str, object]:
+    _load_settings()
+    output = _require_external_identity_output(args.output)
+    SessionLocal = _session_factory()
+    with SessionLocal() as session:
+        repository = SqlAlchemyCompanyIdentityRepository(session)
+        report = company_identity_audit_payload(session, repository)
+    _atomic_write(output, _json_bytes(report))
+    return {"findings": len(report.findings), "output": output.name}
 
 
 def _manifest_freeze(args: argparse.Namespace) -> dict[str, object]:
@@ -796,6 +886,9 @@ _COMMANDS = {
     "candidate-import": _candidate_import,
     "review-export": _review_export,
     "review-apply": _review_apply,
+    "identity-review-export": _identity_review_export,
+    "identity-review-apply": _identity_review_apply,
+    "company-identity-audit": _company_identity_audit,
     "manifest-freeze": _manifest_freeze,
     "discover": _discover,
     "report": _report,
@@ -815,11 +908,16 @@ def main() -> int:
         ManifestFreezeError,
         ManifestReportError,
         ReviewDecisionConflict,
+        IdentityOwnerChanged,
+        IdentityReviewConflict,
         SourceRegistryError,
         UnregisteredSourceError,
     ) as error:
         print(f"manifest command failed: {error}", file=sys.stderr)
         return 2
+    except IdentitySearchUnavailable:
+        print("manifest command failed: database unavailable", file=sys.stderr)
+        return 1
     except (OSError, SQLAlchemyError):
         print("manifest command failed: database unavailable", file=sys.stderr)
         return 1

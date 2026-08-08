@@ -102,6 +102,43 @@ def assert_sorted_json_object(stdout: str) -> dict[str, object]:
     return payload
 
 
+@pytest.mark.parametrize(
+    ("arguments", "command"),
+    (
+        (["identity-review-export", "reviews.json"], "identity-review-export"),
+        (["identity-review-apply", "decisions.json"], "identity-review-apply"),
+        (["company-identity-audit", "audit.json"], "company-identity-audit"),
+    ),
+)
+def test_parser_registers_company_identity_commands(
+    arguments: list[str], command: str
+) -> None:
+    parsed = manifest_cli._parser().parse_args(arguments)
+
+    assert parsed.command == command
+
+
+def test_bounded_read_rejects_growth_after_an_understated_stat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "growing-input.json"
+    path.write_bytes(b"x" * (manifest_cli._MAX_INPUT_BYTES + 1))
+    real_stat = Path.stat
+
+    class _UnderstatedStat:
+        st_size = 0
+
+    def understated_stat(candidate: Path, *args: object, **kwargs: object) -> object:
+        if candidate == path:
+            return _UnderstatedStat()
+        return real_stat(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", understated_stat)
+
+    with pytest.raises(manifest_cli.ManifestCommandError, match="input is invalid"):
+        manifest_cli._read_bounded(path, error_message="input is invalid")
+
+
 def _candidate(**overrides: object) -> dict[str, object]:
     value: dict[str, object] = {
         "source_id": "official_list",
