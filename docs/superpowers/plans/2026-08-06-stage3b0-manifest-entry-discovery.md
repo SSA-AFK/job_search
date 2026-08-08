@@ -727,7 +727,7 @@ git commit -m "feat: add manifest discovery commands"
 
 ### Company Identity Resolution Hardening Gate Before Task 10
 
-The approved execution baseline was the user override `5d6f2cf`; the mandatory final whole-branch review remains `2143f8f..HEAD`. Implemented commits are Task 1 `64d1a3e`, `2427ecf`; Task 2 `104ef3d`, `23de812`; Task 3 `906d3b4`, `7d7415a`, `bab4ab9`, `ff922fc`, `d7730ae`; Task 4 `b0890fd`, `6ef0235`, `53792cd`; Task 5 `cb2c0b6`, `d9d98d1`, `ca01958`; Task 6 `ad1ddb9`, `99c4cb4`; Task 7 `c4ec697`, `4efb39b`, `249c32d`; and Task 8 gate repair `5464a92`, `8153f64`, `2f71395`. All three repair commits passed independent review.
+The approved execution baseline was the user override `5d6f2cf`; the mandatory final whole-branch review remains `2143f8f..HEAD`. Implemented commits are Task 1 `64d1a3e`, `2427ecf`; Task 2 `104ef3d`, `23de812`; Task 3 `906d3b4`, `7d7415a`, `bab4ab9`, `ff922fc`, `d7730ae`; Task 4 `b0890fd`, `6ef0235`, `53792cd`; Task 5 `cb2c0b6`, `d9d98d1`, `ca01958`; Task 6 `ad1ddb9`, `99c4cb4`; Task 7 `c4ec697`, `4efb39b`, `249c32d`; Task 8 offline-gate repair `5464a92`, `8153f64`, `2f71395`; and Task 8 PostgreSQL/performance gate closure `c5de19b` (stabilize the `pg_trgm` extension schema), `97e2478` (cover schema edge cases), `1e0f5ea` (repair the benchmark harness), and `f5e1ab5` (enforce the exact company count). All three offline repair commits passed independent review.
 
 The migration sequence is `0008_gate1_manifest_discovery`, `0009_company_identity_review`, `0010_job_details`, and `0011_coverage_query_indexes`. No obsolete numbering remains valid.
 
@@ -841,11 +841,80 @@ python -m pytest -q
 python -m pytest -m performance -q
 python -m ruff check app tests alembic
 python -m mypy app
+Set-Location (git rev-parse --show-toplevel)
 git diff --check
-git grep -n -I -E "(postgres(ql)?|redis)://[^[:space:]]+:[^[:space:]]+@|sk-[A-Za-z0-9_-]{12,}" -- . ":(exclude)66.md" ":(exclude)test.env"
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+$expected = @(
+    [pscustomobject]@{ Path = '.agents/skills/subagent-driven-development/SKILL.md'; Line = 57; Sha256 = '8de105e3bd07359ea603d72d5c6cec36480c7db49258606292d16376d4c2e7f2' }
+    [pscustomobject]@{ Path = '.agents/skills/subagent-driven-development/SKILL.md'; Line = 84; Sha256 = '3f608c056a6083f751e877730521334b08330c2edf7e2d8495bea612073d68b4' }
+    [pscustomobject]@{ Path = '.agents/skills/subagent-driven-development/SKILL.md'; Line = 85; Sha256 = 'b84c521a3403fe31c687e7d95e63017eacbfb08839f05d63cb8b6ae733373d7b' }
+    [pscustomobject]@{ Path = '.agents/skills/subagent-driven-development/SKILL.md'; Line = 300; Sha256 = 'ba8434c8179a46144aa389d9d2dfad302e4fa20b34f74aa9b6582b971787f00a' }
+    [pscustomobject]@{ Path = 'backend/tests/company_identity/test_cli.py'; Line = 436; Sha256 = '3413a723213180695b84a3b7b43b96e164b6a54c9f54788433ec2643aa80d0f8' }
+    [pscustomobject]@{ Path = 'backend/tests/manifest/test_reporting.py'; Line = 263; Sha256 = 'aea4bf9f6063bf94a2d3c373aad60cfc383d45415bc73da5f502b44780b916bb' }
+)
+$gitPattern = '(postgres(ql)?|redis)://[^[:space:]]+:[^[:space:]]+@|sk-[A-Za-z0-9_-]{12,}'
+$dotNetPattern = [regex]'(?i)(?:postgres(?:ql)?|redis)://[^\s]+:[^\s]+@|sk-[A-Za-z0-9_-]{12,}'
+
+function Get-SecretMetadata {
+    param([string[]]$Paths)
+
+    $results = [System.Collections.Generic.List[object]]::new()
+    foreach ($path in @($Paths)) {
+        $lines = @(Get-Content -LiteralPath $path -Encoding utf8)
+        for ($index = 0; $index -lt $lines.Count; $index++) {
+            $line = $lines[$index]
+            if (-not $dotNetPattern.IsMatch($line)) { continue }
+
+            $sha256 = [System.Security.Cryptography.SHA256]::Create()
+            try {
+                $digest = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($line))
+            }
+            finally {
+                $sha256.Dispose()
+            }
+            $hash = ([System.BitConverter]::ToString($digest)).Replace('-', '').ToLowerInvariant()
+            $null = $results.Add([pscustomobject]@{
+                Path = $path
+                Line = $index + 1
+                Sha256 = $hash
+            })
+        }
+    }
+    return $results
+}
+
+$matchedFiles = @(git grep -l -I -E $gitPattern -- . ':(exclude)66.md' ':(exclude)test.env' 2>$null)
+$grepStatus = $LASTEXITCODE
+if ($grepStatus -gt 1) { throw "tracked secret scan failed with exit code $grepStatus" }
+$actual = @(Get-SecretMetadata -Paths $matchedFiles)
+$expectedCanonical = ($expected | Sort-Object Path, Line | ForEach-Object { "$($_.Path)`t$($_.Line)`t$($_.Sha256)" }) -join "`n"
+$actualCanonical = ($actual | Sort-Object Path, Line | ForEach-Object { "$($_.Path)`t$($_.Line)`t$($_.Sha256)" }) -join "`n"
+if ($actualCanonical -cne $expectedCanonical) {
+    Write-Error "Approved secret baseline mismatch: expected $($expected.Count) metadata entries, found $($actual.Count); review path/line/SHA-256 only."
+    exit 1
+}
+Write-Output "Approved secret baseline verified: $($actual.Count) metadata entries."
+
+$changedPaths = @(git diff --name-only 9df90a6 HEAD -- . ':(exclude)66.md' ':(exclude)test.env')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$changedPaths = @($changedPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+$changedMatchFiles = @()
+if ($changedPaths.Count -gt 0) {
+    $changedMatchFiles = @(git grep -l -I -E $gitPattern -- $changedPaths 2>$null)
+    $grepStatus = $LASTEXITCODE
+    if ($grepStatus -gt 1) { throw "changed-range secret scan failed with exit code $grepStatus" }
+}
+$changedMetadata = @(Get-SecretMetadata -Paths $changedMatchFiles)
+if ($changedMetadata.Count -ne 0) {
+    Write-Error "Changed-range secret scan found $($changedMetadata.Count) metadata entries; expected zero."
+    exit 1
+}
+Write-Output 'Changed-range secret scan verified: zero metadata entries.'
+$global:LASTEXITCODE = 0
 ```
 
-Expected: all suites/checks PASS and the tracked-file secret scan prints nothing. Task 10 additionally requires the isolated PostgreSQL migration/service marker and the exact 10,000-company `performance and postgresql` marker to pass with zero skips, followed by test-owned validation of zero residual schemas without `CASCADE`. Run the dedicated local read-only company identity audit and require zero unresolved Critical/Important findings before any real candidate import or live discovery. The `2143f8f..HEAD` whole-branch review must also be clean; none of these requirements is optional when local configuration is absent.
+Expected: all suites/checks PASS; the tracked-file validation compares exactly the approved six path/line/SHA-256 metadata entries and returns nonzero for any addition, removal, move, or hash change without printing a matching value; and the `9df90a6..HEAD` changed-range scan reports zero metadata entries. Task 10 additionally requires the isolated PostgreSQL migration/service marker and the exact 10,000-company `performance and postgresql` marker to pass with zero skips, followed by test-owned validation of zero residual schemas without `CASCADE`. Run the dedicated local read-only company identity audit and require zero unresolved Critical/Important findings before any real candidate import or live discovery. The `2143f8f..HEAD` whole-branch review must also be clean; none of these requirements is optional when local configuration is absent.
 
 - [ ] **Step 7: Review and commit Stage 3B0 artifacts and roadmap status**
 

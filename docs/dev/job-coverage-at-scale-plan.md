@@ -271,6 +271,7 @@ Tasks 1–7 均已完成。Task 7 及全分支最终审阅在 round 4/5 后得�
 - Task 6 read-only audit：`ad1ddb9`、`99c4cb4`；
 - Task 7 operator CLI 与 atomic output hardening：`c4ec697`、`4efb39b`、`249c32d`。
 - Task 8 offline-gate repair：`5464a92`（保留备案号原始展示值）、`8153f64`（规范化备案 identity 唯一性与迁移 preflight）、`2f71395`（显式捕获 intentional serializer warning）。
+- Task 8 PostgreSQL/performance gate closure：`c5de19b`（稳定 `pg_trgm` extension schema）、`97e2478`（覆盖 `pg_trgm` schema edge cases）、`1e0f5ea`（修复 PostgreSQL benchmark harness）、`f5e1ab5`（强制精确 performance company count）。
 
 迁移编号固定为 `0008_gate1_manifest_discovery`、`0009_company_identity_review`、`0010_job_details`、`0011_coverage_query_indexes`；不得保留任何旧编号。
 

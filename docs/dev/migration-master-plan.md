@@ -173,7 +173,7 @@ Task 7 及全分支最终审阅在 round 4/5 后得到 specification PASS 和 qu
 
 ### Company Identity Resolution Hardening 状态（2026-08-08）
 
-用户覆盖指定的获批执行基线为 `5d6f2cf`；最终 whole-branch review 仍以 `2143f8f..HEAD` 为范围。实现提交按任务为：Task 1 `64d1a3e`、`2427ecf`；Task 2 `104ef3d`、`23de812`；Task 3 `906d3b4`、`7d7415a`、`bab4ab9`、`ff922fc`、`d7730ae`；Task 4 `b0890fd`、`6ef0235`、`53792cd`；Task 5 `cb2c0b6`、`d9d98d1`、`ca01958`；Task 6 `ad1ddb9`、`99c4cb4`；Task 7 `c4ec697`、`4efb39b`、`249c32d`；Task 8 gate repair `5464a92`、`8153f64`、`2f71395`，三项修复均已独立 review clean。
+用户覆盖指定的获批执行基线为 `5d6f2cf`；最终 whole-branch review 仍以 `2143f8f..HEAD` 为范围。实现提交按任务为：Task 1 `64d1a3e`、`2427ecf`；Task 2 `104ef3d`、`23de812`；Task 3 `906d3b4`、`7d7415a`、`bab4ab9`、`ff922fc`、`d7730ae`；Task 4 `b0890fd`、`6ef0235`、`53792cd`；Task 5 `cb2c0b6`、`d9d98d1`、`ca01958`；Task 6 `ad1ddb9`、`99c4cb4`；Task 7 `c4ec697`、`4efb39b`、`249c32d`；Task 8 offline-gate repair `5464a92`、`8153f64`、`2f71395`；Task 8 PostgreSQL/performance gate closure `c5de19b`（稳定 `pg_trgm` extension schema）、`97e2478`（覆盖 schema edge cases）、`1e0f5ea`（修复 benchmark harness）、`f5e1ab5`（强制精确 company count）。前三项 offline repair 均已独立 review clean。
 
 Task 6 audit categories 固定为：Critical `cross_table_name_owner`、`shared_website_identity`、`incompatible_recruitment_identities`、`audit_findings_truncated`；Important `accepted_candidate_name_unrepresented`、`fuzzy_name_cluster`、`orphan_alias`、`pending_review_owner_changed`、`similarity_search_unavailable`；Minor `canonical_name_normalized_drift`、`alias_normalized_drift`、`filing_number_normalized_drift`、`website_normalized_drift`。人工裁定保留窄 pending-owner 语义，只报告可证明的新当前所有权或基数变化，不增加 prior exact-owner UUID schema。Task 7 人工裁定把 POSIX output directory 作为可信 operator-controlled boundary；Windows 保持 pinned native-handle 保护，POSIX 同权限 writer 的 syscall 间竞态是明确剩余风险。
 
