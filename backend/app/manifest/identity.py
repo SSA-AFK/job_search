@@ -7,13 +7,16 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
+from typing import Protocol
 from urllib.parse import parse_qs, urlsplit, urlunsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from rapidfuzz import fuzz
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, or_, select, text
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import InstrumentedAttribute
 
+from app.company_identity.repository import SqlAlchemyCompanyIdentityRepository
 from app.core.normalization import normalize_name, normalize_url
 from app.manifest.contracts import (
     AiCategory,
@@ -60,6 +63,9 @@ class ReviewSummary:
 
 
 _FUZZY_REVIEW_THRESHOLD = 90
+_MAX_SIMILARITY_CANDIDATES = 20
+_MAX_CONTEXT_ROWS = 100
+_EXACT_NAME_QUERY_CHUNK = 500
 _SHARED_ATS_TENANT_PATH_HOSTS = frozenset(
     {
         "apply.workable.com",
@@ -84,6 +90,119 @@ class _RecruitmentEvidence:
 
 _NO_RECRUITMENT_EVIDENCE = _RecruitmentEvidence(identity=None, ambiguous=False)
 _AMBIGUOUS_RECRUITMENT_EVIDENCE = _RecruitmentEvidence(identity=None, ambiguous=True)
+
+
+class _ManifestIdentitySimilarity(Protocol):
+    available: bool
+
+    def candidate_review_indexes(
+        self,
+        facts: tuple[CandidateFact, ...],
+        groups: tuple[tuple[int, ...], ...],
+    ) -> frozenset[int]: ...
+
+    def existing_owner_ids(self, names: frozenset[str]) -> set[UUID]: ...
+
+
+class _PostgreSQLManifestIdentitySimilarity:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+        self._repository = SqlAlchemyCompanyIdentityRepository(
+            session,
+            similarity_limit=_MAX_SIMILARITY_CANDIDATES,
+        )
+
+    @property
+    def available(self) -> bool:
+        return self._repository.similarity_search_available()
+
+    def candidate_review_indexes(
+        self,
+        facts: tuple[CandidateFact, ...],
+        groups: tuple[tuple[int, ...], ...],
+    ) -> frozenset[int]:
+        if not self.available or len(groups) < 2:
+            return frozenset()
+
+        rows = tuple(
+            sorted(
+                {
+                    (group_index, name)
+                    for group_index, group in enumerate(groups)
+                    for fact_index in group
+                    for name in _identity_names(facts[fact_index])
+                }
+            )
+        )
+        if not rows:
+            return frozenset()
+
+        table_name = f"_mic_{uuid4().hex}"
+        index_name = f"ix_{table_name}_trgm"
+        self._session.execute(
+            text(
+                f"CREATE TEMPORARY TABLE {table_name} ("
+                "group_index integer NOT NULL, normalized_name text NOT NULL, "
+                "PRIMARY KEY (group_index, normalized_name)) ON COMMIT DROP"
+            )
+        )
+        self._session.execute(
+            text(
+                f"INSERT INTO pg_temp.{table_name} "
+                "(group_index, normalized_name) "
+                "VALUES (:group_index, :normalized_name)"
+            ),
+            [
+                {"group_index": group_index, "normalized_name": name}
+                for group_index, name in rows
+            ],
+        )
+        self._session.execute(
+            text(
+                f"CREATE INDEX {index_name} ON pg_temp.{table_name} "
+                "USING gist (normalized_name public.gist_trgm_ops)"
+            )
+        )
+        self._session.execute(text(f"ANALYZE pg_temp.{table_name}"))
+        recalled = self._session.execute(
+            text(
+                "SELECT source.group_index AS source_group_index, "
+                "source.normalized_name AS source_name, "
+                "neighbor.group_index AS neighbor_group_index, "
+                "neighbor.normalized_name AS neighbor_name "
+                f"FROM pg_temp.{table_name} AS source "
+                "JOIN LATERAL ("
+                "SELECT target.group_index, target.normalized_name "
+                f"FROM pg_temp.{table_name} AS target "
+                "WHERE target.group_index <> source.group_index "
+                "ORDER BY target.normalized_name <-> source.normalized_name, "
+                "target.normalized_name, target.group_index LIMIT 20"
+                ") AS neighbor ON TRUE "
+                "ORDER BY source.group_index, source.normalized_name, "
+                "neighbor.normalized_name, neighbor.group_index"
+            )
+        )
+
+        review_groups: set[int] = set()
+        for row in recalled:
+            if fuzz.ratio(row.source_name, row.neighbor_name) >= _FUZZY_REVIEW_THRESHOLD:
+                review_groups.update((row.source_group_index, row.neighbor_group_index))
+        return frozenset(
+            fact_index
+            for group_index in review_groups
+            for fact_index in groups[group_index]
+        )
+
+    def existing_owner_ids(self, names: frozenset[str]) -> set[UUID]:
+        if not self.available:
+            return set()
+        return {
+            match.company_id
+            for match in self._repository.find_similar_names_sync(
+                names,
+                limit=_MAX_SIMILARITY_CANDIDATES,
+            )
+        }
 
 
 @contextmanager
@@ -181,11 +300,7 @@ def _identity_names(fact: CandidateFact) -> frozenset[str]:
 
 
 def _identity_keys(fact: CandidateFact) -> frozenset[str]:
-    keys = {f"name:{name}" for name in _identity_names(fact)}
-    recruitment_identity = _recruitment_identity(fact.recruitment_url)
-    if recruitment_identity is not None:
-        keys.add(f"recruitment:{recruitment_identity}")
-    return frozenset(keys)
+    return frozenset(f"name:{name}" for name in _identity_names(fact))
 
 
 class _DisjointSet:
@@ -224,24 +339,26 @@ def _exact_groups(facts: tuple[CandidateFact, ...]) -> tuple[tuple[int, ...], ..
     )
 
 
-def _fuzzy_review_indexes(
+def _recruitment_review_indexes(
     facts: tuple[CandidateFact, ...], groups: tuple[tuple[int, ...], ...]
 ) -> frozenset[int]:
-    names_by_group = [
-        frozenset(name for index in group for name in _identity_names(facts[index]))
-        for group in groups
-    ]
-    review_indexes: set[int] = set()
-    for left_position, left_group in enumerate(groups):
-        for right_position in range(left_position + 1, len(groups)):
-            if any(
-                fuzz.ratio(left_name, right_name) >= _FUZZY_REVIEW_THRESHOLD
-                for left_name in names_by_group[left_position]
-                for right_name in names_by_group[right_position]
-            ):
-                review_indexes.update(left_group)
-                review_indexes.update(groups[right_position])
-    return frozenset(review_indexes)
+    group_indexes_by_identity: dict[str, set[int]] = {}
+    for group_index, group in enumerate(groups):
+        for fact_index in group:
+            identity = _recruitment_identity(facts[fact_index].recruitment_url)
+            if identity is not None:
+                group_indexes_by_identity.setdefault(identity, set()).add(group_index)
+    conflicting_groups = {
+        group_index
+        for group_indexes in group_indexes_by_identity.values()
+        if len(group_indexes) > 1
+        for group_index in group_indexes
+    }
+    return frozenset(
+        fact_index
+        for group_index in conflicting_groups
+        for fact_index in groups[group_index]
+    )
 
 
 def _has_separable_recruiting_inventories(
@@ -274,69 +391,155 @@ def _has_ambiguous_recruitment_evidence(
     )
 
 
-def _name_owners(
-    companies: Sequence[Company], aliases: Sequence[CompanyAlias]
+def _exact_name_owners(
+    repository: SqlAlchemyCompanyIdentityRepository,
+    names: frozenset[str],
 ) -> dict[str, set[UUID]]:
     owners: dict[str, set[UUID]] = {}
-    for company in companies:
-        owners.setdefault(company.normalized_name, set()).add(company.id)
-    for alias in aliases:
-        owners.setdefault(alias.normalized_alias, set()).add(alias.company_id)
+    ordered_names = sorted(names)
+    for offset in range(0, len(ordered_names), _EXACT_NAME_QUERY_CHUNK):
+        chunk = frozenset(ordered_names[offset : offset + _EXACT_NAME_QUERY_CHUNK])
+        for owner in repository.find_exact_name_owners_sync(chunk):
+            owners.setdefault(owner.normalized_name, set()).add(owner.company_id)
     return owners
 
 
-def _recruitment_owners(entries: Sequence[JobEntry]) -> dict[str, set[UUID]]:
-    owners: dict[str, set[UUID]] = {}
-    for entry in entries:
-        identity = _recruitment_identity(entry.normalized_url)
-        if identity is not None:
-            owners.setdefault(identity, set()).add(entry.company_id)
-    return owners
+def _recruitment_url_predicate(
+    column: InstrumentedAttribute[str | None] | ColumnElement[str | None],
+    value: str,
+) -> tuple[str, ColumnElement[bool]] | None:
+    evidence = _recruitment_evidence(value)
+    normalized = _normalized_url(value)
+    if evidence.identity is None or normalized is None:
+        return None
+    if evidence.identity.startswith("url:"):
+        return evidence.identity, column == normalized
+
+    parts = urlsplit(normalized)
+    path_parts = tuple(part for part in parts.path.split("/") if part)
+    if parts.hostname in _GREENHOUSE_HOSTS and path_parts[:1] == ("embed",):
+        tenant = evidence.identity.rsplit(":", 1)[-1]
+        prefix_path = f"/{tenant}"
+    elif parts.hostname is not None and parts.hostname.endswith(".myworkdaysite.com"):
+        prefix_path = "/" + "/".join(path_parts[:2])
+    elif parts.hostname is not None and parts.hostname.endswith(".myworkdayjobs.com"):
+        prefix_path = "/"
+    else:
+        prefix_path = "/" + "/".join(path_parts[:1])
+    prefix = urlunsplit((parts.scheme, parts.netloc, prefix_path, "", ""))
+    return evidence.identity, or_(column == normalized, column.like(f"{prefix}%"))
+
+
+def _targeted_recruitment_owner_ids(
+    session: Session,
+    facts: Sequence[CandidateFact],
+) -> set[UUID] | None:
+    predicates_by_identity: dict[str, list[ColumnElement[bool]]] = {}
+    accepted_predicates_by_identity: dict[str, list[ColumnElement[bool]]] = {}
+    for fact in facts:
+        if fact.recruitment_url is None:
+            continue
+        job_predicate = _recruitment_url_predicate(
+            JobEntry.normalized_url,
+            fact.recruitment_url,
+        )
+        accepted_predicate = _recruitment_url_predicate(
+            CandidateFact.recruitment_url,
+            fact.recruitment_url,
+        )
+        if job_predicate is not None:
+            identity, predicate = job_predicate
+            predicates_by_identity.setdefault(identity, []).append(predicate)
+        if accepted_predicate is not None:
+            identity, predicate = accepted_predicate
+            accepted_predicates_by_identity.setdefault(identity, []).append(predicate)
+
+    owner_ids: set[UUID] = set()
+    for identity in sorted(set(predicates_by_identity) | set(accepted_predicates_by_identity)):
+        job_rows = tuple(
+            session.execute(
+                select(JobEntry.company_id, JobEntry.normalized_url)
+                .where(or_(*predicates_by_identity.get(identity, ())))
+                .order_by(JobEntry.company_id, JobEntry.id)
+                .limit(_MAX_CONTEXT_ROWS + 1)
+            )
+        ) if identity in predicates_by_identity else ()
+        accepted_rows = tuple(
+            session.execute(
+                select(CandidateFact.company_id, CandidateFact.recruitment_url)
+                .where(
+                    CandidateFact.decision_status == CandidateDecisionStatus.ACCEPTED,
+                    CandidateFact.company_id.is_not(None),
+                    or_(*accepted_predicates_by_identity.get(identity, ())),
+                )
+                .order_by(CandidateFact.company_id, CandidateFact.id)
+                .limit(_MAX_CONTEXT_ROWS + 1)
+            )
+        ) if identity in accepted_predicates_by_identity else ()
+        if len(job_rows) > _MAX_CONTEXT_ROWS or len(accepted_rows) > _MAX_CONTEXT_ROWS:
+            return None
+        owner_ids.update(
+            row.company_id
+            for row in job_rows
+            if _recruitment_identity(row.normalized_url) == identity
+        )
+        owner_ids.update(
+            row.company_id
+            for row in accepted_rows
+            if row.company_id is not None
+            and _recruitment_identity(row.recruitment_url) == identity
+        )
+    return owner_ids
 
 
 def _fact_owner_ids(
     fact: CandidateFact,
     name_owners: dict[str, set[UUID]],
-    recruitment_owners: dict[str, set[UUID]],
 ) -> set[UUID]:
-    owners = {
+    return {
         company_id
         for name in _identity_names(fact)
         for company_id in name_owners.get(name, ())
     }
-    recruitment_identity = _recruitment_identity(fact.recruitment_url)
-    if recruitment_identity is not None:
-        owners.update(recruitment_owners.get(recruitment_identity, ()))
-    return owners
 
 
 def _group_owner_ids(
     facts: Sequence[CandidateFact],
     name_owners: dict[str, set[UUID]],
-    recruitment_owners: dict[str, set[UUID]],
 ) -> set[UUID]:
     return {
         owner_id
         for fact in facts
-        for owner_id in _fact_owner_ids(fact, name_owners, recruitment_owners)
+        for owner_id in _fact_owner_ids(fact, name_owners)
     }
 
 
-def _fuzzy_existing_owner_ids(
-    facts: Sequence[CandidateFact],
-    name_owners: dict[str, set[UUID]],
-) -> set[UUID]:
-    candidate_names = {
-        name for fact in facts for name in _identity_names(fact)
-    }
-    return {
-        owner_id
-        for candidate_name in candidate_names
-        for existing_name, owner_ids in name_owners.items()
-        if candidate_name != existing_name
-        and fuzz.ratio(candidate_name, existing_name) >= _FUZZY_REVIEW_THRESHOLD
-        for owner_id in owner_ids
-    }
+def _bounded_company_context(
+    session: Session,
+    company_id: UUID,
+) -> tuple[tuple[CandidateFact, ...], tuple[JobEntry, ...]] | None:
+    accepted_facts = tuple(
+        session.scalars(
+            select(CandidateFact)
+            .where(
+                CandidateFact.decision_status == CandidateDecisionStatus.ACCEPTED,
+                CandidateFact.company_id == company_id,
+            )
+            .order_by(CandidateFact.stable_evidence_id)
+            .limit(_MAX_CONTEXT_ROWS + 1)
+        )
+    )
+    entries = tuple(
+        session.scalars(
+            select(JobEntry)
+            .where(JobEntry.company_id == company_id)
+            .order_by(JobEntry.id)
+            .limit(_MAX_CONTEXT_ROWS + 1)
+        )
+    )
+    if len(accepted_facts) > _MAX_CONTEXT_ROWS or len(entries) > _MAX_CONTEXT_ROWS:
+        return None
+    return accepted_facts, entries
 
 
 def _canonical_fact(facts: Sequence[CandidateFact]) -> CandidateFact:
@@ -415,7 +618,11 @@ def _upsert_aliases(session: Session, company: Company, facts: Sequence[Candidat
     session.flush()
 
 
-def auto_resolve_candidates(session: Session) -> IdentityResolutionSummary:
+def auto_resolve_candidates(
+    session: Session,
+    *,
+    similarity: _ManifestIdentitySimilarity | None = None,
+) -> IdentityResolutionSummary:
     """Accept only unambiguous exact identities; leave every weak match for review."""
 
     with _atomic(session):
@@ -429,61 +636,51 @@ def auto_resolve_candidates(session: Session) -> IdentityResolutionSummary:
                 .order_by(CandidateFact.stable_evidence_id)
             )
         )
-        accepted_facts = tuple(
-            session.scalars(
-                select(CandidateFact).where(
-                    CandidateFact.decision_status
-                    == CandidateDecisionStatus.ACCEPTED,
-                    CandidateFact.company_id.is_not(None),
-                )
-            )
-        )
         groups = _exact_groups(facts)
-        fuzzy_review_indexes = _fuzzy_review_indexes(facts, groups)
-        companies = tuple(session.scalars(select(Company)))
-        aliases = tuple(session.scalars(select(CompanyAlias)))
-        entries = tuple(session.scalars(select(JobEntry)))
-        companies_by_id = {company.id: company for company in companies}
-        name_owners = _name_owners(companies, aliases)
-        recruitment_owners = _recruitment_owners(entries)
-        accepted_facts_by_company: dict[UUID, list[CandidateFact]] = {}
-        for accepted_fact in accepted_facts:
-            company_id = accepted_fact.company_id
-            if company_id is None:
-                continue
-            accepted_facts_by_company.setdefault(company_id, []).append(accepted_fact)
-            for name in _identity_names(accepted_fact):
-                name_owners.setdefault(name, set()).add(company_id)
-            recruitment_identity = _recruitment_identity(
-                accepted_fact.recruitment_url
-            )
-            if recruitment_identity is not None:
-                recruitment_owners.setdefault(recruitment_identity, set()).add(
-                    company_id
-                )
-        entries_by_company: dict[UUID, list[JobEntry]] = {}
-        for entry in entries:
-            entries_by_company.setdefault(entry.company_id, []).append(entry)
+        repository = SqlAlchemyCompanyIdentityRepository(session)
+        similarity_backend = similarity or _PostgreSQLManifestIdentitySimilarity(session)
+        similarity_available = similarity_backend.available
+        candidate_names = frozenset(
+            name for fact in facts for name in _identity_names(fact)
+        )
+        name_owners = _exact_name_owners(repository, candidate_names)
+        fuzzy_review_indexes = (
+            similarity_backend.candidate_review_indexes(facts, groups)
+            if similarity_available
+            else frozenset()
+        )
+        recruitment_review_indexes = _recruitment_review_indexes(facts, groups)
         auto_accepted = 0
 
         for group in groups:
             group_facts = tuple(facts[index] for index in group)
-            owner_ids = _group_owner_ids(group_facts, name_owners, recruitment_owners)
+            group_names = frozenset(
+                name for fact in group_facts for name in _identity_names(fact)
+            )
+            owner_ids = _group_owner_ids(group_facts, name_owners)
+            recruitment_owner_ids = _targeted_recruitment_owner_ids(session, group_facts)
             context_facts: Sequence[CandidateFact] = group_facts
             context_entries: Sequence[JobEntry] = ()
+            context_available = True
             if len(owner_ids) == 1:
                 company_id = next(iter(owner_ids))
-                context_facts = (
-                    *group_facts,
-                    *accepted_facts_by_company.get(company_id, ()),
-                )
-                context_entries = entries_by_company.get(company_id, ())
+                stored_context = _bounded_company_context(session, company_id)
+                if stored_context is None:
+                    context_available = False
+                else:
+                    accepted_facts, context_entries = stored_context
+                    context_facts = (*group_facts, *accepted_facts)
             categories = {fact.primary_category for fact in context_facts}
-            fuzzy_existing_owner_ids = _fuzzy_existing_owner_ids(
-                group_facts, name_owners
+            fuzzy_existing_owner_ids = (
+                similarity_backend.existing_owner_ids(group_names)
+                if not owner_ids and similarity_available
+                else set()
             )
             if (
-                any(index in fuzzy_review_indexes for index in group)
+                (not similarity_available and not owner_ids)
+                or any(index in fuzzy_review_indexes for index in group)
+                or any(index in recruitment_review_indexes for index in group)
+                or not context_available
                 or len(categories) != 1
                 or _has_separable_recruiting_inventories(
                     context_facts, context_entries
@@ -492,20 +689,25 @@ def auto_resolve_candidates(session: Session) -> IdentityResolutionSummary:
                     context_facts, context_entries
                 )
                 or len(owner_ids) > 1
+                or recruitment_owner_ids is None
+                or not recruitment_owner_ids.issubset(owner_ids)
                 or not fuzzy_existing_owner_ids.issubset(owner_ids)
                 or not _aliases_fit_storage(group_facts)
             ):
                 continue
 
             if owner_ids:
-                company = companies_by_id[next(iter(owner_ids))]
+                company = session.get(Company, next(iter(owner_ids)))
+                if company is None:
+                    continue
             else:
                 company = _create_company(session, group_facts)
-                companies_by_id[company.id] = company
             _upsert_aliases(session, company, group_facts)
             for fact in group_facts:
                 fact.company_id = company.id
                 fact.decision_status = CandidateDecisionStatus.ACCEPTED
+            for name in group_names:
+                name_owners.setdefault(name, set()).add(company.id)
             auto_accepted += len(group_facts)
 
         session.flush()
@@ -625,14 +827,13 @@ def _resolve_manual_company(
     fact: CandidateFact,
     decision: ReviewDecisionInput,
 ) -> Company:
-    companies = tuple(session.scalars(select(Company)))
-    aliases = tuple(session.scalars(select(CompanyAlias)))
-    entries = tuple(session.scalars(select(JobEntry)))
-    owner_ids = _fact_owner_ids(
-        fact,
-        _name_owners(companies, aliases),
-        _recruitment_owners(entries),
-    )
+    repository = SqlAlchemyCompanyIdentityRepository(session)
+    names = _identity_names(fact)
+    owner_ids = _fact_owner_ids(fact, _exact_name_owners(repository, names))
+    recruitment_owner_ids = _targeted_recruitment_owner_ids(session, (fact,))
+    if recruitment_owner_ids is None:
+        raise ReviewDecisionConflict("candidate recruitment evidence exceeds review bounds")
+    owner_ids.update(recruitment_owner_ids)
 
     if decision.resolved_company_id is None:
         if owner_ids:

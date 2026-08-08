@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 
+from app.company_identity.contracts import CompanyIdentityCandidateMatch
 from app.core.config import settings
 from app.core.database import get_session
 from app.ingestion.contracts import Provider
@@ -133,6 +134,25 @@ def zhihu_payload() -> dict[str, object]:
 @pytest.fixture
 def integration_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[IntegrationHarness]:
     monkeypatch.setattr(settings, "collection_enabled", True)
+
+    async def no_similar_identity_neighbors(
+        _repository: object,
+        _names: frozenset[str],
+        *,
+        limit: int,
+    ) -> tuple[CompanyIdentityCandidateMatch, ...]:
+        assert limit == 20
+        return ()
+
+    monkeypatch.setattr(
+        "app.ingestion.runtime.SqlAlchemyCompanyDeduplicationRepository."
+        "similarity_search_available",
+        lambda _repository: True,
+    )
+    monkeypatch.setattr(
+        "app.ingestion.runtime.SqlAlchemyCompanyDeduplicationRepository.find_similar_names",
+        no_similar_identity_neighbors,
+    )
     engine = create_engine(
         f"sqlite:///{tmp_path / 'acceptance.sqlite3'}",
         connect_args={"check_same_thread": False},
@@ -144,7 +164,7 @@ def integration_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iter
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine)  # type: ignore[attr-defined]
 
     def session_dependency() -> Iterator[Session]:
         with Session(engine, expire_on_commit=False) as session:

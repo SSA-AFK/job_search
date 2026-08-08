@@ -2,7 +2,7 @@ import os
 import re
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from threading import Event
 from uuid import UUID, uuid4
@@ -69,13 +69,13 @@ def crawl_run_row(session: Session) -> CrawlRun:
     return crawl_run
 
 
-def candidate_match() -> CompanyIdentityCandidateMatch:
+def candidate_match(*, score: Decimal = Decimal("91.5")) -> CompanyIdentityCandidateMatch:
     return CompanyIdentityCandidateMatch(
         company_id=COMPANY_A,
         canonical_name="Example Labs",
         normalized_name="examplelabs",
         match_kind="fuzzy_canonical",
-        score=Decimal("91.5"),
+        score=score,
         conflict_reasons=(IdentityReviewReason.FUZZY_NAME_NEIGHBOR,),
     )
 
@@ -294,24 +294,75 @@ def test_review_record_stores_only_normalized_public_snapshot_fields(session: Se
     }
 
 
-def test_review_record_rejects_nonexact_replay_without_hostile_echo(
+def test_stable_hash_replay_preserves_first_volatile_review_snapshot(
+    session: Session,
+) -> None:
+    first_run = crawl_run_row(session)
+    replay_run = crawl_run_row(session)
+    replay_observed_at = datetime.now(UTC)
+    first_observed_at = replay_observed_at - timedelta(days=1)
+    original = review_draft(observed_at=first_observed_at)
+    replay = original.model_copy(
+        update={
+            "candidate_matches": (candidate_match(score=Decimal("84.25")),),
+            "review_reasons": (IdentityReviewReason.SHORT_NAME_COLLISION,),
+            "observed_at": replay_observed_at,
+        }
+    )
+    assert replay.stable_identity_hash == original.stable_identity_hash
+
+    first = record_identity_review(
+        session,
+        crawl_run_id=first_run.id,
+        draft=original,
+    )
+    second = record_identity_review(
+        session,
+        crawl_run_id=replay_run.id,
+        draft=replay,
+    )
+    stored = session.get(CompanyIdentityReviewItem, first.review_item_id)
+
+    assert second.review_item_id == first.review_item_id
+    assert second.created is False
+    assert stored is not None
+    assert stored.first_crawl_run_id == first_run.id
+    assert stored.created_at == first_observed_at
+    assert stored.candidate_matches[0]["score"] == "91.5"
+    assert stored.review_reasons == [IdentityReviewReason.FUZZY_NAME_NEIGHBOR.value]
+
+
+def test_changed_stable_evidence_records_a_distinct_review_item(
     session: Session,
 ) -> None:
     crawl_run = crawl_run_row(session)
     original = review_draft()
-    record_identity_review(session, crawl_run_id=crawl_run.id, draft=original)
-    changed = original.model_copy(
-        update={
-            "observed_at": datetime(2026, 8, 7, 13, tzinfo=UTC),
-            "review_reasons": (IdentityReviewReason.SHORT_NAME_COLLISION,),
-        }
+    changed_reference = PublicEvidenceReference(
+        provider="official_site",
+        url="https://example.com/different-evidence",
+        evidence_id="public-document-2",
+        confidence=Decimal("0.90"),
+    )
+    changed_identity = original.identity.model_copy(
+        update={"evidence": (changed_reference,)}
+    )
+    changed = original.model_copy(update={"identity": changed_identity})
+    assert changed.stable_identity_hash != original.stable_identity_hash
+
+    first = record_identity_review(
+        session,
+        crawl_run_id=crawl_run.id,
+        draft=original,
+    )
+    second = record_identity_review(
+        session,
+        crawl_run_id=crawl_run.id,
+        draft=changed,
     )
 
-    with pytest.raises(IdentityReviewConflict) as raised:
-        record_identity_review(session, crawl_run_id=crawl_run.id, draft=changed)
-
-    assert raised.value.code == "identity_review_conflict"
-    assert str(raised.value) == "identity review conflict"
+    assert second.review_item_id != first.review_item_id
+    assert second.created is True
+    assert session.scalar(select(func.count()).select_from(CompanyIdentityReviewItem)) == 2
 
 
 def test_review_queue_export_is_pending_only_and_deterministic(session: Session) -> None:
@@ -947,7 +998,7 @@ def test_identity_lock_keys_are_domain_separated_deduplicated_and_key_ordered() 
     assert keys == (-6410938119080746435, -1983210520360554722)
 
 
-def test_company_name_lock_uses_shared_namespace_and_stable_key_order() -> None:
+def test_company_identity_lock_uses_shared_name_and_website_namespace_order() -> None:
     class PostgreSQLSession:
         class Bind:
             class Dialect:
@@ -973,13 +1024,14 @@ def test_company_name_lock_uses_shared_namespace_and_stable_key_order() -> None:
 
     with identity_service.serialized_company_identity_names(  # type: ignore[attr-defined]
         session,  # type: ignore[arg-type]
-        ("zeta", "alpha", "alpha"),
+        ("sharedidentity", "sharedidentity"),
+        official_website="https://example.com/",
     ):
         session.events.append("body")
 
     assert session.events == [
-        ("lock", -6980011617892403656),
-        ("lock", 6222147596087359930),
+        ("lock", -6410938119080746435),
+        ("lock", -1983210520360554722),
         "body",
     ]
 

@@ -78,6 +78,11 @@ class SqlAlchemyCompanyIdentityRepository:
     async def find_exact_name_owners(
         self, names: frozenset[str]
     ) -> tuple[CompanyIdentityNameOwner, ...]:
+        return self.find_exact_name_owners_sync(names)
+
+    def find_exact_name_owners_sync(
+        self, names: frozenset[str]
+    ) -> tuple[CompanyIdentityNameOwner, ...]:
         if not names:
             return ()
         canonical = select(
@@ -140,6 +145,11 @@ class SqlAlchemyCompanyIdentityRepository:
         return frozenset(sorted(owner_ids, key=str)[: self.similarity_limit])
 
     async def find_similar_names(
+        self, names: frozenset[str], *, limit: int
+    ) -> tuple[CompanyIdentityCandidateMatch, ...]:
+        return self.find_similar_names_sync(names, limit=limit)
+
+    def find_similar_names_sync(
         self, names: frozenset[str], *, limit: int
     ) -> tuple[CompanyIdentityCandidateMatch, ...]:
         final_limit = min(limit, self.similarity_limit, _MAX_CANDIDATES)

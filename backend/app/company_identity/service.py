@@ -88,7 +88,6 @@ def record_identity_review(
 
     _require_clean_session(session)
     validated = _validate_draft(draft)
-    expected = _review_storage_values(validated)
     try:
         with session.begin() as transaction, _serialized_identity_keys(
             session,
@@ -105,7 +104,10 @@ def record_identity_review(
                 .with_for_update()
             )
             if existing is not None:
-                if _stored_review_values(existing) != expected:
+                if (
+                    _draft_from_row(existing).stable_identity_hash
+                    != validated.stable_identity_hash
+                ):
                     raise IdentityReviewConflict
                 summary = _record_summary(existing, created=False)
             else:
@@ -274,14 +276,11 @@ def _identity_key_material(
     for draft in drafts:
         identity = draft.identity
         identities.update(
-            _company_name_key_material(
-                (identity.normalized_name, *identity.normalized_aliases)
+            _company_identity_key_material(
+                names=(identity.normalized_name, *identity.normalized_aliases),
+                official_website=identity.official_website,
             )
         )
-        if identity.official_website is not None:
-            identities.add(
-                b"website\0" + identity.official_website.encode("utf-8")
-            )
         if identity.recruitment_identity is not None:
             identities.add(
                 b"recruitment\0" + identity.recruitment_identity.encode("utf-8")
@@ -298,6 +297,17 @@ def _company_name_key_material(names: Sequence[str]) -> tuple[bytes, ...]:
         {normalized for name in names if (normalized := normalize_name(name))}
     )
     return tuple(b"name\0" + name.encode("utf-8") for name in normalized_names)
+
+
+def _company_identity_key_material(
+    *,
+    names: Sequence[str],
+    official_website: str | None,
+) -> tuple[bytes, ...]:
+    material = set(_company_name_key_material(names))
+    if official_website is not None:
+        material.add(b"website\0" + official_website.encode("utf-8"))
+    return tuple(material)
 
 
 def _identity_lock_keys(material: Sequence[bytes]) -> tuple[int, ...]:
@@ -360,10 +370,18 @@ def _serialized_identity_keys(
 def serialized_company_identity_names(
     session: Session,
     names: Sequence[str],
+    *,
+    official_website: str | None = None,
 ) -> Iterator[None]:
-    """Serialize canonical and alias ownership using the review decision keys."""
+    """Serialize ordinary identity writes using the review decision keys."""
 
-    with _serialized_identity_keys(session, _company_name_key_material(names)):
+    with _serialized_identity_keys(
+        session,
+        _company_identity_key_material(
+            names=names,
+            official_website=official_website,
+        ),
+    ):
         yield
 
 
@@ -446,39 +464,6 @@ def _match_snapshot(
         }
         for match in matches
     ]
-
-
-def _review_storage_values(draft: CompanyIdentityReviewDraft) -> tuple[object, ...]:
-    identity = draft.identity
-    return (
-        identity.canonical_name,
-        identity.normalized_name,
-        list(identity.aliases),
-        identity.official_website,
-        identity.recruitment_identity,
-        list(identity.legal_identifiers),
-        identity.city,
-        _evidence_snapshot(identity.evidence),
-        _match_snapshot(draft.candidate_matches),
-        [reason.value for reason in draft.review_reasons],
-        draft.observed_at,
-    )
-
-
-def _stored_review_values(item: CompanyIdentityReviewItem) -> tuple[object, ...]:
-    return (
-        item.candidate_name,
-        item.normalized_name,
-        item.aliases,
-        item.official_website,
-        item.recruitment_identity,
-        item.legal_identifiers,
-        item.city,
-        item.public_evidence_refs,
-        item.candidate_matches,
-        item.review_reasons,
-        item.created_at,
-    )
 
 
 def _record_summary(

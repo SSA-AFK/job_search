@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.cache.base import CompanyCache
 from app.company_identity.service import serialized_company_identity_names
-from app.core.normalization import normalize_name, normalize_url
+from app.core.normalization import normalize_name, normalize_public_identity_url, normalize_url
 from app.ingestion.extraction.schemas import CompanyCandidate
 from app.ingestion.persistence.contracts import (
     NormalizedBatch,
@@ -125,12 +125,15 @@ class PersistenceService:
             ) from exc
         self._require_clean_entry(run_id)
         identity_names = self._company_identity_names(batch.company)
+        identity_website = self._company_identity_website(batch.company)
         try:
             transaction = self.session.begin()
             try:
                 self._materialize_outer_transaction()
                 with serialized_company_identity_names(
-                    self.session, identity_names
+                    self.session,
+                    identity_names,
+                    official_website=identity_website,
                 ), transaction:
                     if expected_claim_token is not None:
                         self._lock_claim(run_id, expected_claim_token)
@@ -314,7 +317,12 @@ class PersistenceService:
 
     def _upsert_company(self, record: NormalizedCompanyRecord, run_id: UUID) -> Company:
         identity_names = self._company_identity_names(record)
-        with serialized_company_identity_names(self.session, identity_names):
+        identity_website = self._company_identity_website(record)
+        with serialized_company_identity_names(
+            self.session,
+            identity_names,
+            official_website=identity_website,
+        ):
             return self._upsert_company_locked(
                 record,
                 run_id,
@@ -341,6 +349,13 @@ class PersistenceService:
                 }
             )
         )
+
+    @staticmethod
+    def _company_identity_website(record: NormalizedCompanyRecord) -> str | None:
+        website = record.candidate.candidate.website
+        if website is None:
+            return None
+        return normalize_public_identity_url(str(website))
 
     def _upsert_company_locked(
         self,
@@ -372,6 +387,22 @@ class PersistenceService:
                     run_id=run_id,
                     constraint="uq_company_alias_normalized_alias",
                     detail="company identity name is owned by another company",
+                )
+
+        identity_website = self._company_identity_website(record)
+        if identity_website is not None:
+            website_owner_ids = set(
+                self.session.scalars(
+                    select(Company.id).where(
+                        Company.normalized_website == identity_website
+                    )
+                )
+            )
+            if website_owner_ids - allowed_owner_ids:
+                raise PersistenceError(
+                    run_id=run_id,
+                    constraint="company_identity_website",
+                    detail="company website identity is owned by another company",
                 )
 
         if company is None:

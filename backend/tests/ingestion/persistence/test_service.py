@@ -535,6 +535,41 @@ def test_existing_company_keeps_identity_and_upserts_candidate_aliases(
     ) == {"openaichina", "openaiasia"}
 
 
+def test_different_company_name_cannot_claim_existing_normalized_website(
+    session: Session,
+) -> None:
+    shared_website = "https://shared.example/"
+    first = PersistenceService(session).persist(
+        normalized_batch(
+            company=normalized_company(
+                name="First Website Owner",
+                website=f"{shared_website}?source=first",
+            ),
+            jobs=(),
+            filings=(),
+        ),
+        run_id=uuid4(),
+    )
+
+    with pytest.raises(PersistenceError) as raised:
+        PersistenceService(session).persist(
+            normalized_batch(
+                company=normalized_company(
+                    name="Second Website Owner",
+                    website=f"{shared_website}#second",
+                ),
+                jobs=(),
+                filings=(),
+            ),
+            run_id=uuid4(),
+        )
+
+    assert raised.value.constraint == "company_identity_website"
+    assert shared_website not in str(raised.value)
+    assert count_rows(session, Company) == 1
+    assert session.scalar(select(Company.id)) == first.company_id
+
+
 def test_alias_owned_by_another_company_rolls_back_entire_batch(
     session: Session,
 ) -> None:
@@ -701,12 +736,19 @@ def test_sqlite_company_identity_lock_is_held_until_outer_commit(
 
     @contextmanager
     def observe_name_lock_lifetime(
-        session: Session, names: Sequence[str]
+        session: Session,
+        names: Sequence[str],
+        *,
+        official_website: str | None = None,
     ) -> Iterator[None]:
         is_first = session.info.get("company_identity_lock_role") == "first"
         if is_first:
             first_lock_entry_transaction_states.append(session.in_transaction())
-        with serialized_company_identity_names(session, names):
+        with serialized_company_identity_names(
+            session,
+            names,
+            official_website=official_website,
+        ):
             yield
         if is_first:
             first_lock_exit_transaction_states.append(session.in_transaction())
@@ -751,7 +793,12 @@ def test_sqlite_company_identity_lock_is_held_until_outer_commit(
     try:
         with Session(engine, expire_on_commit=False) as setup:
             PersistenceService(setup).persist(
-                identity_batch(normalized_company(name="Seed")),
+                identity_batch(
+                    normalized_company(
+                        name="Seed",
+                        website="https://seed.example",
+                    )
+                ),
                 run_id=uuid4(),
             )
             alias_target = Company(
@@ -766,7 +813,12 @@ def test_sqlite_company_identity_lock_is_held_until_outer_commit(
             with Session(engine) as writer:
                 writer.info["company_identity_lock_role"] = "first"
                 return PausingPersistence(writer).persist(
-                    identity_batch(normalized_company(name="Shared Identity")),
+                    identity_batch(
+                        normalized_company(
+                            name="Shared Identity",
+                            website="https://shared-name.example",
+                        )
+                    ),
                     run_id=uuid4(),
                 ).company_id
 
@@ -780,6 +832,7 @@ def test_sqlite_company_identity_lock_is_held_until_outer_commit(
                                 name="Alias Target",
                                 company_id=alias_target_id,
                                 aliases=("Shared Identity",),
+                                website="https://alias-target.example",
                             )
                         ),
                         run_id=uuid4(),
@@ -1336,6 +1389,139 @@ def test_concurrent_canonical_alias_collision_has_one_company_owner() -> None:
         admin_engine.dispose()
 
 
+@pytest.mark.postgresql
+def test_concurrent_normalized_website_collision_has_one_company_owner() -> None:
+    database_url = os.getenv("TEST_POSTGRES_URL")
+    if database_url is None:
+        pytest.skip("TEST_POSTGRES_URL is not configured")
+
+    schema_name = f"company_identity_race_{uuid4().hex}"
+    quoted_schema = _quoted_company_identity_race_schema(schema_name)
+    admin_engine = create_engine(database_url)
+    schema_engine = None
+    schema_created = False
+    shared_website = "https://shared.example/"
+    first_ready = Event()
+    release_first = Event()
+    second_lock_attempted = Event()
+    second_finished = Event()
+
+    try:
+        with admin_engine.begin() as connection:
+            connection.execute(text(f"CREATE SCHEMA {quoted_schema}"))
+            schema_created = True
+
+        schema_url = make_url(database_url).update_query_dict(
+            {"options": f"-csearch_path={schema_name}"}
+        )
+        schema_engine = create_engine(schema_url)
+        with schema_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE TABLE companies ("
+                    "id uuid PRIMARY KEY, canonical_name varchar(255) NOT NULL, "
+                    "normalized_name varchar(255) NOT NULL UNIQUE, "
+                    "industry varchar(100), sub_industry varchar(100), "
+                    "funding_stage varchar(50) NOT NULL, scale varchar(50) NOT NULL, "
+                    "city varchar(50), logo_url varchar(1000), website varchar(1000), "
+                    "normalized_website varchar(1000) NOT NULL, description text, "
+                    "last_collected_at timestamptz, created_at timestamptz NOT NULL, "
+                    "updated_at timestamptz NOT NULL)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE TABLE company_aliases ("
+                    "id uuid PRIMARY KEY, "
+                    "company_id uuid NOT NULL REFERENCES companies(id), "
+                    "alias varchar(255) NOT NULL, "
+                    "normalized_alias varchar(255) NOT NULL UNIQUE)"
+                )
+            )
+
+        @event.listens_for(schema_engine, "before_cursor_execute")
+        def observe_second_advisory_lock(
+            connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            info = connection.info  # type: ignore[attr-defined]
+            if (
+                info.get("company_identity_race_role") == "second"
+                and "PG_ADVISORY_XACT_LOCK" in statement.upper()
+            ):
+                second_lock_attempted.set()
+
+        def write_first() -> UUID:
+            with Session(schema_engine) as database_session, database_session.begin():
+                company = PersistenceService(database_session)._upsert_company(
+                    normalized_company(
+                        name="First Website Owner",
+                        website=shared_website,
+                    ),
+                    uuid4(),
+                )
+                database_session.flush()
+                first_ready.set()
+                if not release_first.wait(timeout=15):
+                    raise TimeoutError("second website writer did not reach lock")
+                return company.id
+
+        def write_second() -> PersistenceError | None:
+            try:
+                with Session(schema_engine) as database_session, database_session.begin():
+                    database_session.connection().info[
+                        "company_identity_race_role"
+                    ] = "second"
+                    PersistenceService(database_session)._upsert_company(
+                        normalized_company(
+                            name="Second Website Owner",
+                            website=shared_website,
+                        ),
+                        uuid4(),
+                    )
+            except PersistenceError as error:
+                return error
+            finally:
+                second_finished.set()
+            return None
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first_future = executor.submit(write_first)
+            if not first_ready.wait(timeout=15):
+                first_future.result(timeout=15)
+                raise TimeoutError("first website writer did not reach commit hold")
+            second_future = executor.submit(write_second)
+            try:
+                if not second_lock_attempted.wait(timeout=15):
+                    second_future.result(timeout=15)
+                    raise TimeoutError("second website writer did not reach identity lock")
+                assert not second_finished.wait(timeout=0.2)
+            finally:
+                release_first.set()
+            first_company_id = first_future.result(timeout=15)
+            second_error = second_future.result(timeout=15)
+
+        assert second_error is not None
+        assert second_error.constraint == "company_identity_website"
+        assert shared_website not in str(second_error)
+        with Session(schema_engine) as verification:
+            companies = tuple(verification.scalars(select(Company)))
+        assert tuple(company.id for company in companies) == (first_company_id,)
+        assert companies[0].normalized_website == shared_website
+    finally:
+        release_first.set()
+        if schema_engine is not None:
+            schema_engine.dispose()
+        if schema_created:
+            with admin_engine.begin() as connection:
+                _drop_company_identity_race_schema(connection, schema_name)
+        admin_engine.dispose()
+
+
 def test_filing_conflict_preserves_previous_collection_time(
     session: Session, persistence: PersistenceService
 ) -> None:
@@ -1455,7 +1641,10 @@ def test_cross_company_job_source_conflict_rolls_back_and_session_remains_usable
 ) -> None:
     persistence.persist(normalized_batch(filings=()), run_id=uuid4())
     conflicting = normalized_batch(
-        company=normalized_company(name="Other"),
+        company=normalized_company(
+            name="Other",
+            website="https://other.example",
+        ),
         jobs=(normalized_job("job-1"),),
         filings=(),
     )

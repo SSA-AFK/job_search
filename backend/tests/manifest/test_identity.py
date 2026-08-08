@@ -2,6 +2,7 @@ from collections.abc import Iterator
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta, timezone
 from hashlib import sha256
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -11,6 +12,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
 from app.core.normalization import normalize_name
+from app.manifest import identity as identity_module
 from app.manifest.contracts import (
     AiCategory,
     CandidateDecisionStatus,
@@ -36,11 +38,11 @@ def session() -> Iterator[Session]:
 
     @event.listens_for(engine, "connect")
     def enable_foreign_keys(dbapi_connection: object, _connection_record: object) -> None:
-        cursor = dbapi_connection.cursor()  # type: ignore[union-attr]
+        cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine)  # type: ignore[attr-defined]
     with Session(engine, expire_on_commit=False) as database_session:
         yield database_session
 
@@ -88,7 +90,7 @@ def decision(
     *,
     action: ReviewAction = ReviewAction.ACCEPT,
     resulting_status: CandidateDecisionStatus = CandidateDecisionStatus.ACCEPTED,
-    resolved_company_id: object | None = None,
+    resolved_company_id: UUID | None = None,
     reason: str = "Reviewer confirmed the public recruiting identity.",
     decided_at: datetime = datetime(2026, 8, 6, 12, tzinfo=UTC),
 ) -> ReviewDecisionInput:
@@ -102,6 +104,57 @@ def decision(
     )
 
 
+class _FixedSimilarity:
+    available = True
+
+    def __init__(
+        self,
+        *,
+        candidate_review_names: frozenset[str] = frozenset(),
+        existing_owners_by_query_name: dict[str, set[UUID]] | None = None,
+    ) -> None:
+        self.candidate_review_names = candidate_review_names
+        self.existing_owners_by_query_name = existing_owners_by_query_name or {}
+
+    def candidate_review_indexes(
+        self,
+        facts: tuple[CandidateFact, ...],
+        groups: tuple[tuple[int, ...], ...],
+    ) -> frozenset[int]:
+        review_indexes: set[int] = set()
+        for group in groups:
+            names = {
+                normalize_name(display_name)
+                for index in group
+                for display_name in (facts[index].canonical_name, *facts[index].aliases)
+            }
+            if names & self.candidate_review_names:
+                review_indexes.update(group)
+        return frozenset(review_indexes)
+
+    def existing_owner_ids(self, names: frozenset[str]) -> set[UUID]:
+        return {
+            owner_id
+            for name in names
+            for owner_id in self.existing_owners_by_query_name.get(name, ())
+        }
+
+
+def resolve_candidates(
+    session: Session,
+    *,
+    candidate_review_names: frozenset[str] = frozenset(),
+    existing_owners_by_query_name: dict[str, set[UUID]] | None = None,
+) -> IdentityResolutionSummary:
+    return auto_resolve_candidates(
+        session,
+        similarity=_FixedSimilarity(
+            candidate_review_names=candidate_review_names,
+            existing_owners_by_query_name=existing_owners_by_query_name,
+        ),
+    )
+
+
 def test_exact_alias_group_auto_merges_and_owns_aliases_globally(session: Session) -> None:
     persist_candidates(
         session,
@@ -109,7 +162,7 @@ def test_exact_alias_group_auto_merges_and_owns_aliases_globally(session: Sessio
         candidate("alias-b", "Acme Labs", aliases=("Acme Research",)),
     )
 
-    summary = auto_resolve_candidates(session)
+    summary = resolve_candidates(session)
 
     facts = tuple(session.scalars(select(CandidateFact).order_by(CandidateFact.canonical_name)))
     companies = tuple(session.scalars(select(Company)))
@@ -128,7 +181,9 @@ def test_exact_alias_group_auto_merges_and_owns_aliases_globally(session: Sessio
     }
 
 
-def test_exact_recruitment_entry_auto_merges_inseparable_names(session: Session) -> None:
+def test_exact_recruitment_entry_without_exact_name_requires_review(
+    session: Session,
+) -> None:
     shared_entry = "https://careers.example/jobs"
     persist_candidates(
         session,
@@ -136,13 +191,13 @@ def test_exact_recruitment_entry_auto_merges_inseparable_names(session: Session)
         candidate("entry-b", "Example Product", recruitment_url=shared_entry),
     )
 
-    summary = auto_resolve_candidates(session)
+    summary = resolve_candidates(session)
 
-    assert summary == IdentityResolutionSummary(auto_accepted=2, review_required=0)
-    assert session.scalar(select(func.count()).select_from(Company)) == 1
+    assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=2)
+    assert session.scalar(select(func.count()).select_from(Company)) == 0
 
 
-def test_exact_ats_tenant_auto_merges_different_pages(session: Session) -> None:
+def test_exact_ats_tenant_without_exact_name_requires_review(session: Session) -> None:
     persist_candidates(
         session,
         candidate(
@@ -157,10 +212,10 @@ def test_exact_ats_tenant_auto_merges_different_pages(session: Session) -> None:
         ),
     )
 
-    summary = auto_resolve_candidates(session)
+    summary = resolve_candidates(session)
 
-    assert summary == IdentityResolutionSummary(auto_accepted=2, review_required=0)
-    assert session.scalar(select(func.count()).select_from(Company)) == 1
+    assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=2)
+    assert session.scalar(select(func.count()).select_from(Company)) == 0
 
 
 def test_shared_ats_hostname_alone_does_not_merge_tenants(session: Session) -> None:
@@ -178,7 +233,7 @@ def test_shared_ats_hostname_alone_does_not_merge_tenants(session: Session) -> N
         ),
     )
 
-    summary = auto_resolve_candidates(session)
+    summary = resolve_candidates(session)
 
     assert summary == IdentityResolutionSummary(auto_accepted=2, review_required=0)
     assert session.scalar(select(func.count()).select_from(Company)) == 2
@@ -206,7 +261,7 @@ def test_shared_ats_root_url_requires_review(
         ),
     )
 
-    summary = auto_resolve_candidates(session)
+    summary = resolve_candidates(session)
 
     assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=2)
     assert session.scalar(select(func.count()).select_from(Company)) == 0
@@ -233,7 +288,7 @@ def test_embedded_greenhouse_tenant_query_prevents_shared_host_merge(
         ),
     )
 
-    summary = auto_resolve_candidates(session)
+    summary = resolve_candidates(session)
 
     assert summary == IdentityResolutionSummary(auto_accepted=2, review_required=0)
     assert session.scalar(select(func.count()).select_from(Company)) == 2
@@ -256,7 +311,7 @@ def test_generic_shared_ats_path_requires_review_without_identity_evidence(
         candidate("generic-two", "Generic Two Vision", recruitment_url=generic_url),
     )
 
-    summary = auto_resolve_candidates(session)
+    summary = resolve_candidates(session)
 
     assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=2)
     assert session.scalar(select(func.count()).select_from(Company)) == 0
@@ -281,13 +336,13 @@ def test_workday_shard_path_tenants_do_not_merge(session: Session) -> None:
         ),
     )
 
-    summary = auto_resolve_candidates(session)
+    summary = resolve_candidates(session)
 
     assert summary == IdentityResolutionSummary(auto_accepted=2, review_required=0)
     assert session.scalar(select(func.count()).select_from(Company)) == 2
 
 
-def test_exact_workday_path_tenant_merges_different_pages(session: Session) -> None:
+def test_exact_workday_tenant_without_exact_name_requires_review(session: Session) -> None:
     persist_candidates(
         session,
         candidate(
@@ -306,10 +361,10 @@ def test_exact_workday_path_tenant_merges_different_pages(session: Session) -> N
         ),
     )
 
-    summary = auto_resolve_candidates(session)
+    summary = resolve_candidates(session)
 
-    assert summary == IdentityResolutionSummary(auto_accepted=2, review_required=0)
-    assert session.scalar(select(func.count()).select_from(Company)) == 1
+    assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=2)
+    assert session.scalar(select(func.count()).select_from(Company)) == 0
 
 
 def test_unknown_workday_shard_path_requires_review(session: Session) -> None:
@@ -320,7 +375,7 @@ def test_unknown_workday_shard_path_requires_review(session: Session) -> None:
     )
     persist_candidates(session, fact)
 
-    summary = auto_resolve_candidates(session)
+    summary = resolve_candidates(session)
 
     assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=1)
     assert fact.decision_status is CandidateDecisionStatus.REVIEW_REQUIRED
@@ -345,7 +400,7 @@ def test_independently_attributable_subsidiary_inventories_require_review(
         ),
     )
 
-    summary = auto_resolve_candidates(session)
+    summary = resolve_candidates(session)
 
     assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=2)
     assert session.scalar(select(func.count()).select_from(Company)) == 0
@@ -362,7 +417,7 @@ def test_conflicting_categories_in_exact_group_require_review(session: Session) 
         ),
     )
 
-    summary = auto_resolve_candidates(session)
+    summary = resolve_candidates(session)
 
     assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=2)
     assert session.scalar(select(func.count()).select_from(Company)) == 0
@@ -388,7 +443,7 @@ def test_incremental_category_conflict_with_accepted_fact_requires_review(
     session.add_all([accepted, pending])
     session.commit()
 
-    summary = auto_resolve_candidates(session)
+    summary = resolve_candidates(session)
 
     assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=1)
     assert pending.decision_status is CandidateDecisionStatus.REVIEW_REQUIRED
@@ -419,7 +474,7 @@ def test_incremental_inventory_conflict_with_accepted_fact_requires_review(
     session.add_all([accepted, pending])
     session.commit()
 
-    summary = auto_resolve_candidates(session)
+    summary = resolve_candidates(session)
 
     assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=1)
     assert pending.decision_status is CandidateDecisionStatus.REVIEW_REQUIRED
@@ -452,7 +507,7 @@ def test_incremental_inventory_conflict_with_existing_job_entry_requires_review(
     session.add(pending)
     session.commit()
 
-    summary = auto_resolve_candidates(session)
+    summary = resolve_candidates(session)
 
     assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=1)
     assert pending.decision_status is CandidateDecisionStatus.REVIEW_REQUIRED
@@ -466,10 +521,186 @@ def test_fuzzy_name_match_requires_review(session: Session) -> None:
         candidate("fuzzy-b", "Example Artificial Intelligenc"),
     )
 
-    summary = auto_resolve_candidates(session)
+    summary = resolve_candidates(
+        session,
+        candidate_review_names=frozenset(
+            {
+                normalize_name("Example Artificial Intelligence"),
+                normalize_name("Example Artificial Intelligenc"),
+            }
+        ),
+    )
 
     assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=2)
     assert session.scalar(select(func.count()).select_from(Company)) == 0
+
+
+def test_sqlite_missing_similarity_fails_closed_without_python_fuzzy_loop(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def unexpected_ratio(left: str, right: str) -> float:
+        calls.append((left, right))
+        raise AssertionError("SQLite fail-closed path must not run Python fuzzy recall")
+
+    monkeypatch.setattr(identity_module.fuzz, "ratio", unexpected_ratio)
+    persist_candidates(
+        session,
+        *(candidate(f"bounded-{index}", f"Bounded Candidate {index}") for index in range(40)),
+    )
+
+    summary = auto_resolve_candidates(session)
+
+    assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=40)
+    assert calls == []
+    assert session.scalar(select(func.count()).select_from(Company)) == 0
+
+
+def test_auto_resolution_never_materializes_all_owner_tables(session: Session) -> None:
+    owner = Company(
+        canonical_name="Bounded Exact Owner",
+        normalized_name=normalize_name("Bounded Exact Owner"),
+    )
+    unrelated = Company(
+        canonical_name="Unrelated Owner",
+        normalized_name=normalize_name("Unrelated Owner"),
+    )
+    session.add_all((owner, unrelated))
+    session.flush()
+    session.add_all(
+        (
+            CompanyAlias(
+                company_id=unrelated.id,
+                alias="Unrelated Alias",
+                normalized_alias=normalize_name("Unrelated Alias"),
+            ),
+            JobEntry(
+                company_id=unrelated.id,
+                url="https://jobs.example/unrelated",
+                normalized_url="https://jobs.example/unrelated",
+                provider="official",
+                platform="unknown",
+            ),
+            candidate("bounded-owner", "Bounded Exact Owner"),
+        )
+    )
+    session.commit()
+    statements: list[str] = []
+    bind = session.get_bind()
+
+    def capture_statement(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _many: bool,
+    ) -> None:
+        statements.append(" ".join(statement.upper().split()))
+
+    event.listen(bind, "before_cursor_execute", capture_statement)
+    try:
+        summary = auto_resolve_candidates(session)
+    finally:
+        event.remove(bind, "before_cursor_execute", capture_statement)
+
+    assert summary == IdentityResolutionSummary(auto_accepted=1, review_required=0)
+    for table in ("COMPANIES", "COMPANY_ALIASES", "JOB_ENTRIES"):
+        table_selects = [
+            statement
+            for statement in statements
+            if statement.startswith("SELECT") and f"FROM {table}" in statement
+        ]
+        assert all(" WHERE " in statement for statement in table_selects)
+    job_entry_selects = [
+        statement
+        for statement in statements
+        if statement.startswith("SELECT") and "FROM JOB_ENTRIES" in statement
+    ]
+    assert all(" LIMIT " in statement for statement in job_entry_selects)
+
+
+class _EmptyRows:
+    def __iter__(self):
+        return iter(())
+
+
+class _PostgreSQLSimilarityRecordingSession:
+    def __init__(self) -> None:
+        self.bind = SimpleNamespace(dialect=postgresql.dialect())
+        self.executions: list[tuple[object, object | None]] = []
+        self.capability_checks = 0
+
+    def get_bind(self) -> object:
+        return self.bind
+
+    def scalar(self, _statement: object) -> bool:
+        self.capability_checks += 1
+        return True
+
+    def execute(
+        self,
+        statement: object,
+        parameters: object | None = None,
+    ) -> _EmptyRows:
+        self.executions.append((statement, parameters))
+        return _EmptyRows()
+
+
+def test_postgresql_manifest_similarity_is_topk_bounded_per_candidate_name() -> None:
+    session = _PostgreSQLSimilarityRecordingSession()
+    similarity = identity_module._PostgreSQLManifestIdentitySimilarity(  # type: ignore[attr-defined]
+        session  # type: ignore[arg-type]
+    )
+    facts = (
+        candidate("pg-similarity-a", "Candidate Alpha", aliases=("Alpha AI",)),
+        candidate("pg-similarity-b", "Candidate Beta", aliases=("Beta AI",)),
+    )
+
+    assert similarity.candidate_review_indexes(facts, ((0,), (1,))) == frozenset()
+    assert similarity.existing_owner_ids(frozenset({"candidatealpha"})) == set()
+
+    statements = tuple(
+        " ".join(
+            str(
+                statement.compile(  # type: ignore[attr-defined]
+                    dialect=postgresql.dialect(),
+                    compile_kwargs={"literal_binds": True},
+                )
+            ).upper().split()
+        )
+        for statement, _parameters in session.executions
+    )
+    temp_tables = tuple(
+        statement
+        for statement in statements
+        if statement.startswith("CREATE TEMPORARY TABLE")
+    )
+    assert len(temp_tables) == 1
+    assert "NORMALIZED_NAME TEXT NOT NULL" in temp_tables[0]
+    candidate_topk = tuple(
+        statement
+        for statement in statements
+        if "JOIN LATERAL" in statement and "PG_TEMP" in statement
+    )
+    assert len(candidate_topk) == 1
+    assert "<->" in candidate_topk[0]
+    assert "ORDER BY" in candidate_topk[0]
+    assert "LIMIT 20" in candidate_topk[0]
+    assert any("USING GIST" in statement and "PUBLIC.GIST_TRGM_OPS" in statement for statement in statements)
+
+    existing_topk = tuple(
+        statement
+        for statement in statements
+        if statement.startswith("SELECT")
+        and ("FROM COMPANIES" in statement or "JOIN COMPANY_ALIASES" in statement)
+    )
+    assert len(existing_topk) == 2
+    assert all("<->" in statement for statement in existing_topk)
+    assert all("ORDER BY" in statement for statement in existing_topk)
+    assert all("LIMIT 20" in statement for statement in existing_topk)
 
 
 @pytest.mark.parametrize("existing_as_alias", [False, True])
@@ -498,7 +729,12 @@ def test_fuzzy_name_near_existing_company_or_alias_requires_review(
     session.add(fact)
     session.commit()
 
-    summary = auto_resolve_candidates(session)
+    summary = resolve_candidates(
+        session,
+        existing_owners_by_query_name={
+            normalize_name(fact.canonical_name): {company.id}
+        },
+    )
 
     assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=1)
     assert fact.decision_status is CandidateDecisionStatus.REVIEW_REQUIRED
@@ -521,14 +757,16 @@ def test_exact_existing_alias_links_without_creating_company(session: Session) -
     session.add(fact)
     session.commit()
 
-    summary = auto_resolve_candidates(session)
+    summary = resolve_candidates(session)
 
     assert summary == IdentityResolutionSummary(auto_accepted=1, review_required=0)
     assert fact.company_id == company.id
     assert session.scalar(select(func.count()).select_from(Company)) == 1
 
 
-def test_exact_existing_job_entry_links_without_using_host_only(session: Session) -> None:
+def test_exact_existing_job_entry_without_exact_name_requires_review(
+    session: Session,
+) -> None:
     company = Company(canonical_name="Entry Owner", normalized_name=normalize_name("Entry Owner"))
     other = Company(canonical_name="Other Tenant", normalized_name=normalize_name("Other Tenant"))
     session.add_all([company, other])
@@ -559,10 +797,11 @@ def test_exact_existing_job_entry_links_without_using_host_only(session: Session
     session.add(fact)
     session.commit()
 
-    summary = auto_resolve_candidates(session)
+    summary = resolve_candidates(session)
 
-    assert summary == IdentityResolutionSummary(auto_accepted=1, review_required=0)
-    assert fact.company_id == company.id
+    assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=1)
+    assert fact.company_id is None
+    assert fact.decision_status is CandidateDecisionStatus.REVIEW_REQUIRED
     assert session.scalar(select(func.count()).select_from(Company)) == 2
 
 
