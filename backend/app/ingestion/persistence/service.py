@@ -54,8 +54,8 @@ _KNOWN_CONSTRAINT_MARKERS = {
         "pk_company_sources"
     ),
     "job_sources.provider, job_sources.source_raw_id": "uq_job_source_provider_raw_id",
-    "regulatory_filings.filing_type, regulatory_filings.filing_number": (
-        "uq_filing_type_number"
+    "regulatory_filings.filing_type, regulatory_filings.normalized_filing_number": (
+        "uq_filing_type_normalized_number"
     ),
 }
 _ModelT = TypeVar("_ModelT")
@@ -691,7 +691,7 @@ class PersistenceService:
         if len(keys) != len(set(keys)):
             raise PersistenceError(
                 run_id=run_id,
-                constraint="uq_filing_type_number",
+                constraint="uq_filing_type_normalized_number",
                 detail="duplicate filing identity in batch",
             )
         self._lock_filing_identities(records)
@@ -719,13 +719,13 @@ class PersistenceService:
                     candidate_filing,
                     self._filing_identity_statement(record),
                     run_id=run_id,
-                    constraint="uq_filing_type_number",
+                    constraint="uq_filing_type_normalized_number",
                 )
                 filing = self._owned_filing_for_identity(company_id, record, run_id)
                 if filing is None:
                     raise PersistenceError(
                         run_id=run_id,
-                        constraint="uq_filing_type_number",
+                        constraint="uq_filing_type_normalized_number",
                         detail="filing identity could not be reselected",
                     )
             for field, value in values.items():
@@ -786,7 +786,7 @@ class PersistenceService:
         if {filing.company_id for filing in matches} != {company_id}:
             raise PersistenceError(
                 run_id=run_id,
-                constraint="uq_filing_type_number",
+                constraint="uq_filing_type_normalized_number",
                 detail="filing identity has ambiguous company ownership",
             )
         return matches[0]

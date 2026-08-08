@@ -177,6 +177,37 @@ def test_filing_number_rejects_display_value_over_database_length(company: Compa
         )
 
 
+def test_filing_identity_rejects_normalized_number_variants(
+    session: Session, company: Company, other_company: Company
+) -> None:
+    first = RegulatoryFiling(
+        company_id=company.id,
+        filing_type=FilingType.ICP,
+        filing_number="ICP 123",
+        filing_name="First",
+    )
+    session.add(first)
+    session.commit()
+    session.add(
+        RegulatoryFiling(
+            company_id=other_company.id,
+            filing_type=FilingType.ICP,
+            filing_number="icp123",
+            filing_name="Duplicate identity",
+        )
+    )
+
+    with pytest.raises(IntegrityError):
+        session.commit()
+    session.rollback()
+
+    stored = session.scalar(select(RegulatoryFiling))
+    assert stored is not None
+    assert stored.filing_number == "ICP 123"
+    assert stored.normalized_filing_number == "icp123"
+    assert session.scalar(select(func.count()).select_from(RegulatoryFiling)) == 1
+
+
 def test_deleting_company_cascades_owned_records(
     session: Session, company: Company, job: JobPosting
 ) -> None:

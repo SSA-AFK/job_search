@@ -12,7 +12,11 @@ from app.models.enums import FilingType
 class RegulatoryFiling(Base, TimestampMixin):
     __tablename__ = "regulatory_filings"
     __table_args__ = (
-        UniqueConstraint("filing_type", "filing_number", name="uq_filing_type_number"),
+        UniqueConstraint(
+            "filing_type",
+            "normalized_filing_number",
+            name="uq_filing_type_normalized_number",
+        ),
         Index(
             "ix_regulatory_filings_normalized_filing_number",
             "normalized_filing_number",

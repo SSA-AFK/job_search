@@ -8,6 +8,7 @@ Create Date: 2026-08-07
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError
 
 from alembic import op
 from app.core.normalization import normalize_name, normalize_public_identity_url
@@ -17,6 +18,10 @@ revision: str = "0009_company_identity_review"
 down_revision: str | None = "0008_gate1_manifest_discovery"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+
+_RAW_FILING_UNIQUE = "uq_filing_type_number"
+_NORMALIZED_FILING_UNIQUE = "uq_filing_type_normalized_number"
+_SQLITE_FILING_PREFLIGHT_TABLE = "_0009_normalized_filing_identity_preflight"
 
 _POSTGRESQL_OFFLINE_BACKFILL_GUARD = """
 DO $$
@@ -49,6 +54,62 @@ identity_review_action = sa.Enum(
     length=30,
 )
 
+_filing_type = sa.Enum(
+    "icp",
+    "algorithm",
+    "business_license",
+    name="filing_type",
+    native_enum=False,
+    create_constraint=True,
+    length=50,
+)
+_REGULATORY_FILINGS_WITH_RAW_UNIQUE_METADATA = sa.MetaData()
+_REGULATORY_FILINGS_WITH_RAW_UNIQUE = sa.Table(
+    "regulatory_filings",
+    _REGULATORY_FILINGS_WITH_RAW_UNIQUE_METADATA,
+    sa.Column("id", GUID(), primary_key=True, nullable=False),
+    sa.Column("company_id", GUID(), nullable=False),
+    sa.Column("source_document_id", GUID(), nullable=True),
+    sa.Column("filing_type", _filing_type, nullable=False),
+    sa.Column("filing_number", sa.String(255), nullable=False),
+    sa.Column(
+        "normalized_filing_number",
+        sa.String(255),
+        server_default=sa.text("''"),
+        nullable=False,
+    ),
+    sa.Column("filing_name", sa.String(255), nullable=False),
+    sa.Column("filing_authority", sa.String(255), nullable=True),
+    sa.Column("filing_date", sa.Date(), nullable=True),
+    sa.Column("filing_status", sa.String(50), nullable=True),
+    sa.Column("detail_url", sa.String(2000), nullable=True),
+    sa.Column("created_at", UTCDateTime(), nullable=False),
+    sa.Column("updated_at", UTCDateTime(), nullable=False),
+    sa.ForeignKeyConstraint(["company_id"], ["companies.id"], ondelete="CASCADE"),
+    sa.ForeignKeyConstraint(
+        ["source_document_id"], ["source_documents.id"], ondelete="SET NULL"
+    ),
+    sa.UniqueConstraint(
+        "filing_type",
+        "filing_number",
+        name=_RAW_FILING_UNIQUE,
+    ),
+)
+_REGULATORY_FILINGS_WITH_NORMALIZED_UNIQUE_METADATA = sa.MetaData()
+_REGULATORY_FILINGS_WITH_NORMALIZED_UNIQUE = _REGULATORY_FILINGS_WITH_RAW_UNIQUE.to_metadata(
+    _REGULATORY_FILINGS_WITH_NORMALIZED_UNIQUE_METADATA
+)
+for constraint in tuple(_REGULATORY_FILINGS_WITH_NORMALIZED_UNIQUE.constraints):
+    if constraint.name == _RAW_FILING_UNIQUE:
+        _REGULATORY_FILINGS_WITH_NORMALIZED_UNIQUE.constraints.remove(constraint)
+_REGULATORY_FILINGS_WITH_NORMALIZED_UNIQUE.append_constraint(
+    sa.UniqueConstraint(
+        "filing_type",
+        "normalized_filing_number",
+        name=_NORMALIZED_FILING_UNIQUE,
+    )
+)
+
 
 def _lowercase_hex_check(column_name: str) -> str:
     remainder = column_name
@@ -62,6 +123,78 @@ def _lowercase_hex_check(column_name: str) -> str:
 
 def _is_postgresql() -> bool:
     return op.get_context().dialect.name == "postgresql"
+
+
+def _is_sqlite() -> bool:
+    return op.get_context().dialect.name == "sqlite"
+
+
+def _normalized_filing_number_for_backfill(filing_number: str) -> str:
+    normalized_filing_number = normalize_name(filing_number)
+    if not normalized_filing_number:
+        raise RuntimeError("filing number backfill is not normalizable")
+    if len(normalized_filing_number) > 255:
+        raise RuntimeError("filing number backfill exceeds normalized length")
+    return normalized_filing_number
+
+
+def _preflight_sqlite_normalized_filing_identities() -> None:
+    if not _is_sqlite() or op.get_context().as_sql:
+        return
+
+    connection = op.get_bind()
+    filings = sa.table(
+        "regulatory_filings",
+        sa.column("id", GUID()),
+        sa.column("filing_type", sa.String(50)),
+        sa.column("filing_number", sa.String(255)),
+    )
+    connection.exec_driver_sql(
+        f"CREATE TEMPORARY TABLE {_SQLITE_FILING_PREFLIGHT_TABLE} ("
+        "filing_type VARCHAR(50) NOT NULL, "
+        "normalized_filing_number VARCHAR(255) NOT NULL, "
+        "PRIMARY KEY (filing_type, normalized_filing_number))"
+    )
+    try:
+        last_filing_id = None
+        while True:
+            statement = (
+                sa.select(
+                    filings.c.id,
+                    filings.c.filing_type,
+                    filings.c.filing_number,
+                )
+                .order_by(filings.c.id)
+                .limit(500)
+            )
+            if last_filing_id is not None:
+                statement = statement.where(filings.c.id > last_filing_id)
+            rows = connection.execute(statement).all()
+            if not rows:
+                break
+            identities = [
+                {
+                    "filing_type": filing_type,
+                    "normalized_filing_number": (
+                        _normalized_filing_number_for_backfill(filing_number)
+                    ),
+                }
+                for _filing_id, filing_type, filing_number in rows
+            ]
+            try:
+                connection.execute(
+                    sa.text(
+                        f"INSERT INTO {_SQLITE_FILING_PREFLIGHT_TABLE} "
+                        "(filing_type, normalized_filing_number) "
+                        "VALUES (:filing_type, :normalized_filing_number)"
+                    ),
+                    identities,
+                )
+            except IntegrityError:
+                raise RuntimeError("0009 normalized filing identity collision") from None
+            last_filing_id = rows[-1][0]
+    finally:
+        connection.exec_driver_sql(f"DROP TABLE {_SQLITE_FILING_PREFLIGHT_TABLE}")
 
 
 def _backfill_normalized_evidence() -> None:
@@ -124,11 +257,9 @@ def _backfill_normalized_evidence() -> None:
         if not rows:
             break
         for filing_id, filing_number in rows:
-            normalized_filing_number = normalize_name(filing_number)
-            if not normalized_filing_number:
-                raise RuntimeError("filing number backfill is not normalizable")
-            if len(normalized_filing_number) > 255:
-                raise RuntimeError("filing number backfill exceeds normalized length")
+            normalized_filing_number = _normalized_filing_number_for_backfill(
+                filing_number
+            )
             connection.execute(
                 sa.update(filings)
                 .where(filings.c.id == filing_id)
@@ -137,7 +268,81 @@ def _backfill_normalized_evidence() -> None:
         last_filing_id = rows[-1][0]
 
 
+def _require_unique_normalized_filing_identities() -> None:
+    if op.get_context().as_sql:
+        return
+
+    filings = sa.table(
+        "regulatory_filings",
+        sa.column("filing_type", sa.String(50)),
+        sa.column("normalized_filing_number", sa.String(255)),
+    )
+    collision = op.get_bind().execute(
+        sa.select(filings.c.filing_type)
+        .group_by(filings.c.filing_type, filings.c.normalized_filing_number)
+        .having(sa.func.count() > 1)
+        .limit(1)
+    ).first()
+    if collision is not None:
+        raise RuntimeError("0009 normalized filing identity collision")
+
+
+def _use_normalized_filing_unique() -> None:
+    if _is_sqlite():
+        with op.batch_alter_table(
+            "regulatory_filings",
+            recreate="always",
+            copy_from=(
+                _REGULATORY_FILINGS_WITH_RAW_UNIQUE
+                if op.get_context().as_sql
+                else None
+            ),
+        ) as batch_op:
+            batch_op.drop_constraint(_RAW_FILING_UNIQUE, type_="unique")
+            batch_op.create_unique_constraint(
+                _NORMALIZED_FILING_UNIQUE,
+                ["filing_type", "normalized_filing_number"],
+            )
+        return
+
+    op.drop_constraint(_RAW_FILING_UNIQUE, "regulatory_filings", type_="unique")
+    op.create_unique_constraint(
+        _NORMALIZED_FILING_UNIQUE,
+        "regulatory_filings",
+        ["filing_type", "normalized_filing_number"],
+    )
+
+
+def _restore_raw_filing_unique_and_drop_normalized_column() -> None:
+    if _is_sqlite():
+        with op.batch_alter_table(
+            "regulatory_filings",
+            recreate="always",
+            copy_from=(
+                _REGULATORY_FILINGS_WITH_NORMALIZED_UNIQUE
+                if op.get_context().as_sql
+                else None
+            ),
+        ) as batch_op:
+            batch_op.drop_constraint(_NORMALIZED_FILING_UNIQUE, type_="unique")
+            batch_op.create_unique_constraint(
+                _RAW_FILING_UNIQUE,
+                ["filing_type", "filing_number"],
+            )
+            batch_op.drop_column("normalized_filing_number")
+        return
+
+    op.drop_constraint(_NORMALIZED_FILING_UNIQUE, "regulatory_filings", type_="unique")
+    op.create_unique_constraint(
+        _RAW_FILING_UNIQUE,
+        "regulatory_filings",
+        ["filing_type", "filing_number"],
+    )
+    op.drop_column("regulatory_filings", "normalized_filing_number")
+
+
 def upgrade() -> None:
+    _preflight_sqlite_normalized_filing_identities()
     if _is_postgresql() and op.get_context().as_sql:
         op.execute(_POSTGRESQL_OFFLINE_BACKFILL_GUARD)
 
@@ -160,6 +365,8 @@ def upgrade() -> None:
         ),
     )
     _backfill_normalized_evidence()
+    _require_unique_normalized_filing_identities()
+    _use_normalized_filing_unique()
     op.create_index(
         "ix_companies_normalized_website",
         "companies",
@@ -305,5 +512,5 @@ def downgrade() -> None:
         "ix_companies_normalized_website",
         table_name="companies",
     )
-    op.drop_column("regulatory_filings", "normalized_filing_number")
+    _restore_raw_filing_unique_and_drop_normalized_column()
     op.drop_column("companies", "normalized_website")

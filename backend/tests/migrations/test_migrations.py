@@ -1161,6 +1161,14 @@ def test_0009_postgresql_sql_contains_bounded_similarity_indexes() -> None:
         "ON regulatory_filings (normalized_filing_number)" in sql
     )
     assert (
+        "ALTER TABLE regulatory_filings DROP CONSTRAINT uq_filing_type_number" in sql
+    )
+    assert (
+        "ALTER TABLE regulatory_filings ADD CONSTRAINT "
+        "uq_filing_type_normalized_number UNIQUE "
+        "(filing_type, normalized_filing_number)" in sql
+    )
+    assert (
         "DO $$ BEGIN IF EXISTS (SELECT 1 FROM companies WHERE website IS NOT NULL) "
         "OR EXISTS (SELECT 1 FROM regulatory_filings) THEN RAISE EXCEPTION "
         "'0009 normalized evidence backfill requires online migration'; "
@@ -1227,6 +1235,17 @@ def test_0009_postgresql_downgrade_owns_only_review_objects() -> None:
     assert (
         "ALTER TABLE regulatory_filings DROP COLUMN normalized_filing_number" in sql
     )
+    assert (
+        "ALTER TABLE regulatory_filings DROP CONSTRAINT "
+        "uq_filing_type_normalized_number" in sql
+    )
+    assert (
+        "ALTER TABLE regulatory_filings ADD CONSTRAINT uq_filing_type_number "
+        "UNIQUE (filing_type, filing_number)" in sql
+    )
+    assert sql.index("ADD CONSTRAINT uq_filing_type_number") < sql.index(
+        "DROP COLUMN normalized_filing_number"
+    )
     assert "DROP EXTENSION" not in sql
     assert "CASCADE" not in sql
     for shared_object in (
@@ -1268,6 +1287,10 @@ def test_0009_sqlite_sql_skips_postgresql_similarity_objects() -> None:
     assert (
         "ALTER TABLE regulatory_filings ADD COLUMN "
         "normalized_filing_number VARCHAR(255)" in sql
+    )
+    assert (
+        "CONSTRAINT uq_filing_type_normalized_number UNIQUE "
+        "(filing_type, normalized_filing_number)" in sql
     )
 
 
@@ -1314,7 +1337,7 @@ def test_0009_backfills_normalized_evidence_for_legacy_rows(tmp_path: Path) -> N
                 "INSERT INTO regulatory_filings "
                 "(id, company_id, filing_type, filing_number, filing_name, "
                 "created_at, updated_at) VALUES "
-                "(:id, :company_id, 'business_license', 'K STRASSE 42', "
+                "(:id, :company_id, 'business_license', 'K STRASSE 43', "
                 "'Other legacy filing', :created_at, :created_at)"
             ),
             {
@@ -1358,7 +1381,7 @@ def test_0009_backfills_normalized_evidence_for_legacy_rows(tmp_path: Path) -> N
                 "WHERE id = :id"
             ),
             {"id": other_filing_id},
-        ) == "kstrasse42"
+        ) == "kstrasse43"
         normalized_filing_column = next(
             column
             for column in inspect(connection).get_columns("regulatory_filings")
@@ -1378,6 +1401,14 @@ def test_0009_backfills_normalized_evidence_for_legacy_rows(tmp_path: Path) -> N
             index["name"]
             for index in inspect(connection).get_indexes("regulatory_filings")
         } >= {"ix_regulatory_filings_normalized_filing_number"}
+        unique_constraints = {
+            constraint["name"]
+            for constraint in inspect(connection).get_unique_constraints(
+                "regulatory_filings"
+            )
+        }
+        assert "uq_filing_type_normalized_number" in unique_constraints
+        assert "uq_filing_type_number" not in unique_constraints
 
     command.downgrade(config, "0008_gate1_manifest_discovery")
     inspector = inspect(engine)
@@ -1387,6 +1418,94 @@ def test_0009_backfills_normalized_evidence_for_legacy_rows(tmp_path: Path) -> N
     assert "normalized_filing_number" not in {
         column["name"] for column in inspector.get_columns("regulatory_filings")
     }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("regulatory_filings")
+    } >= {"uq_filing_type_number"}
+
+
+def test_0009_rejects_normalized_filing_collisions_without_deleting_rows(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "identity-evidence-collision.sqlite3"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config(Path(__file__).parents[2] / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", database_url)
+    engine = create_engine(database_url)
+    company_id = str(uuid4())
+    created_at = "2026-08-07 00:00:00+00:00"
+
+    command.upgrade(config, "0008_gate1_manifest_discovery")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO companies "
+                "(id, canonical_name, normalized_name, funding_stage, scale, "
+                "created_at, updated_at) VALUES "
+                "(:id, 'Legacy Company', 'legacycompany', 'unknown', 'unknown', "
+                ":created_at, :created_at)"
+            ),
+            {"id": company_id, "created_at": created_at},
+        )
+        for filing_number in ("ICP 123", "icp123"):
+            connection.execute(
+                text(
+                    "INSERT INTO regulatory_filings "
+                    "(id, company_id, filing_type, filing_number, filing_name, "
+                    "created_at, updated_at) VALUES "
+                    "(:id, :company_id, 'icp', :filing_number, 'Legacy filing', "
+                    ":created_at, :created_at)"
+                ),
+                {
+                    "id": str(uuid4()),
+                    "company_id": company_id,
+                    "filing_number": filing_number,
+                    "created_at": created_at,
+                },
+            )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"^0009 normalized filing identity collision$",
+    ):
+        command.upgrade(config, "head")
+
+    with engine.connect() as connection:
+        assert connection.scalar(
+            text("SELECT count(*) FROM regulatory_filings")
+        ) == 2
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+            "0008_gate1_manifest_discovery"
+        )
+        assert "normalized_filing_number" not in {
+            column["name"] for column in inspect(connection).get_columns("regulatory_filings")
+        }
+        assert "normalized_website" not in {
+            column["name"] for column in inspect(connection).get_columns("companies")
+        }
+        assert {
+            constraint["name"]
+            for constraint in inspect(connection).get_unique_constraints(
+                "regulatory_filings"
+            )
+        } >= {"uq_filing_type_number"}
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE regulatory_filings SET filing_number = 'icp124' "
+                "WHERE filing_number = 'icp123'"
+            )
+        )
+
+    command.upgrade(config, "head")
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+            "0009_company_identity_review"
+        )
+        assert connection.scalar(
+            text("SELECT count(*) FROM regulatory_filings")
+        ) == 2
 
 
 @pytest.mark.postgresql
