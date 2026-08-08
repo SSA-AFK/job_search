@@ -482,14 +482,14 @@ def upgrade() -> None:
     )
 
     if _is_postgresql():
-        op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public")
         op.execute(
             "CREATE INDEX ix_companies_normalized_name_trgm "
-            "ON companies USING gist (normalized_name gist_trgm_ops)"
+            "ON companies USING gist (normalized_name public.gist_trgm_ops)"
         )
         op.execute(
             "CREATE INDEX ix_company_aliases_normalized_alias_trgm "
-            "ON company_aliases USING gist (normalized_alias gist_trgm_ops)"
+            "ON company_aliases USING gist (normalized_alias public.gist_trgm_ops)"
         )
 
 

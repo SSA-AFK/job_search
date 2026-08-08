@@ -968,7 +968,7 @@ def test_gate1_manifest_discovery_round_trip_preserves_stage3a_rows(
                 "created_at": created_at,
             },
         )
-        for parameters in (
+        observation_parameter_sets: tuple[dict[str, object], ...] = (
             {
                 "id": str(uuid4()),
                 "version": "f" * 64,
@@ -990,8 +990,11 @@ def test_gate1_manifest_discovery_round_trip_preserves_stage3a_rows(
                 "entry_id": entry_id,
                 "created_at": created_at,
             },
-        ):
-            _expect_integrity_error(connection, observation_insert, parameters)
+        )
+        for observation_parameters in observation_parameter_sets:
+            _expect_integrity_error(
+                connection, observation_insert, observation_parameters
+            )
         assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
 
     command.upgrade(config, "head")
@@ -1135,14 +1138,14 @@ def test_0009_postgresql_sql_contains_bounded_similarity_indexes() -> None:
     sql = " ".join(output.getvalue().split())
     assert migration["revision"] == "0009_company_identity_review"
     assert migration["down_revision"] == "0008_gate1_manifest_discovery"
-    assert "CREATE EXTENSION IF NOT EXISTS pg_trgm" in sql
+    assert "CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public" in sql
     assert (
         "CREATE INDEX ix_companies_normalized_name_trgm ON companies "
-        "USING gist (normalized_name gist_trgm_ops)" in sql
+        "USING gist (normalized_name public.gist_trgm_ops)" in sql
     )
     assert (
         "CREATE INDEX ix_company_aliases_normalized_alias_trgm ON company_aliases "
-        "USING gist (normalized_alias gist_trgm_ops)" in sql
+        "USING gist (normalized_alias public.gist_trgm_ops)" in sql
     )
     assert (
         "ALTER TABLE companies ADD COLUMN normalized_website VARCHAR(1000) "

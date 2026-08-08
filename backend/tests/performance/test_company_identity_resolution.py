@@ -35,6 +35,10 @@ def _drop_isolated_schema(connection, quoted_schema: str) -> None:
         connection.execute(text(statement))
 
 
+def _install_pg_trgm_extension(connection) -> None:
+    connection.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public"))
+
+
 @pytest.mark.performance
 @pytest.mark.postgresql
 def test_isolated_schema_cleanup_drops_only_owned_objects_without_cascade() -> None:
@@ -59,6 +63,16 @@ def test_isolated_schema_cleanup_drops_only_owned_objects_without_cascade() -> N
 
 @pytest.mark.performance
 @pytest.mark.postgresql
+def test_pg_trgm_fixture_install_uses_stable_public_schema() -> None:
+    connection = _RecordingConnection()
+
+    _install_pg_trgm_extension(connection)
+
+    assert connection.statements == ["CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public"]
+
+
+@pytest.mark.performance
+@pytest.mark.postgresql
 def test_ten_thousand_company_resolution_uses_bounded_trigram_recall() -> None:
     database_url = os.getenv("TEST_POSTGRES_URL")
     if database_url is None:
@@ -72,7 +86,7 @@ def test_ten_thousand_company_resolution_uses_bounded_trigram_recall() -> None:
     schema_created = False
     try:
         with admin_engine.begin() as connection:
-            connection.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+            _install_pg_trgm_extension(connection)
             connection.execute(text(f"CREATE SCHEMA {quoted_schema}"))
             schema_created = True
 
@@ -98,13 +112,14 @@ def test_ten_thousand_company_resolution_uses_bounded_trigram_recall() -> None:
             connection.execute(
                 text(
                     "CREATE INDEX ix_companies_normalized_name_trgm "
-                    "ON companies USING gist (normalized_name gist_trgm_ops)"
+                    "ON companies USING gist (normalized_name public.gist_trgm_ops)"
                 )
             )
             connection.execute(
                 text(
                     "CREATE INDEX ix_company_aliases_normalized_alias_trgm "
-                    "ON company_aliases USING gist (normalized_alias gist_trgm_ops)"
+                    "ON company_aliases USING gist "
+                    "(normalized_alias public.gist_trgm_ops)"
                 )
             )
             connection.execute(
