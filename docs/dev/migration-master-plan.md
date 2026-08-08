@@ -1,7 +1,7 @@
 # Stage 3 万级职位覆盖迁移总计划
 
-> **状态：Stage 3A 已完成；七项计划任务及 Task 7 审阅全部通过**
-> **修订日期：2026-08-06**
+> **状态：Stage 3A 已完成；Company Identity Resolution Hardening 已实现，Task 10 release gate 阻塞**
+> **修订日期：2026-08-08**
 > **定位：** 基于已完成 Stage 2 的 Stage 3 执行路线；Stage 3A 已按获批详细计划实施，后续阶段仍不是可直接开工的 implementation plan。
 > **设计依据：** [job-coverage-at-scale-plan.md](job-coverage-at-scale-plan.md)
 > **审批规则：** 本文批准后仍需生成详细 implementation plan，并再次获得执行授权。
@@ -11,7 +11,7 @@
 ### 1.1 已进入正式基线
 
 - FastAPI 搜索与公司详情 API；
-- SQLAlchemy 模型和 Alembic `0001`–`0007`；
+- SQLAlchemy 模型和 Alembic `0001`–`0009`（当前 hardening 分支）；
 - 公司、职位、来源、证据、备案、采集请求和运行模型；
 - 幂等持久化、规范化和确定性优先去重；
 - SSRF 安全 HTTP、知乎和公司官网 Provider；
@@ -110,13 +110,25 @@ backend/app/
 - 迁移现有数据时保留当前 active 状态；
 - 外键和唯一约束在 SQLite 重建表时保持完整。
 
-### `0008_job_details`
+### `0008_gate1_manifest_discovery`
+
+- 创建候选事实、review decision、manifest/member 与 entry discovery observation 表；
+- 保留 Stage 3A 行与外键，Task 10 仍不得在 release prerequisites 未通过时执行真实候选导入或 live discovery。
+
+### `0009_company_identity_review`
+
+- 创建 company identity review item 与 append-only decision audit；
+- 为公司、别名和备案证据增加规范化 identity keys 与约束；
+- PostgreSQL 增加 `pg_trgm` capability/index DDL，SQLite 保持离线兼容；
+- 所有新增 audit-history 外键使用 `ON DELETE RESTRICT`。
+
+### `0010_job_details`
 
 - 创建一对一 `job_details`；
 - 存储部门、学历、经验、要求、福利、标签和增强时间；
 - 长文本和标签设置明确长度/数量上限。
 
-### `0009_coverage_query_indexes`
+### `0011_coverage_query_indexes`
 
 - 根据 Gate 1 的真实查询计划增加必要索引；
 - PostgreSQL 使用经过 `EXPLAIN` 证明的部分索引；
@@ -157,6 +169,18 @@ Tasks 1–7 均已实现并通过审阅。Task 7 gate 与最终修复提交为 `
 `83a8f14` 当前矩阵：Ruff clean；mypy 79 个源文件 clean；backend `539 passed / 2 skipped / 2 deselected`；integration `13 passed`；performance `2 passed / 541 deselected`；offline Alembic upgrade/downgrade clean；live PostgreSQL `2 passed / 17 deselected`，清理后 `stage3a_test_*` schema 残留为零。Provider 目录没有 Stage 3A 快照写入调用，默认 suite 不依赖网络、浏览器、Redis 或 LLM；backend 全量测试保留一个既有非整数 `salary_months` 负向测试的 intentional Pydantic serializer warning。
 
 Task 7 及全分支最终审阅在 round 4/5 后得到 specification PASS 和 quality APPROVED，没有开放的 Critical、Important 或 Minor finding。Stage 3A 状态为“已完成”；Stage 3B 状态为“等待单独实施计划与审批”，不得在本 gate 中开始。
+
+### Company Identity Resolution Hardening 状态（2026-08-08）
+
+用户覆盖指定的获批执行基线为 `5d6f2cf`；最终 whole-branch review 仍以 `2143f8f..HEAD` 为范围。实现提交按任务为：Task 1 `64d1a3e`、`2427ecf`；Task 2 `104ef3d`、`23de812`；Task 3 `906d3b4`、`7d7415a`、`bab4ab9`、`ff922fc`、`d7730ae`；Task 4 `b0890fd`、`6ef0235`、`53792cd`；Task 5 `cb2c0b6`、`d9d98d1`、`ca01958`；Task 6 `ad1ddb9`、`99c4cb4`；Task 7 `c4ec697`、`4efb39b`、`249c32d`。
+
+Task 6 audit categories 固定为：Critical `cross_table_name_owner`、`shared_website_identity`、`incompatible_recruitment_identities`、`audit_findings_truncated`；Important `accepted_candidate_name_unrepresented`、`fuzzy_name_cluster`、`orphan_alias`、`pending_review_owner_changed`、`similarity_search_unavailable`；Minor `canonical_name_normalized_drift`、`alias_normalized_drift`、`filing_number_normalized_drift`、`website_normalized_drift`。人工裁定保留窄 pending-owner 语义，只报告可证明的新当前所有权或基数变化，不增加 prior exact-owner UUID schema。Task 7 人工裁定把 POSIX output directory 作为可信 operator-controlled boundary；Windows 保持 pinned native-handle 保护，POSIX 同权限 writer 的 syscall 间竞态是明确剩余风险。
+
+Task 8 的完整离线命令结果为：第一组 `728 passed / 7 skipped / 1 warning`；第二组 `220 passed / 1 failed`，失败为 company detail API 的备案号原始展示值被 normalization 改写；Ruff clean；mypy `98 source files` clean。warning 是既有 intentional 非整数 `salary_months` Pydantic serializer warning，尚需 warning assertion 或无 warning 修复。默认测试未启用网络、Redis、模型 API、浏览器或职位列表 provider。tracked-file secret pattern scan 命中 tracked agent skill 文档中的四条 API-key pattern，以及 CLI/reporting redaction 测试中的两条 credentialed-connection-URI pattern；只记录 file/line/category，未输出匹配值，因此该 gate 不是 clean。
+
+由于 `TEST_POSTGRES_URL` 不存在，`0009` live migration round trip、Task 3/4/5 两会话 concurrency、trigram plan 和严格 10,000-company performance marker 均未运行，不能声明 no-skip 或零 residual isolated schemas。专用 read-only audit 数据库配置也不存在，所以 audit CLI 未运行，Critical/Important clean 状态未知。Task 10 保持 paused，且不得生成真实 candidate import、live discovery、manifest artifacts 或 runtime reports。
+
+Task 10 release prerequisites 是：离线 suites 零失败；既有 warning 被消除或显式断言；tracked-file secret pattern scan clean；PostgreSQL migration/service 与 `performance and postgresql` markers 零 skip 并由测试自有的非 `CASCADE` 清理验证零残留 schema；专用数据库 audit 的所有 Critical/Important 为零或具有明确人工裁定；`2143f8f..HEAD` whole-branch review clean。剩余 Minor 包括 advisory lock key 未排序去重的理论 hash-collision deadlock、seed importer direct `RegulatoryFiling` writer 不在 Task 3 locking 内、audit chunk display capacity、POSIX runtime 未实测、Windows symlink privilege skip，以及人工接受的 POSIX 同权限竞态风险。
 
 ## 6. Stage 3B：ATS 正式接入
 

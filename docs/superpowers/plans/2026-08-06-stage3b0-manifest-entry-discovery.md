@@ -23,7 +23,7 @@
 - Candidate import files and raw responses live outside Git. Checked-in artifacts contain only normalized public facts, evidence references, the source registry, the quota result, and the canonical frozen manifest.
 - `manifest_version` is the lowercase SHA-256 of canonical JSON with sorted keys and deterministic member order. Frozen membership is immutable.
 - Accepted entries persist through the existing `JobEntry` model. Discovery observations do not write `JobCollectionSnapshot` and never claim pagination completeness or confirmed emptiness.
-- New Alembic revision is exactly `0008_gate1_manifest_discovery`, descending from `0007_job_source_snapshot_lifecycle`. Planned `job_details` and coverage-index revisions move to `0009` and `0010` in the migration roadmap.
+- New Alembic revision is exactly `0008_gate1_manifest_discovery`, descending from `0007_job_source_snapshot_lifecycle`. Company identity hardening owns `0009_company_identity_review`; planned `job_details` and coverage-index revisions move to `0010` and `0011` in the migration roadmap.
 - SQLite and PostgreSQL migration gates must preserve all Stage 3A rows and foreign keys. Default tests perform no live HTTP, Redis, LLM, or browser access.
 - Never recursively delete files or directories. Test cleanup targets validated individual files or non-public isolated PostgreSQL schemas without `CASCADE`.
 - Every CLI emits sanitized diagnostics: no credentials, authorization headers, database URLs, raw response bodies, or tracebacks.
@@ -725,6 +725,20 @@ git add backend/app/manifest/cli.py backend/app/core/config.py .env.example back
 git commit -m "feat: add manifest discovery commands"
 ```
 
+### Company Identity Resolution Hardening Gate Before Task 10
+
+The approved execution baseline was the user override `5d6f2cf`; the mandatory final whole-branch review remains `2143f8f..HEAD`. Implemented commits are Task 1 `64d1a3e`, `2427ecf`; Task 2 `104ef3d`, `23de812`; Task 3 `906d3b4`, `7d7415a`, `bab4ab9`, `ff922fc`, `d7730ae`; Task 4 `b0890fd`, `6ef0235`, `53792cd`; Task 5 `cb2c0b6`, `d9d98d1`, `ca01958`; Task 6 `ad1ddb9`, `99c4cb4`; and Task 7 `c4ec697`, `4efb39b`, `249c32d`.
+
+The migration sequence is `0008_gate1_manifest_discovery`, `0009_company_identity_review`, `0010_job_details`, and `0011_coverage_query_indexes`. No obsolete numbering remains valid.
+
+The audit categories are Critical: `cross_table_name_owner`, `shared_website_identity`, `incompatible_recruitment_identities`, `audit_findings_truncated`; Important: `accepted_candidate_name_unrepresented`, `fuzzy_name_cluster`, `orphan_alias`, `pending_review_owner_changed`, `similarity_search_unavailable`; Minor: `canonical_name_normalized_drift`, `alias_normalized_drift`, `filing_number_normalized_drift`, `website_normalized_drift`. The Task 6 human ruling keeps narrow pending-owner semantics: report only provable new current-ownership conflicts or cardinality transitions, without a prior exact-owner UUID schema expansion. The Task 7 human ruling treats POSIX output directories as trusted and operator-controlled; Windows retains stronger pinned native handles, while the same-privilege POSIX namespace race remains an explicit runtime risk.
+
+Task 8 evidence on 2026-08-08 is not a release pass. The first complete offline group reported `728 passed, 7 skipped, 1 warning`; the warning is the pre-existing intentional non-integer `salary_months` Pydantic serializer warning. The second group reported `220 passed, 1 failed`; `test_company_detail_includes_aliases_filings_sources_and_job_count` proves that the API-visible filing number is incorrectly lowercased by identity normalization. Ruff passed and mypy passed for 98 source files. Default tests did not enable network, Redis, model API, browser, or job-list providers. The required tracked-file secret pattern scan was also not clean: it found four API-key patterns in a tracked agent skill document and two credentialed-connection-URI patterns in CLI/reporting redaction tests. Only file, line, and category were reported; no matched value was printed.
+
+`TEST_POSTGRES_URL` was absent, so the PostgreSQL migration/service markers, two-session concurrency cases, trigram query plan, exact 10,000-company performance marker, and test-owned residual-schema validation were not run. The approved dedicated audit database configuration was also absent, so no read-only audit CLI or external audit report was produced and zero unresolved Critical/Important findings cannot be claimed.
+
+Task 10 stays paused until all of the following are true: both offline groups have zero failures; the existing warning is removed or explicitly asserted; the tracked-file secret pattern scan is clean; PostgreSQL migration/service and `performance and postgresql` markers pass with zero skips and test-owned non-`CASCADE` cleanup proves zero residual schemas; the dedicated read-only audit has zero unresolved Critical/Important findings or an explicit human ruling for each; and the `2143f8f..HEAD` whole-branch review is clean. Deferred Minor risks remain tracked: advisory lock keys are not sorted/deduplicated against a theoretical 64-bit hash collision; the seed importer direct `RegulatoryFiling` writer is outside Task 3 persistence locking; audit chunk common evidence can displace a display label; no project-equipped POSIX runtime exercised the POSIX writer; the Windows symlink test lacks account privilege; and the human-approved same-privilege POSIX race remains.
+
 ### Task 10: Update Roadmaps and Execute the Authorized Stage 3B0 Data Gate
 
 **Files:**
@@ -806,7 +820,7 @@ Stop immediately on unauthorized destinations, credential leakage, cross-company
 
 - [ ] **Step 5: Update the global iterative documents with measured facts**
 
-Record Stage 3B0 commit ids, migration `0008`, manifest hash, accepted/review/rejected counts, category/city/scale distributions, entry coverage, discovery status distribution, platform census, Zhihu usage, and remaining Stage 3B risks. Renumber planned `job_details` to `0009` and coverage indexes to `0010`; leave Stage 3B as awaiting its own implementation plan and approval.
+Record Stage 3B0 commit ids, migrations `0008` and `0009`, manifest hash, accepted/review/rejected counts, category/city/scale distributions, entry coverage, discovery status distribution, platform census, Zhihu usage, and remaining Stage 3B risks. Keep planned `job_details` at `0010` and coverage indexes at `0011`; leave Stage 3B as awaiting its own implementation plan and approval.
 
 - [ ] **Step 6: Run final verification and secret scan**
 
@@ -820,7 +834,7 @@ git diff --check
 git grep -n -I -E "(postgres(ql)?|redis)://[^[:space:]]+:[^[:space:]]+@|sk-[A-Za-z0-9_-]{12,}" -- . ":(exclude)66.md" ":(exclude)test.env"
 ```
 
-Expected: all suites/checks PASS and the tracked-file secret scan prints nothing. If local PostgreSQL is configured, also run the isolated `postgresql` migration marker and confirm zero residual test schemas.
+Expected: all suites/checks PASS and the tracked-file secret scan prints nothing. Task 10 additionally requires the isolated PostgreSQL migration/service marker and the exact 10,000-company `performance and postgresql` marker to pass with zero skips, followed by test-owned validation of zero residual schemas without `CASCADE`. Run the dedicated local read-only company identity audit and require zero unresolved Critical/Important findings before any real candidate import or live discovery. The `2143f8f..HEAD` whole-branch review must also be clean; none of these requirements is optional when local configuration is absent.
 
 - [ ] **Step 7: Review and commit Stage 3B0 artifacts and roadmap status**
 
