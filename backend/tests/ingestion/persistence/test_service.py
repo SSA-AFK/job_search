@@ -1,5 +1,6 @@
 import os
 import re
+import warnings
 from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -1809,8 +1810,22 @@ def test_bypassed_non_integer_salary_months_roll_back(
     )
     run_id = uuid4()
 
-    with pytest.raises(PersistenceError) as raised:
-        persistence.persist(invalid_batch, run_id=run_id)
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always", UserWarning)
+        with pytest.raises(PersistenceError) as raised:
+            persistence.persist(invalid_batch, run_id=run_id)
+
+    if isinstance(salary_months, float):
+        assert len(caught_warnings) == 1
+        warning = caught_warnings[0]
+        assert warning.category is UserWarning
+        assert re.fullmatch(
+            r"Pydantic serializer warnings:\n  Expected `int` but got `float` "
+            r"with value `1\.5` - serialized value may not be as expected",
+            str(warning.message),
+        )
+    else:
+        assert caught_warnings == []
 
     assert raised.value.run_id == run_id
     assert raised.value.constraint == "persistence_dto"
