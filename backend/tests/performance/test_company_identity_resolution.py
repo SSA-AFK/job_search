@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, event, text
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session
 
 from app.company_identity.contracts import CompanyIdentityInput, IdentityResolutionKind
@@ -33,6 +33,18 @@ def _drop_isolated_schema(connection, quoted_schema: str) -> None:
     )
     for statement in statements:
         connection.execute(text(statement))
+
+
+def _isolated_postgresql_url(database_url: str, schema_name: str) -> URL:
+    if re.fullmatch(r"identity_resolution_[0-9a-f]{6,64}", schema_name) is None:
+        raise ValueError("invalid isolated schema name")
+    return make_url(database_url).update_query_dict(
+        {"options": f"-csearch_path={schema_name},public"}
+    )
+
+
+def _boundary_company_id(value: int) -> UUID:
+    return UUID(f"00000000-0000-0000-0000-{value:012d}")
 
 
 def _install_pg_trgm_extension(connection) -> None:
@@ -78,6 +90,34 @@ def test_isolated_schema_cleanup_drops_only_owned_objects_without_cascade() -> N
 
 @pytest.mark.performance
 @pytest.mark.postgresql
+def test_isolated_schema_url_includes_public_after_validated_owned_schema() -> None:
+    schema_name = "identity_resolution_abc123"
+
+    schema_url = _isolated_postgresql_url(
+        "postgresql://localhost/company_search", schema_name
+    )
+
+    assert schema_url.query["options"] == f"-csearch_path={schema_name},public"
+    with pytest.raises(ValueError, match="invalid isolated schema name"):
+        _isolated_postgresql_url(
+            "postgresql://localhost/company_search",
+            "identity_resolution_abc123,public",
+        )
+    with pytest.raises(ValueError, match="invalid isolated schema name"):
+        _isolated_postgresql_url("postgresql://localhost/company_search", "public")
+
+
+@pytest.mark.performance
+@pytest.mark.postgresql
+def test_boundary_company_id_matches_decimal_text_seed() -> None:
+    company_id = _boundary_company_id(10)
+
+    assert company_id == UUID("00000000-0000-0000-0000-000000000010")
+    assert company_id != UUID(int=10)
+
+
+@pytest.mark.performance
+@pytest.mark.postgresql
 def test_pg_trgm_fixture_ddl_uses_stable_public_schema() -> None:
     connection = _RecordingConnection()
 
@@ -105,7 +145,7 @@ def test_ten_thousand_company_resolution_uses_bounded_trigram_recall() -> None:
         pytest.skip("TEST_POSTGRES_URL is not configured")
 
     schema_name = f"identity_resolution_{uuid4().hex}"
-    assert schema_name.isidentifier()
+    schema_url = _isolated_postgresql_url(database_url, schema_name)
     quoted_schema = f'"{schema_name}"'
     admin_engine = create_engine(database_url)
     schema_engine = None
@@ -116,9 +156,6 @@ def test_ten_thousand_company_resolution_uses_bounded_trigram_recall() -> None:
             connection.execute(text(f"CREATE SCHEMA {quoted_schema}"))
             schema_created = True
 
-        schema_url = make_url(database_url).update_query_dict(
-            {"options": f"-csearch_path={schema_name}"}
-        )
         schema_engine = create_engine(schema_url)
         with schema_engine.begin() as connection:
             connection.execute(
@@ -208,7 +245,7 @@ def test_ten_thousand_company_resolution_uses_bounded_trigram_recall() -> None:
         assert result.kind is IdentityResolutionKind.REVIEW_REQUIRED
         assert 1 <= len(result.candidate_matches) <= 20
         assert tuple(match.company_id for match in boundary_matches) == tuple(
-            UUID(int=value) for value in range(1, 21)
+            _boundary_company_id(value) for value in range(1, 21)
         )
         assert all(
             "SELECT COMPANIES.ID, COMPANIES.NORMALIZED_NAME FROM COMPANIES"
@@ -218,8 +255,10 @@ def test_ten_thousand_company_resolution_uses_bounded_trigram_recall() -> None:
         similarity_statements = [
             statement for statement in statements if "<->" in statement and "ORDER BY" in statement
         ]
-        assert len(similarity_statements) == 2
-        assert all("ORDER BY" in statement and "LIMIT" in statement for statement in similarity_statements)
+        assert len(similarity_statements) == 4
+        assert all("LIMIT" in statement for statement in similarity_statements)
+        assert sum("JOIN COMPANY_ALIASES" in statement for statement in similarity_statements) == 2
+        assert sum("JOIN COMPANY_ALIASES" not in statement for statement in similarity_statements) == 2
     finally:
         if schema_engine is not None:
             schema_engine.dispose()
