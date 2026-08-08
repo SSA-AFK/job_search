@@ -150,6 +150,33 @@ def test_filing_identity_is_type_and_number_scoped(
         session.commit()
 
 
+def test_filing_number_preserves_display_value_and_normalizes_identity_key(
+    session: Session, company: Company
+) -> None:
+    filing = RegulatoryFiling(
+        company_id=company.id,
+        filing_type=FilingType.BUSINESS_LICENSE,
+        filing_number="  Ｋ\u3000Straße\t42 ",
+        filing_name="Example",
+    )
+    session.add(filing)
+    session.commit()
+    session.refresh(filing)
+
+    assert filing.filing_number == "  Ｋ\u3000Straße\t42 "
+    assert filing.normalized_filing_number == "kstrasse42"
+
+
+def test_filing_number_rejects_display_value_over_database_length(company: Company) -> None:
+    with pytest.raises(ValueError, match="filing_number exceeds database length"):
+        RegulatoryFiling(
+            company_id=company.id,
+            filing_type=FilingType.BUSINESS_LICENSE,
+            filing_number=" " * 255 + "A",
+            filing_name="Example",
+        )
+
+
 def test_deleting_company_cascades_owned_records(
     session: Session, company: Company, job: JobPosting
 ) -> None:

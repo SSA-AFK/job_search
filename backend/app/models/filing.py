@@ -49,7 +49,7 @@ class RegulatoryFiling(Base, TimestampMixin):
         normalized = normalize_name(value)
         if not normalized:
             raise ValueError("filing_number is required")
-        if len(normalized) > 255:
+        if len(value) > 255 or len(normalized) > 255:
             raise ValueError("filing_number exceeds database length")
         self.normalized_filing_number = normalized
-        return normalized
+        return value

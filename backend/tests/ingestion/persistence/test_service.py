@@ -1626,7 +1626,7 @@ def test_filing_unique_race_reselects_same_company_winner(
     winner = RegulatoryFiling(
         company_id=company.id,
         filing_type=FilingType.ICP,
-        filing_number="ICP-RACE",
+        filing_number="icp-race",
         filing_name="Winner filing",
     )
     candidate = normalized_filing("ICP-RACE").model_copy(
