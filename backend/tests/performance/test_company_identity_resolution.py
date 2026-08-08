@@ -179,7 +179,7 @@ def test_ten_thousand_company_resolution_uses_bounded_trigram_recall() -> None:
                     "SELECT md5('company-' || value)::uuid, "
                     "'Benchmark Company ' || lpad(value::text, 5, '0'), "
                     "'benchmarkcompany' || lpad(value::text, 5, '0') "
-                    "FROM generate_series(1, 10000) AS value"
+                    "FROM generate_series(1, 9975) AS value"
                 )
             )
             connection.execute(
@@ -188,7 +188,7 @@ def test_ten_thousand_company_resolution_uses_bounded_trigram_recall() -> None:
                     "SELECT md5('alias-' || value)::uuid, md5('company-' || value)::uuid, "
                     "'Benchmark Alias ' || lpad(value::text, 5, '0'), "
                     "'benchmarkalias' || lpad(value::text, 5, '0') "
-                    "FROM generate_series(1, 10000) AS value"
+                    "FROM generate_series(1, 9975) AS value"
                 )
             )
             connection.execute(
@@ -204,7 +204,8 @@ def test_ten_thousand_company_resolution_uses_bounded_trigram_recall() -> None:
             connection.execute(text("ANALYZE companies"))
             connection.execute(text("ANALYZE company_aliases"))
 
-            assert connection.scalar(text("SELECT count(*) FROM companies")) == 10_025
+            assert connection.scalar(text("SELECT count(*) FROM companies")) == 10_000
+            assert connection.scalar(text("SELECT count(*) FROM company_aliases")) == 9_975
             assert connection.scalar(
                 text(
                     "SELECT count(DISTINCT normalized_name <-> 'knnboundaryz') "
