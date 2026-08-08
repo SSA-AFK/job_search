@@ -1,6 +1,6 @@
 # Stage 3 万级职位覆盖迁移总计划
 
-> **状态：Stage 3A 已完成；Company Identity Resolution Hardening 已实现，Task 10 release gate 阻塞**
+> **状态：Stage 3A 已完成；Company Identity Resolution Hardening 本地 gate 已通过，Task 10 等待最终 whole-branch review**
 > **修订日期：2026-08-08**
 > **定位：** 基于已完成 Stage 2 的 Stage 3 执行路线；Stage 3A 已按获批详细计划实施，后续阶段仍不是可直接开工的 implementation plan。
 > **设计依据：** [job-coverage-at-scale-plan.md](job-coverage-at-scale-plan.md)
@@ -177,13 +177,22 @@ Task 7 及全分支最终审阅在 round 4/5 后得到 specification PASS 和 qu
 
 Task 6 audit categories 固定为：Critical `cross_table_name_owner`、`shared_website_identity`、`incompatible_recruitment_identities`、`audit_findings_truncated`；Important `accepted_candidate_name_unrepresented`、`fuzzy_name_cluster`、`orphan_alias`、`pending_review_owner_changed`、`similarity_search_unavailable`；Minor `canonical_name_normalized_drift`、`alias_normalized_drift`、`filing_number_normalized_drift`、`website_normalized_drift`。人工裁定保留窄 pending-owner 语义，只报告可证明的新当前所有权或基数变化，不增加 prior exact-owner UUID schema。Task 7 人工裁定把 POSIX output directory 作为可信 operator-controlled boundary；Windows 保持 pinned native-handle 保护，POSIX 同权限 writer 的 syscall 间竞态是明确剩余风险。
 
-Task 8 final offline refresh 的 fresh 完整离线命令结果为：第一组 `729 passed / 7 skipped / 0 warnings in 141.89s`；第二组保留修复后的 fresh `221 passed in 85.57s` 证据，production scope 此后未变；Ruff clean；mypy `98 source files` clean。`2f71395` 精确捕获并断言 intentional 非整数 `salary_months` serializer warning，brief 命令不再输出 warning summary。默认测试未启用网络、Redis、模型 API、浏览器或职位列表 provider。ResourceWarning 仅见于额外的非 brief `-W error` experiment，不构成 brief gate 失败。
+Task 8 final 本地证据为：第一组离线测试 `729 passed / 8 conditional skips`；第二组 `221 passed`；Ruff clean；mypy `98 source files` clean。PostgreSQL migration/service marker 为 `5 passed / 58 deselected`，所选测试没有 skip；PostgreSQL performance 文件为 `5 passed`，没有 skip。性能数据集为 9,975 个 regular Companies 加 25 个 boundary Companies，合计恰好 10,000 个 Companies，并有 `9,975 aliases`。`pg_trgm` 位于 `public` namespace；测试自有的非 `CASCADE` 清理确认 `identity_resolution_*` schema 零残留。
 
-all-tracked secret pattern scan 的六处命中均是 tracked baseline synthetic examples/tests：agent skill 文档四条 API-key pattern，CLI/reporting redaction 测试两条 credentialed-connection-URI pattern；只记录 file/line/category，未输出匹配值。`9df90a6..HEAD` changed-range scan 对六个 gate-repair 文件 clean。不得修改无关 synthetic fixture 来迎合 regex；all-tracked 非空作为 gate-spec baseline false-positive blocker 等待 controller/human ruling。
+all-tracked secret pattern scan 只包含以下六项 tracked baseline synthetic examples/tests。复核没有输出匹配值；六项 path、line 与 SHA-256 均未变化，且 `9df90a6..f5e1ab5` changed-range scan 为零命中。此后任何新增、删除、移动或哈希变化都必须重新审阅：
 
-由于 `TEST_POSTGRES_URL` 不存在，`0009` live migration round trip、Task 3/4/5 两会话 concurrency、trigram plan 和严格 10,000-company performance marker 均未运行，不能声明 no-skip 或零 residual isolated schemas。专用 read-only audit 数据库配置也不存在，所以 audit CLI 未运行，Critical/Important clean 状态未知。Task 10 保持 paused，且不得生成真实 candidate import、live discovery、manifest artifacts 或 runtime reports。
+| Path | Line | SHA-256 |
+| --- | ---: | --- |
+| `.agents/skills/subagent-driven-development/SKILL.md` | 57 | `8de105e3bd07359ea603d72d5c6cec36480c7db49258606292d16376d4c2e7f2` |
+| `.agents/skills/subagent-driven-development/SKILL.md` | 84 | `3f608c056a6083f751e877730521334b08330c2edf7e2d8495bea612073d68b4` |
+| `.agents/skills/subagent-driven-development/SKILL.md` | 85 | `b84c521a3403fe31c687e7d95e63017eacbfb08839f05d63cb8b6ae733373d7b` |
+| `.agents/skills/subagent-driven-development/SKILL.md` | 300 | `ba8434c8179a46144aa389d9d2dfad302e4fa20b34f74aa9b6582b971787f00a` |
+| `backend/tests/company_identity/test_cli.py` | 436 | `3413a723213180695b84a3b7b43b96e164b6a54c9f54788433ec2643aa80d0f8` |
+| `backend/tests/manifest/test_reporting.py` | 263 | `aea4bf9f6063bf94a2d3c373aad60cfc383d45415bc73da5f502b44780b916bb` |
 
-Task 10 release prerequisites 中，离线 suites 零失败与 serializer warning assertion 现已满足；仍要求 tracked-file secret scan clean 或 baseline synthetic false positives 有明确 human ruling、PostgreSQL migration/service 与 `performance and postgresql` markers 零 skip 并由测试自有的非 `CASCADE` 清理验证零残留 schema、专用数据库 audit 的所有 Critical/Important 为零或具有明确人工裁定、`2143f8f..HEAD` whole-branch review clean。剩余 Minor 包括 advisory lock key 未排序去重的理论 hash-collision deadlock、seed importer direct `RegulatoryFiling` writer 不在 Task 3 locking 内、audit chunk display capacity、POSIX runtime 未实测、Windows symlink privilege skip，以及人工接受的 POSIX 同权限竞态风险。
+专用 read-only audit 数据库已升级到 `0009_company_identity_review`，sanitized CLI 报告零 findings；外部 audit report 未被读取或提交。本次没有执行真实 candidate import、live discovery，也没有生成 manifest artifact 或 external runtime report。
+
+Task 10 release prerequisites 中，本地离线、PostgreSQL、严格 10,000-company performance、secret baseline 与专用只读审计 gate 均已满足；Task 10 仍保持 paused，唯一剩余 prerequisite 是 `2143f8f..HEAD` whole-branch review clean。剩余 Minor 包括 advisory lock key 未排序去重的理论 hash-collision deadlock、seed importer direct `RegulatoryFiling` writer 不在 Task 3 locking 内、audit chunk display capacity、POSIX runtime 未实测、Windows symlink privilege skip，以及人工接受的 POSIX 同权限竞态风险。
 
 ## 6. Stage 3B：ATS 正式接入
 
