@@ -39,6 +39,21 @@ def _install_pg_trgm_extension(connection) -> None:
     connection.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public"))
 
 
+def _create_pg_trgm_indexes(connection) -> None:
+    statements = (
+        (
+            "CREATE INDEX ix_companies_normalized_name_trgm "
+            "ON companies USING gist (normalized_name public.gist_trgm_ops)"
+        ),
+        (
+            "CREATE INDEX ix_company_aliases_normalized_alias_trgm "
+            "ON company_aliases USING gist (normalized_alias public.gist_trgm_ops)"
+        ),
+    )
+    for statement in statements:
+        connection.execute(text(statement))
+
+
 @pytest.mark.performance
 @pytest.mark.postgresql
 def test_isolated_schema_cleanup_drops_only_owned_objects_without_cascade() -> None:
@@ -63,12 +78,23 @@ def test_isolated_schema_cleanup_drops_only_owned_objects_without_cascade() -> N
 
 @pytest.mark.performance
 @pytest.mark.postgresql
-def test_pg_trgm_fixture_install_uses_stable_public_schema() -> None:
+def test_pg_trgm_fixture_ddl_uses_stable_public_schema() -> None:
     connection = _RecordingConnection()
 
     _install_pg_trgm_extension(connection)
+    _create_pg_trgm_indexes(connection)
 
-    assert connection.statements == ["CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public"]
+    assert connection.statements == [
+        "CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public",
+        (
+            "CREATE INDEX ix_companies_normalized_name_trgm "
+            "ON companies USING gist (normalized_name public.gist_trgm_ops)"
+        ),
+        (
+            "CREATE INDEX ix_company_aliases_normalized_alias_trgm "
+            "ON company_aliases USING gist (normalized_alias public.gist_trgm_ops)"
+        ),
+    ]
 
 
 @pytest.mark.performance
@@ -109,19 +135,7 @@ def test_ten_thousand_company_resolution_uses_bounded_trigram_recall() -> None:
                     "alias text NOT NULL, normalized_alias text NOT NULL)"
                 )
             )
-            connection.execute(
-                text(
-                    "CREATE INDEX ix_companies_normalized_name_trgm "
-                    "ON companies USING gist (normalized_name public.gist_trgm_ops)"
-                )
-            )
-            connection.execute(
-                text(
-                    "CREATE INDEX ix_company_aliases_normalized_alias_trgm "
-                    "ON company_aliases USING gist "
-                    "(normalized_alias public.gist_trgm_ops)"
-                )
-            )
+            _create_pg_trgm_indexes(connection)
             connection.execute(
                 text(
                     "INSERT INTO companies (id, canonical_name, normalized_name) "

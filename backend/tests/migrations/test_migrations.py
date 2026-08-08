@@ -968,7 +968,7 @@ def test_gate1_manifest_discovery_round_trip_preserves_stage3a_rows(
                 "created_at": created_at,
             },
         )
-        observation_parameter_sets: tuple[dict[str, object], ...] = (
+        for parameters in (
             {
                 "id": str(uuid4()),
                 "version": "f" * 64,
@@ -990,11 +990,8 @@ def test_gate1_manifest_discovery_round_trip_preserves_stage3a_rows(
                 "entry_id": entry_id,
                 "created_at": created_at,
             },
-        )
-        for observation_parameters in observation_parameter_sets:
-            _expect_integrity_error(
-                connection, observation_insert, observation_parameters
-            )
+        ):
+            _expect_integrity_error(connection, observation_insert, parameters)
         assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
 
     command.upgrade(config, "head")
@@ -1208,6 +1205,100 @@ def test_0009_postgresql_sql_contains_bounded_similarity_indexes() -> None:
         "ON company_identity_review_items (status, created_at)" in sql
     )
     assert sql.count("ON DELETE RESTRICT") == 4
+
+
+@pytest.mark.postgresql
+def test_0009_existing_pg_trgm_outside_public_fails_closed_and_rolls_back() -> None:
+    database_url = os.getenv("TEST_POSTGRES_URL")
+    if database_url is None:
+        pytest.skip("TEST_POSTGRES_URL is not configured")
+
+    migration_path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "0009_company_identity_review.py"
+    )
+    migration = runpy.run_path(str(migration_path))
+    sql_names = {
+        "_POSTGRESQL_PG_TRGM_EXTENSION_SQL",
+        "_POSTGRESQL_COMPANIES_TRGM_INDEX_SQL",
+        "_POSTGRESQL_ALIASES_TRGM_INDEX_SQL",
+    }
+    assert sql_names <= migration.keys()
+
+    extension_sql = migration["_POSTGRESQL_PG_TRGM_EXTENSION_SQL"]
+    index_sql = migration["_POSTGRESQL_COMPANIES_TRGM_INDEX_SQL"]
+    schema_name = f"trgm_edge_{uuid4().hex}"
+    if re.fullmatch(r"trgm_edge_[0-9a-f]{32}", schema_name) is None:
+        raise ValueError("invalid pg_trgm edge schema name")
+    quoted_schema_name = f'"{schema_name}"'
+    engine = create_engine(database_url)
+
+    try:
+        with engine.connect() as connection:
+            original_namespace = connection.scalar(
+                text(
+                    "SELECT namespace.nspname FROM pg_catalog.pg_extension AS extension "
+                    "JOIN pg_catalog.pg_namespace AS namespace "
+                    "ON namespace.oid = extension.extnamespace "
+                    "WHERE extension.extname = 'pg_trgm'"
+                )
+            )
+        assert original_namespace is not None
+
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                connection.execute(text("DROP EXTENSION pg_trgm"))
+                connection.execute(text(f"CREATE SCHEMA {quoted_schema_name}"))
+                connection.execute(
+                    text(
+                        f"CREATE EXTENSION pg_trgm WITH SCHEMA {quoted_schema_name}"
+                    )
+                )
+                connection.execute(text(extension_sql))
+                namespace = connection.scalar(
+                    text(
+                        "SELECT namespace.nspname "
+                        "FROM pg_catalog.pg_extension AS extension "
+                        "JOIN pg_catalog.pg_namespace AS namespace "
+                        "ON namespace.oid = extension.extnamespace "
+                        "WHERE extension.extname = 'pg_trgm'"
+                    )
+                )
+                assert namespace == schema_name
+                connection.execute(
+                    text(f"SET LOCAL search_path TO {quoted_schema_name}")
+                )
+                connection.execute(text("CREATE TABLE companies (normalized_name text)"))
+
+                with pytest.raises(DBAPIError) as error_info:
+                    connection.execute(text(index_sql))
+                assert getattr(error_info.value.orig, "sqlstate", None) == "42704"
+            finally:
+                transaction.rollback()
+
+        with engine.connect() as connection:
+            restored_namespace = connection.scalar(
+                text(
+                    "SELECT namespace.nspname FROM pg_catalog.pg_extension AS extension "
+                    "JOIN pg_catalog.pg_namespace AS namespace "
+                    "ON namespace.oid = extension.extnamespace "
+                    "WHERE extension.extname = 'pg_trgm'"
+                )
+            )
+            edge_schema_exists = connection.scalar(
+                text(
+                    "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace "
+                    "WHERE nspname = :schema_name)"
+                ),
+                {"schema_name": schema_name},
+            )
+        assert restored_namespace == original_namespace
+        assert edge_schema_exists is False
+    finally:
+        engine.dispose()
 
 
 def test_0009_postgresql_downgrade_owns_only_review_objects() -> None:

@@ -22,6 +22,17 @@ depends_on: str | Sequence[str] | None = None
 _RAW_FILING_UNIQUE = "uq_filing_type_number"
 _NORMALIZED_FILING_UNIQUE = "uq_filing_type_normalized_number"
 _SQLITE_FILING_PREFLIGHT_TABLE = "_0009_normalized_filing_identity_preflight"
+_POSTGRESQL_PG_TRGM_EXTENSION_SQL = (
+    "CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public"
+)
+_POSTGRESQL_COMPANIES_TRGM_INDEX_SQL = (
+    "CREATE INDEX ix_companies_normalized_name_trgm "
+    "ON companies USING gist (normalized_name public.gist_trgm_ops)"
+)
+_POSTGRESQL_ALIASES_TRGM_INDEX_SQL = (
+    "CREATE INDEX ix_company_aliases_normalized_alias_trgm "
+    "ON company_aliases USING gist (normalized_alias public.gist_trgm_ops)"
+)
 
 _POSTGRESQL_OFFLINE_BACKFILL_GUARD = """
 DO $$
@@ -482,15 +493,9 @@ def upgrade() -> None:
     )
 
     if _is_postgresql():
-        op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public")
-        op.execute(
-            "CREATE INDEX ix_companies_normalized_name_trgm "
-            "ON companies USING gist (normalized_name public.gist_trgm_ops)"
-        )
-        op.execute(
-            "CREATE INDEX ix_company_aliases_normalized_alias_trgm "
-            "ON company_aliases USING gist (normalized_alias public.gist_trgm_ops)"
-        )
+        op.execute(_POSTGRESQL_PG_TRGM_EXTENSION_SQL)
+        op.execute(_POSTGRESQL_COMPANIES_TRGM_INDEX_SQL)
+        op.execute(_POSTGRESQL_ALIASES_TRGM_INDEX_SQL)
 
 
 def downgrade() -> None:
