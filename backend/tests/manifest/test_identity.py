@@ -1,17 +1,29 @@
-from collections.abc import Iterator
+import os
+import re
+from collections.abc import Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta, timezone
+from decimal import Decimal
 from hashlib import sha256
+from threading import Event
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, event, func, select
+from sqlalchemy import create_engine, event, func, select, text
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
+from app.company_identity.contracts import CompanyIdentityCandidateMatch
 from app.core.normalization import normalize_name
+from app.ingestion.extraction.schemas import CompanyCandidate
+from app.ingestion.normalization.company import normalize_company
+from app.ingestion.persistence.contracts import NormalizedCompanyRecord
+from app.ingestion.persistence.service import PersistenceService
 from app.manifest import identity as identity_module
 from app.manifest.contracts import (
     AiCategory,
@@ -30,6 +42,28 @@ from app.manifest.identity import (
 )
 from app.manifest.models import CandidateFact, CandidateReview
 from app.models import Base, Company, CompanyAlias, JobEntry
+
+
+def _quoted_manifest_identity_race_schema(schema_name: str) -> str:
+    if re.fullmatch(r"manifest_identity_race_[0-9a-f]{32}", schema_name) is None:
+        raise ValueError("invalid isolated manifest identity schema")
+    return f'"{schema_name}"'
+
+
+def _drop_manifest_identity_race_schema(
+    connection: Connection,
+    schema_name: str,
+) -> None:
+    quoted_schema = _quoted_manifest_identity_race_schema(schema_name)
+    statements = (
+        f"DROP TABLE IF EXISTS {quoted_schema}.candidate_reviews",
+        f"DROP TABLE IF EXISTS {quoted_schema}.candidate_facts",
+        f"DROP TABLE IF EXISTS {quoted_schema}.company_aliases",
+        f"DROP TABLE IF EXISTS {quoted_schema}.companies",
+        f"DROP SCHEMA {quoted_schema}",
+    )
+    for statement in statements:
+        connection.execute(text(statement))
 
 
 @pytest.fixture
@@ -83,6 +117,37 @@ def candidate(
 def persist_candidates(session: Session, *facts: CandidateFact) -> None:
     session.add_all(facts)
     session.commit()
+
+
+def test_manifest_identity_race_cleanup_is_schema_scoped_without_cascade() -> None:
+    class RecordingConnection:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        def execute(self, statement: object) -> None:
+            self.statements.append(str(statement))
+
+    with pytest.raises(ValueError):
+        _drop_manifest_identity_race_schema(  # type: ignore[arg-type]
+            RecordingConnection(),
+            "public",
+        )
+
+    connection = RecordingConnection()
+    schema_name = f"manifest_identity_race_{'a' * 32}"
+    _drop_manifest_identity_race_schema(  # type: ignore[arg-type]
+        connection,
+        schema_name,
+    )
+
+    assert connection.statements == [
+        f'DROP TABLE IF EXISTS "{schema_name}".candidate_reviews',
+        f'DROP TABLE IF EXISTS "{schema_name}".candidate_facts',
+        f'DROP TABLE IF EXISTS "{schema_name}".company_aliases',
+        f'DROP TABLE IF EXISTS "{schema_name}".companies',
+        f'DROP SCHEMA "{schema_name}"',
+    ]
+    assert all("CASCADE" not in statement for statement in connection.statements)
 
 
 def decision(
@@ -514,6 +579,212 @@ def test_incremental_inventory_conflict_with_existing_job_entry_requires_review(
     assert pending.company_id is None
 
 
+def test_new_identity_cannot_claim_an_existing_normalized_website(
+    session: Session,
+) -> None:
+    website_owner = Company(
+        canonical_name="Website Owner",
+        normalized_name=normalize_name("Website Owner"),
+        website="https://example.com/about",
+    )
+    fact = candidate(
+        "new-website-conflict",
+        "New Candidate",
+        official_website="HTTPS://EXAMPLE.COM:443/about?utm_source=manifest",
+    )
+    session.add_all((website_owner, fact))
+    session.commit()
+
+    summary = resolve_candidates(session)
+
+    assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=1)
+    assert fact.company_id is None
+    assert session.scalar(select(func.count()).select_from(Company)) == 1
+
+
+def test_exact_owner_cannot_claim_another_company_website(session: Session) -> None:
+    exact_owner = Company(
+        canonical_name="Exact Website Candidate",
+        normalized_name=normalize_name("Exact Website Candidate"),
+    )
+    website_owner = Company(
+        canonical_name="Other Website Owner",
+        normalized_name=normalize_name("Other Website Owner"),
+        website="https://other.example/company",
+    )
+    fact = candidate(
+        "exact-website-conflict",
+        "Exact Website Candidate",
+        official_website="https://other.example/company?source=manifest",
+    )
+    session.add_all((exact_owner, website_owner, fact))
+    session.commit()
+
+    summary = resolve_candidates(session)
+
+    assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=1)
+    assert fact.company_id is None
+
+
+def test_exact_owner_may_reuse_its_normalized_website(session: Session) -> None:
+    exact_owner = Company(
+        canonical_name="Exact Website Owner",
+        normalized_name=normalize_name("Exact Website Owner"),
+        website="https://owner.example/about",
+    )
+    fact = candidate(
+        "exact-owned-website",
+        "Exact Website Owner",
+        official_website="HTTPS://OWNER.EXAMPLE:443/about?source=manifest",
+    )
+    session.add_all((exact_owner, fact))
+    session.commit()
+
+    summary = resolve_candidates(session)
+
+    assert summary == IdentityResolutionSummary(auto_accepted=1, review_required=0)
+    assert fact.company_id == exact_owner.id
+
+
+def test_exact_group_with_multiple_normalized_websites_requires_review(
+    session: Session,
+) -> None:
+    first = candidate(
+        "multiple-website-a",
+        "Multiple Website Candidate",
+        official_website="https://first.example/",
+    )
+    second = candidate(
+        "multiple-website-b",
+        "Multiple Website Candidate",
+        official_website="https://second.example/",
+    )
+    persist_candidates(session, first, second)
+
+    summary = resolve_candidates(session)
+
+    assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=2)
+    assert first.company_id is None
+    assert second.company_id is None
+    assert session.scalar(select(func.count()).select_from(Company)) == 0
+
+
+def test_auto_resolution_locks_identity_material_before_owner_rechecks(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fact = candidate(
+        "auto-lock-order",
+        "Lock Order Candidate",
+        aliases=("Lock Order Alias",),
+        official_website="HTTPS://LOCK.EXAMPLE:443/about?source=manifest",
+    )
+    persist_candidates(session, fact)
+    captured: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+    events: list[str] = []
+    inside_lock = False
+    exact_name_owners = identity_module._exact_name_owners  # type: ignore[attr-defined]
+    website_owner_ids = identity_module._targeted_website_owner_ids  # type: ignore[attr-defined]
+
+    @contextmanager
+    def observe_identity_lock(
+        _session: Session,
+        names: Sequence[str],
+        *,
+        official_websites: Sequence[str] = (),
+    ) -> Iterator[None]:
+        nonlocal inside_lock
+        captured.append((tuple(names), tuple(official_websites)))
+        events.append("lock")
+        inside_lock = True
+        try:
+            yield
+        finally:
+            inside_lock = False
+            events.append("unlock")
+
+    def checked_exact_name_owners(
+        repository: object,
+        names: frozenset[str],
+    ) -> dict[str, set[UUID]]:
+        assert inside_lock, "exact owner query ran outside the shared identity lock"
+        events.append("exact")
+        return exact_name_owners(repository, names)  # type: ignore[arg-type]
+
+    def checked_website_owner_ids(
+        database_session: Session,
+        websites: frozenset[str],
+    ) -> set[UUID] | None:
+        assert inside_lock, "website owner query ran outside the shared identity lock"
+        events.append("website")
+        return website_owner_ids(database_session, websites)
+
+    monkeypatch.setattr(
+        identity_module,
+        "serialized_company_identities",
+        observe_identity_lock,
+        raising=False,
+    )
+    monkeypatch.setattr(identity_module, "_exact_name_owners", checked_exact_name_owners)
+    monkeypatch.setattr(
+        identity_module,
+        "_targeted_website_owner_ids",
+        checked_website_owner_ids,
+    )
+
+    summary = resolve_candidates(session)
+
+    assert summary == IdentityResolutionSummary(auto_accepted=1, review_required=0)
+    assert captured == [
+        (
+            (normalize_name("Lock Order Alias"), normalize_name("Lock Order Candidate")),
+            ("https://lock.example/about",),
+        )
+    ]
+    assert events[0] == "lock"
+    assert events[-1] == "unlock"
+    assert events.index("exact") < events.index("website") < events.index("unlock")
+
+
+def test_auto_resolution_refreshes_pending_facts_after_identity_lock(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fact = candidate("auto-stale-pending", "Stale Pending Candidate")
+    persist_candidates(session, fact)
+
+    @contextmanager
+    def complete_candidate_before_lock_body(
+        database_session: Session,
+        _names: Sequence[str],
+        *,
+        official_websites: Sequence[str] = (),
+    ) -> Iterator[None]:
+        assert official_websites == ()
+        company = Company(
+            canonical_name=fact.canonical_name,
+            normalized_name=fact.normalized_name,
+        )
+        database_session.add(company)
+        database_session.flush()
+        fact.company_id = company.id
+        fact.decision_status = CandidateDecisionStatus.ACCEPTED
+        database_session.flush()
+        yield
+
+    monkeypatch.setattr(
+        identity_module,
+        "serialized_company_identities",
+        complete_candidate_before_lock_body,
+    )
+
+    summary = resolve_candidates(session)
+
+    assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=0)
+    assert fact.decision_status is CandidateDecisionStatus.ACCEPTED
+    assert session.scalar(select(func.count()).select_from(Company)) == 1
+
+
 def test_fuzzy_name_match_requires_review(session: Session) -> None:
     persist_candidates(
         session,
@@ -649,6 +920,42 @@ class _PostgreSQLSimilarityRecordingSession:
         return _EmptyRows()
 
 
+@pytest.mark.parametrize(
+    ("score", "expected_owner"),
+    [
+        ("89.999", False),
+        ("90", True),
+        ("90.001", True),
+    ],
+)
+def test_postgresql_existing_similarity_owners_respect_review_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+    score: str,
+    expected_owner: bool,
+) -> None:
+    session = _PostgreSQLSimilarityRecordingSession()
+    similarity = identity_module._PostgreSQLManifestIdentitySimilarity(  # type: ignore[attr-defined]
+        session  # type: ignore[arg-type]
+    )
+    company_id = UUID("11111111-1111-1111-1111-111111111111")
+    match = CompanyIdentityCandidateMatch(
+        company_id=company_id,
+        canonical_name="Existing Company",
+        normalized_name="existingcompany",
+        match_kind="fuzzy_canonical",
+        score=Decimal(score),
+    )
+    monkeypatch.setattr(
+        similarity._repository,  # type: ignore[attr-defined]
+        "find_similar_names_sync",
+        lambda _names, *, limit: (match,),
+    )
+
+    owner_ids = similarity.existing_owner_ids(frozenset({"candidatecompany"}))
+
+    assert (company_id in owner_ids) is expected_owner
+
+
 def test_postgresql_manifest_similarity_is_topk_bounded_per_candidate_name() -> None:
     session = _PostgreSQLSimilarityRecordingSession()
     similarity = identity_module._PostgreSQLManifestIdentitySimilarity(  # type: ignore[attr-defined]
@@ -740,6 +1047,69 @@ def test_fuzzy_name_near_existing_company_or_alias_requires_review(
     assert fact.decision_status is CandidateDecisionStatus.REVIEW_REQUIRED
     assert fact.company_id is None
     assert session.scalar(select(func.count()).select_from(Company)) == 1
+
+
+@pytest.mark.parametrize(
+    ("score", "expected_summary", "expected_status"),
+    [
+        (
+            "89.999",
+            IdentityResolutionSummary(auto_accepted=1, review_required=0),
+            CandidateDecisionStatus.ACCEPTED,
+        ),
+        (
+            "90",
+            IdentityResolutionSummary(auto_accepted=0, review_required=1),
+            CandidateDecisionStatus.REVIEW_REQUIRED,
+        ),
+    ],
+)
+def test_exact_owner_checks_threshold_qualified_fuzzy_conflicts(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    score: str,
+    expected_summary: IdentityResolutionSummary,
+    expected_status: CandidateDecisionStatus,
+) -> None:
+    exact_owner = Company(
+        canonical_name="Exact Candidate",
+        normalized_name=normalize_name("Exact Candidate"),
+    )
+    fuzzy_owner = Company(
+        canonical_name="Fuzzy Conflict",
+        normalized_name=normalize_name("Fuzzy Conflict"),
+    )
+    fact = candidate("exact-with-fuzzy-conflict", "Exact Candidate")
+    session.add_all((exact_owner, fuzzy_owner, fact))
+    session.commit()
+    similarity = identity_module._PostgreSQLManifestIdentitySimilarity(  # type: ignore[attr-defined]
+        session
+    )
+    match = CompanyIdentityCandidateMatch(
+        company_id=fuzzy_owner.id,
+        canonical_name=fuzzy_owner.canonical_name,
+        normalized_name=fuzzy_owner.normalized_name,
+        match_kind="fuzzy_canonical",
+        score=Decimal(score),
+    )
+    monkeypatch.setattr(
+        similarity._repository,  # type: ignore[attr-defined]
+        "similarity_search_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        similarity._repository,  # type: ignore[attr-defined]
+        "find_similar_names_sync",
+        lambda _names, *, limit: (match,),
+    )
+
+    summary = auto_resolve_candidates(session, similarity=similarity)
+
+    assert summary == expected_summary
+    assert fact.decision_status is expected_status
+    assert fact.company_id == (
+        exact_owner.id if expected_status is CandidateDecisionStatus.ACCEPTED else None
+    )
 
 
 def test_exact_existing_alias_links_without_creating_company(session: Session) -> None:
@@ -985,6 +1355,503 @@ def test_manual_merge_reuses_alias_owned_by_target_company(session: Session) -> 
     assert summary == ReviewSummary(applied=1, replayed=0)
     assert fact.company_id == company.id
     assert session.scalar(select(func.count()).select_from(CompanyAlias)) == 1
+
+
+def test_manual_accept_as_new_rejects_existing_normalized_website_owner(
+    session: Session,
+) -> None:
+    website_owner = Company(
+        canonical_name="Manual Website Owner",
+        normalized_name=normalize_name("Manual Website Owner"),
+        website="https://manual.example/about",
+    )
+    fact = candidate(
+        "manual-new-website-conflict",
+        "Manual New Candidate",
+        official_website="HTTPS://MANUAL.EXAMPLE:443/about?source=review",
+    )
+    session.add_all((website_owner, fact))
+    session.commit()
+
+    with pytest.raises(ReviewDecisionConflict):
+        apply_review_decisions(session, [decision(fact)])
+
+    session.expire_all()
+    assert fact.decision_status is CandidateDecisionStatus.REVIEW_REQUIRED
+    assert session.scalar(select(func.count()).select_from(Company)) == 1
+    assert session.scalar(select(func.count()).select_from(CandidateReview)) == 0
+
+
+def test_manual_exact_link_rejects_website_owned_by_another_company(
+    session: Session,
+) -> None:
+    exact_owner = Company(
+        canonical_name="Manual Exact Candidate",
+        normalized_name=normalize_name("Manual Exact Candidate"),
+    )
+    website_owner = Company(
+        canonical_name="Manual Other Website Owner",
+        normalized_name=normalize_name("Manual Other Website Owner"),
+        website="https://manual-other.example/",
+    )
+    fact = candidate(
+        "manual-link-website-conflict",
+        "Manual Exact Candidate",
+        official_website="https://manual-other.example/?source=review",
+    )
+    session.add_all((exact_owner, website_owner, fact))
+    session.commit()
+
+    with pytest.raises(ReviewDecisionConflict):
+        apply_review_decisions(
+            session,
+            [decision(fact, resolved_company_id=exact_owner.id)],
+        )
+
+    session.expire_all()
+    assert fact.decision_status is CandidateDecisionStatus.REVIEW_REQUIRED
+    assert session.scalar(select(func.count()).select_from(CandidateReview)) == 0
+
+
+def test_manual_exact_link_allows_website_owned_by_target_company(
+    session: Session,
+) -> None:
+    exact_owner = Company(
+        canonical_name="Manual Website Target",
+        normalized_name=normalize_name("Manual Website Target"),
+        website="https://manual-target.example/",
+    )
+    fact = candidate(
+        "manual-link-owned-website",
+        "Manual Website Target",
+        official_website="HTTPS://MANUAL-TARGET.EXAMPLE:443/?source=review",
+    )
+    session.add_all((exact_owner, fact))
+    session.commit()
+
+    summary = apply_review_decisions(
+        session,
+        [decision(fact, resolved_company_id=exact_owner.id)],
+    )
+
+    assert summary == ReviewSummary(applied=1, replayed=0)
+    assert fact.company_id == exact_owner.id
+
+
+def test_manual_batch_locks_all_identities_before_owner_rechecks(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = candidate(
+        "manual-batch-lock-a",
+        "Manual Lock One",
+        aliases=("Manual One Alias",),
+        official_website="HTTPS://MANUAL-ONE.EXAMPLE:443/about?source=review",
+    )
+    second = candidate(
+        "manual-batch-lock-b",
+        "Manual Lock Two",
+        aliases=("Manual Two Alias",),
+        official_website="https://manual-two.example/?source=review",
+    )
+    rejected = candidate(
+        "manual-batch-lock-reject",
+        "Manual Lock Rejected",
+        aliases=("Manual Rejected Alias",),
+        official_website="https://manual-rejected.example/?source=review",
+    )
+    persist_candidates(session, first, second, rejected)
+    captured: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+    events: list[str] = []
+    inside_lock = False
+    exact_name_owners = identity_module._exact_name_owners  # type: ignore[attr-defined]
+    website_owner_ids = identity_module._targeted_website_owner_ids  # type: ignore[attr-defined]
+
+    @contextmanager
+    def observe_identity_lock(
+        _session: Session,
+        names: Sequence[str],
+        *,
+        official_websites: Sequence[str] = (),
+    ) -> Iterator[None]:
+        nonlocal inside_lock
+        captured.append((tuple(names), tuple(official_websites)))
+        events.append("lock")
+        inside_lock = True
+        try:
+            yield
+        finally:
+            inside_lock = False
+            events.append("unlock")
+
+    def checked_exact_name_owners(
+        repository: object,
+        names: frozenset[str],
+    ) -> dict[str, set[UUID]]:
+        assert inside_lock, "exact owner query ran outside the shared identity lock"
+        events.append("exact")
+        return exact_name_owners(repository, names)  # type: ignore[arg-type]
+
+    def checked_website_owner_ids(
+        database_session: Session,
+        websites: frozenset[str],
+    ) -> set[UUID] | None:
+        assert inside_lock, "website owner query ran outside the shared identity lock"
+        events.append("website")
+        return website_owner_ids(database_session, websites)
+
+    monkeypatch.setattr(
+        identity_module,
+        "serialized_company_identities",
+        observe_identity_lock,
+    )
+    monkeypatch.setattr(identity_module, "_exact_name_owners", checked_exact_name_owners)
+    monkeypatch.setattr(
+        identity_module,
+        "_targeted_website_owner_ids",
+        checked_website_owner_ids,
+    )
+
+    summary = apply_review_decisions(
+        session,
+        [
+            decision(first),
+            decision(second),
+            decision(
+                rejected,
+                action=ReviewAction.REJECT,
+                resulting_status=CandidateDecisionStatus.REJECTED,
+            ),
+        ],
+    )
+
+    assert summary == ReviewSummary(applied=3, replayed=0)
+    assert captured == [
+        (
+            tuple(
+                sorted(
+                    {
+                        normalize_name("Manual Lock One"),
+                        normalize_name("Manual Lock Two"),
+                        normalize_name("Manual Lock Rejected"),
+                        normalize_name("Manual One Alias"),
+                        normalize_name("Manual Two Alias"),
+                        normalize_name("Manual Rejected Alias"),
+                    }
+                )
+            ),
+            (
+                "https://manual-one.example/about",
+                "https://manual-rejected.example/",
+                "https://manual-two.example/",
+            ),
+        )
+    ]
+    assert events[0] == "lock"
+    assert events[-1] == "unlock"
+    assert events.count("exact") == 2
+    assert events.count("website") == 2
+
+
+@pytest.mark.postgresql
+@pytest.mark.parametrize("writer_kind", ["auto", "manual"])
+def test_manifest_writer_shares_website_lock_with_persistence(
+    writer_kind: str,
+) -> None:
+    database_url = os.getenv("TEST_POSTGRES_URL")
+    if database_url is None:
+        pytest.skip("TEST_POSTGRES_URL is not configured")
+
+    schema_name = f"manifest_identity_race_{uuid4().hex}"
+    quoted_schema = _quoted_manifest_identity_race_schema(schema_name)
+    admin_engine = create_engine(database_url)
+    schema_engine = None
+    schema_created = False
+    shared_website = "https://manifest-shared.example/"
+    first_ready = Event()
+    release_first = Event()
+    manifest_lock_attempted = Event()
+    manifest_finished = Event()
+
+    try:
+        with admin_engine.begin() as connection:
+            connection.execute(text(f"CREATE SCHEMA {quoted_schema}"))
+            schema_created = True
+
+        schema_url = make_url(database_url).update_query_dict(
+            {"options": f"-csearch_path={schema_name}"}
+        )
+        schema_engine = create_engine(schema_url)
+        Base.metadata.create_all(
+            schema_engine,
+            tables=(
+                Company.__table__,
+                CompanyAlias.__table__,
+                CandidateFact.__table__,
+                CandidateReview.__table__,
+            ),
+        )
+        with Session(schema_engine, expire_on_commit=False) as setup:
+            fact = candidate(
+                f"postgresql-{writer_kind}-website-race",
+                "Manifest Website Candidate",
+                official_website=shared_website,
+            )
+            setup.add(fact)
+            setup.commit()
+            review_decision = decision(fact)
+
+        persistence_record = NormalizedCompanyRecord(
+            candidate=normalize_company(
+                CompanyCandidate(
+                    name="Persistence Website Owner",
+                    aliases=(),
+                    website=shared_website,
+                    description="Public company description",
+                    evidence_ids=["public-document"],
+                    confidence=0.9,
+                )
+            ),
+            company_id=None,
+            field_evidence=(),
+        )
+
+        @event.listens_for(schema_engine, "before_cursor_execute")
+        def observe_manifest_advisory_lock(
+            connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            info = connection.info  # type: ignore[attr-defined]
+            if (
+                info.get("manifest_identity_race_role") == "manifest"
+                and "PG_ADVISORY_XACT_LOCK" in statement.upper()
+            ):
+                manifest_lock_attempted.set()
+
+        def write_persistence_company() -> UUID:
+            with Session(schema_engine) as database_session, database_session.begin():
+                company = PersistenceService(database_session)._upsert_company(
+                    persistence_record,
+                    uuid4(),
+                )
+                database_session.flush()
+                company_id = company.id
+                first_ready.set()
+                if not release_first.wait(timeout=15):
+                    raise TimeoutError("manifest writer did not reach identity lock")
+                return company_id
+
+        def write_manifest_identity() -> IdentityResolutionSummary | str:
+            try:
+                with Session(
+                    schema_engine
+                ) as database_session, database_session.begin():
+                    database_session.connection().info[
+                        "manifest_identity_race_role"
+                    ] = "manifest"
+                    if writer_kind == "auto":
+                        return auto_resolve_candidates(
+                            database_session,
+                            similarity=_FixedSimilarity(),
+                        )
+                    apply_review_decisions(database_session, (review_decision,))
+                    return "applied"
+            except ReviewDecisionConflict:
+                return "review_conflict"
+            finally:
+                manifest_finished.set()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            persistence_future = executor.submit(write_persistence_company)
+            if not first_ready.wait(timeout=15):
+                persistence_future.result(timeout=15)
+                raise TimeoutError("persistence writer did not reach commit hold")
+            manifest_future = executor.submit(write_manifest_identity)
+            try:
+                if not manifest_lock_attempted.wait(timeout=15):
+                    manifest_future.result(timeout=15)
+                    raise TimeoutError("manifest writer did not reach identity lock")
+                assert not manifest_finished.wait(timeout=0.2)
+            finally:
+                release_first.set()
+            persistence_company_id = persistence_future.result(timeout=15)
+            manifest_result = manifest_future.result(timeout=15)
+
+        if writer_kind == "auto":
+            assert manifest_result == IdentityResolutionSummary(
+                auto_accepted=0,
+                review_required=1,
+            )
+        else:
+            assert manifest_result == "review_conflict"
+
+        with Session(schema_engine) as verification:
+            companies = tuple(verification.scalars(select(Company)))
+            stored_fact = verification.scalar(
+                select(CandidateFact).where(
+                    CandidateFact.stable_evidence_id == fact.stable_evidence_id
+                )
+            )
+            assert tuple(company.id for company in companies) == (
+                persistence_company_id,
+            )
+            assert companies[0].normalized_website == shared_website
+            assert stored_fact is not None
+            assert stored_fact.decision_status is CandidateDecisionStatus.REVIEW_REQUIRED
+            assert stored_fact.company_id is None
+            assert verification.scalar(
+                select(func.count()).select_from(CandidateReview)
+            ) == 0
+    finally:
+        release_first.set()
+        if schema_engine is not None:
+            schema_engine.dispose()
+        if schema_created:
+            with admin_engine.begin() as connection:
+                _drop_manifest_identity_race_schema(connection, schema_name)
+                assert connection.scalar(
+                    text("SELECT to_regnamespace(:schema_name) IS NULL"),
+                    {"schema_name": schema_name},
+                )
+        admin_engine.dispose()
+
+
+@pytest.mark.postgresql
+def test_manifest_auto_and_manual_reject_share_identity_lock() -> None:
+    database_url = os.getenv("TEST_POSTGRES_URL")
+    if database_url is None:
+        pytest.skip("TEST_POSTGRES_URL is not configured")
+
+    schema_name = f"manifest_identity_race_{uuid4().hex}"
+    quoted_schema = _quoted_manifest_identity_race_schema(schema_name)
+    admin_engine = create_engine(database_url)
+    schema_engine = None
+    schema_created = False
+    started = (Event(), Event())
+    finished = (Event(), Event())
+
+    try:
+        with admin_engine.begin() as connection:
+            connection.execute(text(f"CREATE SCHEMA {quoted_schema}"))
+            schema_created = True
+
+        schema_url = make_url(database_url).update_query_dict(
+            {"options": f"-csearch_path={schema_name}"}
+        )
+        schema_engine = create_engine(schema_url)
+        Base.metadata.create_all(
+            schema_engine,
+            tables=(
+                Company.__table__,
+                CompanyAlias.__table__,
+                CandidateFact.__table__,
+                CandidateReview.__table__,
+            ),
+        )
+        with Session(schema_engine, expire_on_commit=False) as setup:
+            fact = candidate(
+                "postgresql-auto-reject-race",
+                "Manifest Reject Race",
+                aliases=("Manifest Reject Alias",),
+            )
+            setup.add(fact)
+            setup.commit()
+            stable_evidence_id = fact.stable_evidence_id
+            identity_names = tuple(sorted(identity_module._identity_names(fact)))  # type: ignore[attr-defined]
+            reject_decision = decision(
+                fact,
+                action=ReviewAction.REJECT,
+                resulting_status=CandidateDecisionStatus.REJECTED,
+            )
+
+        def run_auto() -> IdentityResolutionSummary:
+            started[0].set()
+            try:
+                with Session(schema_engine) as database_session:
+                    return auto_resolve_candidates(
+                        database_session,
+                        similarity=_FixedSimilarity(),
+                    )
+            finally:
+                finished[0].set()
+
+        def run_reject() -> str:
+            started[1].set()
+            try:
+                with Session(schema_engine) as database_session:
+                    apply_review_decisions(database_session, (reject_decision,))
+                return "rejected"
+            except ReviewDecisionConflict:
+                return "review_conflict"
+            finally:
+                finished[1].set()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            with Session(schema_engine) as locker:
+                transaction = locker.begin()
+                with identity_module.serialized_company_identities(
+                    locker,
+                    identity_names,
+                ):
+                    auto_future = pool.submit(run_auto)
+                    reject_future = pool.submit(run_reject)
+                    all_started = all(marker.wait(timeout=15) for marker in started)
+                    both_waiting = not any(
+                        marker.wait(timeout=0.2) for marker in finished
+                    )
+                transaction.commit()
+            auto_result = auto_future.result(timeout=15)
+            reject_result = reject_future.result(timeout=15)
+        assert all_started
+        assert both_waiting
+
+        with Session(schema_engine) as verification:
+            stored_fact = verification.scalar(
+                select(CandidateFact).where(
+                    CandidateFact.stable_evidence_id == stable_evidence_id
+                )
+            )
+            assert stored_fact is not None
+            company_count = verification.scalar(
+                select(func.count()).select_from(Company)
+            )
+            review_count = verification.scalar(
+                select(func.count()).select_from(CandidateReview)
+            )
+            if reject_result == "rejected":
+                assert auto_result == IdentityResolutionSummary(
+                    auto_accepted=0,
+                    review_required=0,
+                )
+                assert stored_fact.decision_status is CandidateDecisionStatus.REJECTED
+                assert stored_fact.company_id is None
+                assert company_count == 0
+                assert review_count == 1
+            else:
+                assert reject_result == "review_conflict"
+                assert auto_result == IdentityResolutionSummary(
+                    auto_accepted=1,
+                    review_required=0,
+                )
+                assert stored_fact.decision_status is CandidateDecisionStatus.ACCEPTED
+                assert stored_fact.company_id is not None
+                assert company_count == 1
+                assert review_count == 0
+    finally:
+        if schema_engine is not None:
+            schema_engine.dispose()
+        if schema_created:
+            with admin_engine.begin() as connection:
+                _drop_manifest_identity_race_schema(connection, schema_name)
+                assert connection.scalar(
+                    text("SELECT to_regnamespace(:schema_name) IS NULL"),
+                    {"schema_name": schema_name},
+                )
+        admin_engine.dispose()
 
 
 def test_manual_merge_rejects_company_id_reserved_for_accept_as_new(

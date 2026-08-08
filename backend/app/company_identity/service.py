@@ -304,9 +304,22 @@ def _company_identity_key_material(
     names: Sequence[str],
     official_website: str | None,
 ) -> tuple[bytes, ...]:
+    return _company_identities_key_material(
+        names=names,
+        official_websites=() if official_website is None else (official_website,),
+    )
+
+
+def _company_identities_key_material(
+    *,
+    names: Sequence[str],
+    official_websites: Sequence[str],
+) -> tuple[bytes, ...]:
     material = set(_company_name_key_material(names))
-    if official_website is not None:
-        material.add(b"website\0" + official_website.encode("utf-8"))
+    material.update(
+        b"website\0" + official_website.encode("utf-8")
+        for official_website in official_websites
+    )
     return tuple(material)
 
 
@@ -367,6 +380,25 @@ def _serialized_identity_keys(
 
 
 @contextmanager
+def serialized_company_identities(
+    session: Session,
+    names: Sequence[str],
+    *,
+    official_websites: Sequence[str] = (),
+) -> Iterator[None]:
+    """Serialize batched identity writes using the review decision keys."""
+
+    with _serialized_identity_keys(
+        session,
+        _company_identities_key_material(
+            names=names,
+            official_websites=official_websites,
+        ),
+    ):
+        yield
+
+
+@contextmanager
 def serialized_company_identity_names(
     session: Session,
     names: Sequence[str],
@@ -375,12 +407,10 @@ def serialized_company_identity_names(
 ) -> Iterator[None]:
     """Serialize ordinary identity writes using the review decision keys."""
 
-    with _serialized_identity_keys(
+    with serialized_company_identities(
         session,
-        _company_identity_key_material(
-            names=names,
-            official_website=official_website,
-        ),
+        names,
+        official_websites=() if official_website is None else (official_website,),
     ):
         yield
 

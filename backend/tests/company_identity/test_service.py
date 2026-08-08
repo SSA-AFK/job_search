@@ -998,7 +998,7 @@ def test_identity_lock_keys_are_domain_separated_deduplicated_and_key_ordered() 
     assert keys == (-6410938119080746435, -1983210520360554722)
 
 
-def test_company_identity_lock_uses_shared_name_and_website_namespace_order() -> None:
+def test_company_identity_locks_use_shared_name_and_website_namespace_order() -> None:
     class PostgreSQLSession:
         class Bind:
             class Dialect:
@@ -1020,17 +1020,37 @@ def test_company_identity_lock_uses_shared_name_and_website_namespace_order() ->
             assert "pg_advisory_xact_lock" in str(statement)
             self.events.append(("lock", parameters["lock_key"]))
 
-    session = PostgreSQLSession()
+    legacy_session = PostgreSQLSession()
 
     with identity_service.serialized_company_identity_names(  # type: ignore[attr-defined]
-        session,  # type: ignore[arg-type]
+        legacy_session,  # type: ignore[arg-type]
         ("sharedidentity", "sharedidentity"),
         official_website="https://example.com/",
     ):
-        session.events.append("body")
+        legacy_session.events.append("body")
 
-    assert session.events == [
+    assert legacy_session.events == [
         ("lock", -6410938119080746435),
+        ("lock", -1983210520360554722),
+        "body",
+    ]
+
+    batch_session = PostgreSQLSession()
+    with identity_service.serialized_company_identities(  # type: ignore[attr-defined]
+        batch_session,  # type: ignore[arg-type]
+        ("sharedidentity", "aliasidentity", "sharedidentity"),
+        official_websites=(
+            "https://other.example/",
+            "https://example.com/",
+            "https://other.example/",
+        ),
+    ):
+        batch_session.events.append("body")
+
+    assert batch_session.events == [
+        ("lock", -8061424528605705518),
+        ("lock", -6410938119080746435),
+        ("lock", -2675231333044069939),
         ("lock", -1983210520360554722),
         "body",
     ]

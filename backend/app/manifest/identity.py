@@ -17,7 +17,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import InstrumentedAttribute
 
 from app.company_identity.repository import SqlAlchemyCompanyIdentityRepository
-from app.core.normalization import normalize_name, normalize_url
+from app.company_identity.service import serialized_company_identities
+from app.core.normalization import (
+    normalize_name,
+    normalize_public_identity_url,
+    normalize_url,
+)
 from app.manifest.contracts import (
     AiCategory,
     CandidateDecisionStatus,
@@ -202,6 +207,7 @@ class _PostgreSQLManifestIdentitySimilarity:
                 names,
                 limit=_MAX_SIMILARITY_CANDIDATES,
             )
+            if match.score >= _FUZZY_REVIEW_THRESHOLD
         }
 
 
@@ -222,11 +228,12 @@ def _normalized_url(value: str | None) -> str | None:
 
 
 def _sanitized_public_url(value: str | None) -> str | None:
-    normalized = _normalized_url(value)
-    if normalized is None:
+    if value is None:
         return None
-    parts = urlsplit(normalized)
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    try:
+        return normalize_public_identity_url(value)
+    except (TypeError, UnicodeError, ValueError):
+        return None
 
 
 def _identity_segment(value: str) -> str | None:
@@ -492,6 +499,39 @@ def _targeted_recruitment_owner_ids(
     return owner_ids
 
 
+def _normalized_official_websites(
+    facts: Sequence[CandidateFact],
+) -> frozenset[str] | None:
+    websites: set[str] = set()
+    for fact in facts:
+        if fact.official_website is None:
+            continue
+        normalized = _sanitized_public_url(fact.official_website)
+        if normalized is None:
+            return None
+        websites.add(normalized)
+    return frozenset(websites)
+
+
+def _targeted_website_owner_ids(
+    session: Session,
+    websites: frozenset[str],
+) -> set[UUID] | None:
+    if not websites:
+        return set()
+    rows = tuple(
+        session.scalars(
+            select(Company.id)
+            .where(Company.normalized_website.in_(websites))
+            .order_by(Company.id)
+            .limit(_MAX_CONTEXT_ROWS + 1)
+        )
+    )
+    if len(rows) > _MAX_CONTEXT_ROWS:
+        return None
+    return set(rows)
+
+
 def _fact_owner_ids(
     fact: CandidateFact,
     name_owners: dict[str, set[UUID]],
@@ -618,6 +658,115 @@ def _upsert_aliases(session: Session, company: Company, facts: Sequence[Candidat
     session.flush()
 
 
+def _candidate_identity_lock_material(
+    facts: Sequence[CandidateFact],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    names = tuple(
+        sorted({name for fact in facts for name in _identity_names(fact)})
+    )
+    websites = tuple(
+        sorted(
+            {
+                website
+                for fact in facts
+                if (website := _sanitized_public_url(fact.official_website)) is not None
+            }
+        )
+    )
+    return names, websites
+
+
+def _auto_resolve_locked(
+    session: Session,
+    *,
+    facts: tuple[CandidateFact, ...],
+    similarity: _ManifestIdentitySimilarity | None = None,
+) -> IdentityResolutionSummary:
+    groups = _exact_groups(facts)
+    repository = SqlAlchemyCompanyIdentityRepository(session)
+    similarity_backend = similarity or _PostgreSQLManifestIdentitySimilarity(session)
+    similarity_available = similarity_backend.available
+    candidate_names = frozenset(
+        name for fact in facts for name in _identity_names(fact)
+    )
+    name_owners = _exact_name_owners(repository, candidate_names)
+    fuzzy_review_indexes = (
+        similarity_backend.candidate_review_indexes(facts, groups)
+        if similarity_available
+        else frozenset()
+    )
+    recruitment_review_indexes = _recruitment_review_indexes(facts, groups)
+    auto_accepted = 0
+
+    for group in groups:
+        group_facts = tuple(facts[index] for index in group)
+        group_names = frozenset(
+            name for fact in group_facts for name in _identity_names(fact)
+        )
+        owner_ids = _group_owner_ids(group_facts, name_owners)
+        recruitment_owner_ids = _targeted_recruitment_owner_ids(session, group_facts)
+        group_websites = _normalized_official_websites(group_facts)
+        website_owner_ids = (
+            None
+            if group_websites is None or len(group_websites) > 1
+            else _targeted_website_owner_ids(session, group_websites)
+        )
+        context_facts: Sequence[CandidateFact] = group_facts
+        context_entries: Sequence[JobEntry] = ()
+        context_available = True
+        if len(owner_ids) == 1:
+            company_id = next(iter(owner_ids))
+            stored_context = _bounded_company_context(session, company_id)
+            if stored_context is None:
+                context_available = False
+            else:
+                accepted_facts, context_entries = stored_context
+                context_facts = (*group_facts, *accepted_facts)
+        categories = {fact.primary_category for fact in context_facts}
+        fuzzy_existing_owner_ids = (
+            similarity_backend.existing_owner_ids(group_names)
+            if similarity_available
+            else set()
+        )
+        if (
+            (not similarity_available and not owner_ids)
+            or any(index in fuzzy_review_indexes for index in group)
+            or any(index in recruitment_review_indexes for index in group)
+            or not context_available
+            or len(categories) != 1
+            or _has_separable_recruiting_inventories(context_facts, context_entries)
+            or _has_ambiguous_recruitment_evidence(context_facts, context_entries)
+            or len(owner_ids) > 1
+            or recruitment_owner_ids is None
+            or not recruitment_owner_ids.issubset(owner_ids)
+            or website_owner_ids is None
+            or not website_owner_ids.issubset(owner_ids)
+            or not fuzzy_existing_owner_ids.issubset(owner_ids)
+            or not _aliases_fit_storage(group_facts)
+        ):
+            continue
+
+        if owner_ids:
+            company = session.get(Company, next(iter(owner_ids)))
+            if company is None:
+                continue
+        else:
+            company = _create_company(session, group_facts)
+        _upsert_aliases(session, company, group_facts)
+        for fact in group_facts:
+            fact.company_id = company.id
+            fact.decision_status = CandidateDecisionStatus.ACCEPTED
+        for name in group_names:
+            name_owners.setdefault(name, set()).add(company.id)
+        auto_accepted += len(group_facts)
+
+    session.flush()
+    return IdentityResolutionSummary(
+        auto_accepted=auto_accepted,
+        review_required=len(facts) - auto_accepted,
+    )
+
+
 def auto_resolve_candidates(
     session: Session,
     *,
@@ -636,85 +785,34 @@ def auto_resolve_candidates(
                 .order_by(CandidateFact.stable_evidence_id)
             )
         )
-        groups = _exact_groups(facts)
-        repository = SqlAlchemyCompanyIdentityRepository(session)
-        similarity_backend = similarity or _PostgreSQLManifestIdentitySimilarity(session)
-        similarity_available = similarity_backend.available
-        candidate_names = frozenset(
-            name for fact in facts for name in _identity_names(fact)
-        )
-        name_owners = _exact_name_owners(repository, candidate_names)
-        fuzzy_review_indexes = (
-            similarity_backend.candidate_review_indexes(facts, groups)
-            if similarity_available
-            else frozenset()
-        )
-        recruitment_review_indexes = _recruitment_review_indexes(facts, groups)
-        auto_accepted = 0
-
-        for group in groups:
-            group_facts = tuple(facts[index] for index in group)
-            group_names = frozenset(
-                name for fact in group_facts for name in _identity_names(fact)
-            )
-            owner_ids = _group_owner_ids(group_facts, name_owners)
-            recruitment_owner_ids = _targeted_recruitment_owner_ids(session, group_facts)
-            context_facts: Sequence[CandidateFact] = group_facts
-            context_entries: Sequence[JobEntry] = ()
-            context_available = True
-            if len(owner_ids) == 1:
-                company_id = next(iter(owner_ids))
-                stored_context = _bounded_company_context(session, company_id)
-                if stored_context is None:
-                    context_available = False
-                else:
-                    accepted_facts, context_entries = stored_context
-                    context_facts = (*group_facts, *accepted_facts)
-            categories = {fact.primary_category for fact in context_facts}
-            fuzzy_existing_owner_ids = (
-                similarity_backend.existing_owner_ids(group_names)
-                if not owner_ids and similarity_available
-                else set()
-            )
-            if (
-                (not similarity_available and not owner_ids)
-                or any(index in fuzzy_review_indexes for index in group)
-                or any(index in recruitment_review_indexes for index in group)
-                or not context_available
-                or len(categories) != 1
-                or _has_separable_recruiting_inventories(
-                    context_facts, context_entries
+        identity_names, identity_websites = _candidate_identity_lock_material(facts)
+        fact_ids = tuple(fact.id for fact in facts)
+        with serialized_company_identities(
+            session,
+            identity_names,
+            official_websites=identity_websites,
+        ):
+            facts = (
+                tuple(
+                    session.scalars(
+                        select(CandidateFact)
+                        .where(
+                            CandidateFact.id.in_(fact_ids),
+                            CandidateFact.decision_status
+                            == CandidateDecisionStatus.REVIEW_REQUIRED,
+                        )
+                        .order_by(CandidateFact.stable_evidence_id)
+                        .execution_options(populate_existing=True)
+                    )
                 )
-                or _has_ambiguous_recruitment_evidence(
-                    context_facts, context_entries
-                )
-                or len(owner_ids) > 1
-                or recruitment_owner_ids is None
-                or not recruitment_owner_ids.issubset(owner_ids)
-                or not fuzzy_existing_owner_ids.issubset(owner_ids)
-                or not _aliases_fit_storage(group_facts)
-            ):
-                continue
-
-            if owner_ids:
-                company = session.get(Company, next(iter(owner_ids)))
-                if company is None:
-                    continue
-            else:
-                company = _create_company(session, group_facts)
-            _upsert_aliases(session, company, group_facts)
-            for fact in group_facts:
-                fact.company_id = company.id
-                fact.decision_status = CandidateDecisionStatus.ACCEPTED
-            for name in group_names:
-                name_owners.setdefault(name, set()).add(company.id)
-            auto_accepted += len(group_facts)
-
-        session.flush()
-        return IdentityResolutionSummary(
-            auto_accepted=auto_accepted,
-            review_required=len(facts) - auto_accepted,
-        )
+                if fact_ids
+                else ()
+            )
+            return _auto_resolve_locked(
+                session,
+                facts=facts,
+                similarity=similarity,
+            )
 
 
 def export_review_queue(session: Session) -> tuple[CandidateReviewItem, ...]:
@@ -834,6 +932,13 @@ def _resolve_manual_company(
     if recruitment_owner_ids is None:
         raise ReviewDecisionConflict("candidate recruitment evidence exceeds review bounds")
     owner_ids.update(recruitment_owner_ids)
+    websites = _normalized_official_websites((fact,))
+    if websites is None:
+        raise ReviewDecisionConflict("candidate website evidence is invalid")
+    website_owner_ids = _targeted_website_owner_ids(session, websites)
+    if website_owner_ids is None:
+        raise ReviewDecisionConflict("candidate website evidence exceeds review bounds")
+    owner_ids.update(website_owner_ids)
 
     if decision.resolved_company_id is None:
         if owner_ids:
@@ -914,6 +1019,25 @@ def _apply_one_decision(
     return True
 
 
+def _manual_identity_lock_facts(
+    session: Session,
+    decisions: Sequence[ReviewDecisionInput],
+) -> tuple[CandidateFact, ...]:
+    stable_evidence_ids = frozenset(
+        decision.stable_evidence_id
+        for decision in decisions
+    )
+    if not stable_evidence_ids:
+        return ()
+    return tuple(
+        session.scalars(
+            select(CandidateFact)
+            .where(CandidateFact.stable_evidence_id.in_(stable_evidence_ids))
+            .order_by(CandidateFact.stable_evidence_id)
+        )
+    )
+
+
 def apply_review_decisions(
     session: Session,
     decisions: Sequence[ReviewDecisionInput],
@@ -924,9 +1048,16 @@ def apply_review_decisions(
     applied = 0
     replayed = 0
     with _atomic(session):
-        for decision in validated:
-            if _apply_one_decision(session, decision):
-                applied += 1
-            else:
-                replayed += 1
+        lock_facts = _manual_identity_lock_facts(session, validated)
+        identity_names, identity_websites = _candidate_identity_lock_material(lock_facts)
+        with serialized_company_identities(
+            session,
+            identity_names,
+            official_websites=identity_websites,
+        ):
+            for decision in validated:
+                if _apply_one_decision(session, decision):
+                    applied += 1
+                else:
+                    replayed += 1
     return ReviewSummary(applied=applied, replayed=replayed)
