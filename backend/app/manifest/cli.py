@@ -5,16 +5,18 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from collections import Counter
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, BinaryIO, NoReturn
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
@@ -89,6 +91,12 @@ class _DiscoveryState:
     stopped_domains: set[str]
     stopped_source_ids: set[str]
     consecutive_rate_limits: Counter[str]
+
+
+@dataclass(frozen=True)
+class _ExternalOutputPath:
+    path: Path
+    parent_identity: tuple[int, int]
 
 
 class _SafeArgumentParser(argparse.ArgumentParser):
@@ -185,20 +193,230 @@ def _print_json(value: dict[str, object]) -> None:
     print(_json_bytes(value).decode("utf-8"))
 
 
-def _atomic_write(path: Path, content: bytes) -> None:
-    temporary = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
+def _file_identity_from_handle(file: BinaryIO) -> tuple[int, int]:
+    status = os.fstat(file.fileno())
+    return status.st_dev, status.st_ino
+
+
+def _file_identity_from_path(path: Path) -> tuple[int, int]:
+    status = path.stat()
+    return status.st_dev, status.st_ino
+
+
+def _descriptor_path(descriptor: int) -> Path:
+    for descriptor_root in (Path("/proc/self/fd"), Path("/dev/fd")):
+        descriptor_path = descriptor_root / str(descriptor)
+        try:
+            return descriptor_path.resolve(strict=True)
+        except OSError:
+            continue
+    raise OSError("final file path is unavailable")
+
+
+def _windows_handle_path(handle: int) -> Path:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_final_path = kernel32.GetFinalPathNameByHandleW
+    get_final_path.argtypes = (
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    )
+    get_final_path.restype = wintypes.DWORD
+    required = get_final_path(handle, None, 0, 0)
+    if required == 0:
+        raise OSError(ctypes.get_last_error(), "final file path is unavailable")
+    buffer = ctypes.create_unicode_buffer(required + 1)
+    written = get_final_path(handle, buffer, len(buffer), 0)
+    if written == 0 or written >= len(buffer):
+        raise OSError(ctypes.get_last_error(), "final file path is unavailable")
+    value = buffer.value
+    if value.startswith("\\\\?\\UNC\\"):
+        value = "\\\\" + value[8:]
+    elif value.startswith("\\\\?\\"):
+        value = value[4:]
+    return Path(value).resolve(strict=True)
+
+
+def _windows_handle_identity(handle: int) -> tuple[int, int]:
+    import ctypes
+    from ctypes import wintypes
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = (
+            ("file_attributes", wintypes.DWORD),
+            ("creation_time", wintypes.FILETIME),
+            ("last_access_time", wintypes.FILETIME),
+            ("last_write_time", wintypes.FILETIME),
+            ("volume_serial_number", wintypes.DWORD),
+            ("file_size_high", wintypes.DWORD),
+            ("file_size_low", wintypes.DWORD),
+            ("number_of_links", wintypes.DWORD),
+            ("file_index_high", wintypes.DWORD),
+            ("file_index_low", wintypes.DWORD),
+        )
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_information = kernel32.GetFileInformationByHandle
+    get_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(_ByHandleFileInformation),
+    )
+    get_information.restype = wintypes.BOOL
+    information = _ByHandleFileInformation()
+    if not get_information(handle, ctypes.byref(information)):
+        raise OSError(ctypes.get_last_error(), "file identity is unavailable")
+    file_index = information.file_index_high << 32 | information.file_index_low
+    return information.volume_serial_number, file_index
+
+
+def _opened_file_path(file: BinaryIO) -> Path:
+    if os.name == "nt":
+        import msvcrt
+
+        return _windows_handle_path(msvcrt.get_osfhandle(file.fileno()))
+    return _descriptor_path(file.fileno())
+
+
+@contextmanager
+def _pinned_directory(
+    path: Path,
+) -> Iterator[tuple[Callable[[], Path], tuple[int, int]]]:
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+        handle = create_file(
+            str(path),
+            0x80,
+            0x1 | 0x2 | 0x4,
+            None,
+            3,
+            0x02000000,
+            None,
+        )
+        if handle == wintypes.HANDLE(-1).value:
+            raise OSError(ctypes.get_last_error(), "parent directory is unavailable")
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+        try:
+            yield lambda: _windows_handle_path(handle), _windows_handle_identity(handle)
+        finally:
+            close_handle(handle)
+        return
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
     try:
-        with temporary.open("xb") as output:
-            output.write(content)
-            output.flush()
-        temporary.replace(path)
+        status = os.fstat(descriptor)
+        yield lambda: _descriptor_path(descriptor), (status.st_dev, status.st_ino)
+    finally:
+        os.close(descriptor)
+
+
+def _directory_identity(path: Path) -> tuple[int, int]:
+    with _pinned_directory(path) as (_current_path, identity):
+        return identity
+
+
+def _is_repository_path(path: Path) -> bool:
+    return path.is_relative_to(_REPOSITORY_ROOT)
+
+
+def _unlink_owned_path(path: Path, identity: tuple[int, int] | None) -> None:
+    if identity is None:
+        return
+    try:
+        if _file_identity_from_path(path) == identity:
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _atomic_write(
+    path: Path,
+    content: bytes,
+    *,
+    require_external: bool = False,
+    expected_parent_identity: tuple[int, int] | None = None,
+) -> None:
+    temporary_name = f"{path.name}.{uuid4().hex}.tmp"
+    owned_identity: tuple[int, int] | None = None
+    opened_path: Path | None = None
+    cleanup_candidates: set[Path] = set()
+    try:
+        requested_parent = path.parent.resolve(strict=True)
+        with _pinned_directory(requested_parent) as (
+            pinned_parent_path,
+            parent_identity,
+        ):
+            try:
+                parent = pinned_parent_path()
+                if (
+                    parent != requested_parent
+                    or (
+                        expected_parent_identity is not None
+                        and parent_identity != expected_parent_identity
+                    )
+                    or (require_external and _is_repository_path(parent))
+                ):
+                    raise ManifestCommandError("artifact write failed", exit_code=1)
+                temporary = parent / temporary_name
+                cleanup_candidates.add(temporary)
+                with temporary.open("xb") as output:
+                    owned_identity = _file_identity_from_handle(output)
+                    opened_path = _opened_file_path(output)
+                    cleanup_candidates.add(opened_path)
+                    current_temporary = temporary.resolve(strict=True)
+                    if require_external and _is_repository_path(opened_path):
+                        raise ManifestCommandError("artifact write failed", exit_code=1)
+                    if (
+                        _directory_identity(opened_path.parent) != parent_identity
+                        or current_temporary != opened_path
+                        or _file_identity_from_path(current_temporary) != owned_identity
+                    ):
+                        raise ManifestCommandError("artifact write failed", exit_code=1)
+                    output.write(content)
+                    output.flush()
+                current_parent = pinned_parent_path()
+                current_temporary = current_parent / temporary_name
+                cleanup_candidates.add(current_temporary)
+                if (
+                    current_parent != parent
+                    or _directory_identity(current_parent) != parent_identity
+                    or (require_external and _is_repository_path(current_parent))
+                    or current_temporary.resolve(strict=True) != opened_path
+                    or _file_identity_from_path(current_temporary) != owned_identity
+                ):
+                    raise ManifestCommandError("artifact write failed", exit_code=1)
+                current_temporary.replace(current_parent / path.name)
+            finally:
+                try:
+                    cleanup_candidates.add(pinned_parent_path() / temporary_name)
+                except OSError:
+                    pass
+                for candidate in cleanup_candidates:
+                    _unlink_owned_path(candidate, owned_identity)
+    except ManifestCommandError:
+        raise
     except OSError as error:
         raise ManifestCommandError("artifact write failed", exit_code=1) from error
-    finally:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def _read_bounded(path: Path, *, error_message: str) -> bytes:
@@ -261,17 +479,7 @@ def _require_external_candidate_path(path: Path) -> Path:
     return resolved
 
 
-def _require_external_identity_input(path: Path) -> Path:
-    try:
-        resolved = path.resolve(strict=True)
-    except OSError as error:
-        raise ManifestCommandError("identity review input is invalid") from error
-    if resolved.is_relative_to(_REPOSITORY_ROOT):
-        raise ManifestCommandError("identity work path must be outside repository")
-    return resolved
-
-
-def _require_external_identity_output(path: Path) -> Path:
+def _require_external_identity_output(path: Path) -> _ExternalOutputPath:
     try:
         if path.exists() or path.is_symlink():
             resolved = path.resolve(strict=True)
@@ -281,7 +489,10 @@ def _require_external_identity_output(path: Path) -> Path:
         raise ManifestCommandError("identity output is invalid") from error
     if resolved.is_relative_to(_REPOSITORY_ROOT):
         raise ManifestCommandError("identity work path must be outside repository")
-    return resolved
+    return _ExternalOutputPath(
+        path=resolved,
+        parent_identity=_directory_identity(resolved.parent),
+    )
 
 
 def _candidate_facts(path: Path) -> tuple[CandidateFactInput, ...]:
@@ -312,15 +523,36 @@ def _review_decisions(path: Path) -> tuple[ReviewDecisionInput, ...]:
 
 
 def _identity_review_decisions(path: Path) -> tuple[IdentityReviewDecisionInput, ...]:
-    content = _read_bounded(path, error_message="identity review input is invalid")
     try:
+        with path.open("rb") as input_file:
+            opened_identity = _file_identity_from_handle(input_file)
+            opened_path = _opened_file_path(input_file)
+            if _is_repository_path(opened_path):
+                raise ManifestCommandError(
+                    "identity work path must be outside repository"
+                )
+            current_path = path.resolve(strict=True)
+            if _is_repository_path(current_path):
+                raise ManifestCommandError(
+                    "identity work path must be outside repository"
+                )
+            if (
+                current_path != opened_path
+                or _file_identity_from_path(current_path) != opened_identity
+            ):
+                raise ManifestCommandError("identity review input is invalid")
+            content = input_file.read(_MAX_INPUT_BYTES + 1)
+        if len(content) > _MAX_INPUT_BYTES:
+            raise ManifestCommandError("identity review input is invalid")
         payload = json.loads(content.decode("utf-8"))
         if not isinstance(payload, list):
             raise TypeError("identity review input must be an array")
         return tuple(
             IdentityReviewDecisionInput.model_validate(value) for value in payload
         )
-    except (TypeError, UnicodeError, ValueError, ValidationError) as error:
+    except ManifestCommandError:
+        raise
+    except (OSError, TypeError, UnicodeError, ValueError, ValidationError) as error:
         raise ManifestCommandError("identity review input is invalid") from error
 
 
@@ -371,14 +603,18 @@ def _identity_review_export(args: argparse.Namespace) -> dict[str, object]:
     SessionLocal = _session_factory()
     with SessionLocal() as session:
         items = identity_review_export_payload(session)
-    _atomic_write(output, _json_bytes(items))
-    return {"exported": len(items), "output": output.name}
+    _atomic_write(
+        output.path,
+        _json_bytes(items),
+        require_external=True,
+        expected_parent_identity=output.parent_identity,
+    )
+    return {"exported": len(items), "output": output.path.name}
 
 
 def _identity_review_apply(args: argparse.Namespace) -> dict[str, object]:
     _load_settings()
-    decisions_path = _require_external_identity_input(args.decisions)
-    decisions = _identity_review_decisions(decisions_path)
+    decisions = _identity_review_decisions(args.decisions)
     SessionLocal = _session_factory()
     with SessionLocal() as session:
         summary = identity_review_apply_payload(session, decisions)
@@ -392,8 +628,13 @@ def _company_identity_audit(args: argparse.Namespace) -> dict[str, object]:
     with SessionLocal() as session:
         repository = SqlAlchemyCompanyIdentityRepository(session)
         report = company_identity_audit_payload(session, repository)
-    _atomic_write(output, _json_bytes(report))
-    return {"findings": len(report.findings), "output": output.name}
+    _atomic_write(
+        output.path,
+        _json_bytes(report),
+        require_external=True,
+        expected_parent_identity=output.parent_identity,
+    )
+    return {"findings": len(report.findings), "output": output.path.name}
 
 
 def _manifest_freeze(args: argparse.Namespace) -> dict[str, object]:
