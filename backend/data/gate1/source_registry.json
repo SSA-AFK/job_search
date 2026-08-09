@@ -37,6 +37,42 @@
       "enabled": true
     },
     {
+      "id": "sae_china_icv_safety_branch",
+      "name": "China SAE Intelligent Connected Vehicle Safety Branch",
+      "base_url": "https://www.sae-china.org/branch/370",
+      "source_class": "association",
+      "authorization_basis": "Official public branch page published by the China Society of Automotive Engineers for its Intelligent Connected Vehicle Safety Branch; credential-free access permitted by the published robots policy at validation time.",
+      "robots_policy": "required",
+      "roles": ["candidate_pool"],
+      "requests_per_second": "0.5",
+      "rehearsal_request_budget": 1,
+      "enabled": true
+    },
+    {
+      "id": "sae_china_icv_architecture_branch",
+      "name": "China SAE Intelligent Connected Vehicle System Architecture Branch",
+      "base_url": "https://www.sae-china.org/branch/368",
+      "source_class": "association",
+      "authorization_basis": "Official public branch page published by the China Society of Automotive Engineers for its Intelligent Connected Vehicle System Architecture Branch; credential-free access permitted by the published robots policy at validation time.",
+      "robots_policy": "required",
+      "roles": ["candidate_pool"],
+      "requests_per_second": "0.5",
+      "rehearsal_request_budget": 1,
+      "enabled": true
+    },
+    {
+      "id": "sae_china_intelligent_shared_mobility_committee",
+      "name": "China SAE Intelligent Shared Mobility Working Committee",
+      "base_url": "https://www.sae-china.org/committee/349",
+      "source_class": "association",
+      "authorization_basis": "Official public committee page published by the China Society of Automotive Engineers for its Intelligent Shared Mobility Working Committee; credential-free access permitted by the published robots policy at validation time.",
+      "robots_policy": "required",
+      "roles": ["candidate_pool"],
+      "requests_per_second": "0.5",
+      "rehearsal_request_budget": 1,
+      "enabled": true
+    },
+    {
       "id": "cagd_deep_synthesis_batch_01",
       "name": "CAC Domestic Deep Synthesis Algorithm Filing Notice - Batch 1",
       "base_url": "https://www.cagd.gov.cn/v/2023/06/3389.html",
