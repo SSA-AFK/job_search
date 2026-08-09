@@ -97,11 +97,23 @@
       "enabled": true
     },
     {
-      "id": "hefei_semiconductor_association_homepage",
-      "name": "Hefei Semiconductor Industry Association Public Homepage",
-      "base_url": "http://www.hfsia.com/",
+      "id": "jssia_member_information",
+      "name": "Jiangsu Semiconductor Industry Association Member Information",
+      "base_url": "http://www.jssia.cn/Html/cyzx",
       "source_class": "association",
-      "authorization_basis": "Official public homepage of the Hefei Semiconductor Industry Association linked by the Zhejiang Semiconductor Industry Association public peer-association directory; bounded credential-free access is limited to publisher-rendered public member-directory discovery, and the published robots.txt permits the root path.",
+      "authorization_basis": "Official public member-information section linked by the Jiangsu Semiconductor Industry Association homepage; bounded credential-free access is limited to publisher-rendered member coverage, and no robots.txt disallow was published at validation time.",
+      "robots_policy": "required",
+      "roles": ["candidate_pool"],
+      "requests_per_second": "0.5",
+      "rehearsal_request_budget": 1,
+      "enabled": true
+    },
+    {
+      "id": "jssia_member_news",
+      "name": "Jiangsu Semiconductor Industry Association Member News",
+      "base_url": "http://www.jssia.cn/Html/hydt",
+      "source_class": "association",
+      "authorization_basis": "Official public member-news section linked by the Jiangsu Semiconductor Industry Association homepage; bounded credential-free access is limited to publisher-rendered member coverage, and no robots.txt disallow was published at validation time.",
       "robots_policy": "required",
       "roles": ["candidate_pool"],
       "requests_per_second": "0.5",
