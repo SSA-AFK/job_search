@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -20,7 +21,14 @@ from typing import Any, BinaryIO, NoReturn
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    ValidationError,
+    field_validator,
+)
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -61,20 +69,28 @@ from app.manifest.models import (
     CompanyManifest,
     CompanyManifestMember,
     EntryDiscoveryObservation,
+    EntryDiscoveryRound,
+    EntryEvidenceAuditFinding,
+    EntryEvidenceAuditSample,
 )
 from app.manifest.registry import SourceRegistryError, load_source_registry
 from app.manifest.reporting import ManifestReportError, ManifestReportService
 from app.manifest.service import (
     DiscoveryRecordConflict,
     ManifestFreezeError,
+    create_discovery_round,
     freeze_manifest,
     is_retryable_discovery_observation,
     record_discovery_result,
+    record_evidence_audit_finding,
     transition_retryable_discovery_result,
 )
 
 _MAX_INPUT_BYTES = 16 * 1024 * 1024
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+_SENSITIVE_DIAGNOSTIC = re.compile(
+    r"(?i)(?:\b(?:access[_-]?secret|api[_-]?key|authorization|database[_-]?url|password|token)\s*[:=]\s*\S+|\b(?:postgres|postgresql|mysql|sqlite)://\S+|(?:[A-Za-z]:\\|/(?:Users|home|tmp)/))"
+)
 
 
 class ManifestCommandError(ValueError):
@@ -113,6 +129,29 @@ class _AtomicWriteHooks:
     before_cleanup: Callable[[], None] | None = None
 
 
+class _EvidenceAuditInput(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    audit_sample_id: UUID
+    severe_error: StrictBool
+    reason: str = Field(min_length=1, max_length=2_000)
+    audited_at: datetime
+
+    @field_validator("reason")
+    @classmethod
+    def reject_sensitive_reason(cls, value: str) -> str:
+        if _SENSITIVE_DIAGNOSTIC.search(value):
+            raise ValueError("audit reason must contain only public diagnostics")
+        return value
+
+    @field_validator("audited_at")
+    @classmethod
+    def require_aware_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("audit time must be timezone-aware")
+        return value.astimezone(UTC)
+
+
 class _SafeArgumentParser(argparse.ArgumentParser):
     def error(self, _message: str) -> NoReturn:
         print("manifest command failed: invalid arguments", file=sys.stderr)
@@ -127,6 +166,12 @@ def _positive_integer(value: str) -> int:
     if parsed < 1:
         raise argparse.ArgumentTypeError("value must be a positive integer")
     return parsed
+
+
+def _round_name(value: str) -> str:
+    if re.fullmatch(r"[a-z0-9][a-z0-9_-]{2,99}", value) is None:
+        raise argparse.ArgumentTypeError("round name is invalid")
+    return value
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -168,12 +213,25 @@ def _parser() -> argparse.ArgumentParser:
     discover.add_argument("--live", action="store_true")
     discover.add_argument("--registry", type=Path)
 
+    evidence_regenerate = commands.add_parser("evidence-regenerate")
+    _add_manifest_selector(evidence_regenerate)
+    evidence_regenerate.add_argument("--round-name", type=_round_name, required=True)
+    evidence_regenerate.add_argument("--model", action="store_true")
+    evidence_regenerate.add_argument("--dry-run", action="store_true")
+
+    evidence_audit = commands.add_parser("evidence-audit")
+    _add_manifest_selector(evidence_audit)
+    evidence_audit.add_argument("--round-name", type=_round_name, required=True)
+    evidence_audit.add_argument("--findings", type=Path, required=True)
+    evidence_audit.add_argument("--dry-run", action="store_true")
+
     report = commands.add_parser("report")
     _add_manifest_selector(report)
     report.add_argument("--code-commit")
     report.add_argument("--config-fingerprint")
     report.add_argument("--output", type=Path)
     report.add_argument("--format", choices=("json",), default="json")
+    report.add_argument("--include-rounds", action="store_true")
     return parser
 
 
@@ -1074,15 +1132,199 @@ def _report(args: argparse.Namespace) -> dict[str, object]:
             "report fingerprint conflicts with frozen manifest"
         )
     with SessionLocal() as session:
-        report = ManifestReportService(session).build(
-            version,
-            code_commit=_code_commit(args.code_commit),
-            config_fingerprint=stored_fingerprint,
+        service = ManifestReportService(session)
+        report = (
+            service.build_round_aware(
+                version,
+                code_commit=_code_commit(args.code_commit),
+                config_fingerprint=stored_fingerprint,
+            )
+            if args.include_rounds
+            else service.build(
+                version,
+                code_commit=_code_commit(args.code_commit),
+                config_fingerprint=stored_fingerprint,
+            )
         )
     payload = report.model_dump(mode="json")
     if args.output is not None:
         _atomic_write(args.output, _json_bytes(payload))
     return payload
+
+
+def _paused_strata(SessionLocal: Any, manifest_version: str) -> list[dict[str, str]]:
+    with SessionLocal() as session:
+        rows = tuple(
+            session.execute(
+                select(
+                    EntryEvidenceAuditSample.source_id,
+                    EntryEvidenceAuditSample.platform,
+                )
+                .join(
+                    EntryEvidenceAuditFinding,
+                    EntryEvidenceAuditFinding.audit_sample_id == EntryEvidenceAuditSample.id,
+                )
+                .join(
+                    EntryDiscoveryRound,
+                    EntryDiscoveryRound.id == EntryEvidenceAuditSample.discovery_round_id,
+                )
+                .where(
+                    EntryDiscoveryRound.manifest_version == manifest_version,
+                    EntryEvidenceAuditFinding.severe_error.is_(True),
+                )
+                .distinct()
+                .order_by(
+                    EntryEvidenceAuditSample.source_id,
+                    EntryEvidenceAuditSample.platform,
+                )
+            )
+        )
+    return [{"source_id": source_id, "platform": platform} for source_id, platform in rows]
+
+
+def _evidence_model_fingerprint(settings: Any) -> str:
+    return sha256(
+        _json_bytes(
+            {
+                "confidence_threshold": str(settings.entry_evidence_model_confidence_threshold),
+                "model_name": settings.entry_evidence_model_name,
+            }
+        )
+    ).hexdigest()
+
+
+def _evidence_regenerate(args: argparse.Namespace) -> dict[str, object]:
+    settings = _load_settings()
+    SessionLocal = _session_factory()
+    version, stored_fingerprint = _selected_manifest(args, SessionLocal)
+    model_enabled = bool(settings.entry_evidence_model_enabled and args.model)
+    paused_strata = _paused_strata(SessionLocal, version)
+    with SessionLocal() as session:
+        manifest = session.get(CompanyManifest, version)
+        assert manifest is not None
+        existing = session.scalar(
+            select(EntryDiscoveryRound).where(
+                EntryDiscoveryRound.manifest_version == version,
+                EntryDiscoveryRound.name == args.round_name,
+            )
+        )
+        latest = session.scalar(
+            select(EntryDiscoveryRound)
+            .where(EntryDiscoveryRound.manifest_version == version)
+            .order_by(
+                EntryDiscoveryRound.started_at.desc(),
+                EntryDiscoveryRound.id.desc(),
+            )
+            .limit(1)
+        )
+        member_count = manifest.member_count
+
+    common: dict[str, object] = {
+        "dry_run": bool(args.dry_run),
+        "eligible_members": member_count,
+        "manifest_version": version,
+        "model_enabled": model_enabled,
+        "paused_strata": paused_strata,
+        "round_name": args.round_name,
+    }
+    if args.dry_run:
+        return {**common, "would_create_round": existing is None}
+    if not model_enabled:
+        raise ManifestCommandError("evidence model is disabled")
+
+    model_fingerprint = _evidence_model_fingerprint(settings)
+    if existing is not None:
+        if (
+            existing.config_fingerprint != stored_fingerprint
+            or existing.model_fingerprint != model_fingerprint
+        ):
+            raise ManifestCommandError("named evidence round conflicts with configuration")
+        return {
+            **common,
+            "round_created": False,
+            "round_id": existing.id,
+        }
+
+    with SessionLocal() as session:
+        summary = create_discovery_round(
+            session,
+            manifest_version=version,
+            name=args.round_name,
+            config_fingerprint=stored_fingerprint,
+            model_fingerprint=model_fingerprint,
+            predecessor_round_id=None if latest is None else latest.id,
+            started_at=datetime.now(UTC),
+        )
+    return {
+        **common,
+        "round_created": summary.created,
+        "round_id": summary.round_id,
+    }
+
+
+def _evidence_audit_inputs(path: Path) -> tuple[_EvidenceAuditInput, ...]:
+    resolved = _require_external_candidate_path(path)
+    content = _read_bounded(resolved, error_message="input is invalid")
+    try:
+        document = json.loads(content)
+        if not isinstance(document, list):
+            raise TypeError("audit input must be a list")
+        findings = tuple(_EvidenceAuditInput.model_validate(item) for item in document)
+    except (TypeError, ValueError, ValidationError) as error:
+        raise ManifestCommandError("input is invalid") from error
+    if len({finding.audit_sample_id for finding in findings}) != len(findings):
+        raise ManifestCommandError("input is invalid")
+    return findings
+
+
+def _evidence_audit(args: argparse.Namespace) -> dict[str, object]:
+    _load_settings()
+    SessionLocal = _session_factory()
+    version, _stored_fingerprint = _selected_manifest(args, SessionLocal)
+    findings = _evidence_audit_inputs(args.findings)
+    with SessionLocal() as session:
+        discovery_round = session.scalar(
+            select(EntryDiscoveryRound).where(
+                EntryDiscoveryRound.manifest_version == version,
+                EntryDiscoveryRound.name == args.round_name,
+            )
+        )
+        if discovery_round is None:
+            raise ManifestCommandError("evidence round does not exist")
+        sample_ids = tuple(finding.audit_sample_id for finding in findings)
+        stored_sample_ids = (
+            set(
+                session.scalars(
+                    select(EntryEvidenceAuditSample.id).where(
+                        EntryEvidenceAuditSample.discovery_round_id == discovery_round.id,
+                        EntryEvidenceAuditSample.id.in_(sample_ids),
+                    )
+                )
+            )
+            if sample_ids
+            else set()
+        )
+        if stored_sample_ids != set(sample_ids):
+            raise ManifestCommandError("audit input does not match evidence round")
+
+    if not args.dry_run:
+        for finding in findings:
+            with SessionLocal() as session:
+                record_evidence_audit_finding(
+                    session,
+                    audit_sample_id=finding.audit_sample_id,
+                    severe_error=finding.severe_error,
+                    reason=finding.reason,
+                    audited_at=finding.audited_at,
+                )
+    return {
+        "audited": len(findings),
+        "dry_run": bool(args.dry_run),
+        "manifest_version": version,
+        "paused_strata": _paused_strata(SessionLocal, version),
+        "round_name": args.round_name,
+        "severe_errors": sum(finding.severe_error for finding in findings),
+    }
 
 
 class _ZhihuRequestBudget:
@@ -1482,6 +1724,8 @@ _COMMANDS = {
     "company-identity-audit": _company_identity_audit,
     "manifest-freeze": _manifest_freeze,
     "discover": _discover,
+    "evidence-regenerate": _evidence_regenerate,
+    "evidence-audit": _evidence_audit,
     "report": _report,
 }
 
