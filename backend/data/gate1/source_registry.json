@@ -81,7 +81,7 @@
       "robots_policy": "required",
       "roles": ["candidate_pool"],
       "requests_per_second": "0.5",
-      "rehearsal_request_budget": 1,
+      "rehearsal_request_budget": 3,
       "enabled": true
     },
     {
