@@ -13,6 +13,30 @@
       "enabled": true
     },
     {
+      "id": "miit_ai_application_cases_2025",
+      "name": "MIIT 2025 Artificial Intelligence Application Typical Cases",
+      "base_url": "https://www.miit.gov.cn/jgsj/kjs/wjfb/art/2026/art_735cc3b48391470ea3baec587e526d5f.html",
+      "source_class": "government",
+      "authorization_basis": "Official public artificial-intelligence application case list published by the Ministry of Industry and Information Technology; credential-free access with no robots.txt disallow published at validation time.",
+      "robots_policy": "required",
+      "roles": ["candidate_pool"],
+      "requests_per_second": "0.5",
+      "rehearsal_request_budget": 1,
+      "enabled": true
+    },
+    {
+      "id": "miit_ai_industrialization_cases_2024",
+      "name": "MIIT Artificial Intelligence Empowering New Industrialization Typical Application Cases",
+      "base_url": "https://www.miit.gov.cn/zwgk/zcwj/wjfb/tz/art/2024/art_6ef6280c04f04816bfed04f5ad535cb0.html",
+      "source_class": "government",
+      "authorization_basis": "Official public artificial-intelligence industrialization case list published by the Ministry of Industry and Information Technology; credential-free access with no robots.txt disallow published at validation time.",
+      "robots_policy": "required",
+      "roles": ["candidate_pool"],
+      "requests_per_second": "0.5",
+      "rehearsal_request_budget": 1,
+      "enabled": true
+    },
+    {
       "id": "cagd_deep_synthesis_batch_01",
       "name": "CAC Domestic Deep Synthesis Algorithm Filing Notice - Batch 1",
       "base_url": "https://www.cagd.gov.cn/v/2023/06/3389.html",
