@@ -7,8 +7,10 @@ from dataclasses import asdict
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
+from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
+from typing import Literal
 from uuid import UUID, uuid4
 
 import pytest
@@ -18,6 +20,7 @@ from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
+from app.company_identity import service as company_identity_service
 from app.company_identity.contracts import CompanyIdentityCandidateMatch
 from app.core.normalization import normalize_name
 from app.ingestion.extraction.schemas import CompanyCandidate
@@ -783,6 +786,177 @@ def test_auto_resolution_refreshes_pending_facts_after_identity_lock(
     assert summary == IdentityResolutionSummary(auto_accepted=0, review_required=0)
     assert fact.decision_status is CandidateDecisionStatus.ACCEPTED
     assert session.scalar(select(func.count()).select_from(Company)) == 1
+
+
+def _assert_sqlite_manifest_lock_waits_for_caller_root_transaction(
+    tmp_path: Path,
+    *,
+    writer_kind: Literal["auto", "reject"],
+    outer_outcome: Literal["commit", "rollback"],
+) -> None:
+    label = f"sqlite-{writer_kind}-outer-{outer_outcome}"
+    canonical_name = (
+        "Outer Auto Candidate" if writer_kind == "auto" else "Outer Reject Candidate"
+    )
+    alias = "Outer Auto Alias" if writer_kind == "auto" else "Outer Reject Alias"
+    website = f"https://outer-{writer_kind}.example/"
+    lock_names = (
+        ("outerautoalias", "outerautocandidate")
+        if writer_kind == "auto"
+        else ("outerrejectalias", "outerrejectcandidate")
+    )
+    lock_websites = (website,)
+    engine = create_engine(
+        f"sqlite:///{tmp_path / f'{label}.sqlite3'}",
+        connect_args={"check_same_thread": False, "timeout": 10},
+    )
+    Base.metadata.create_all(engine)  # type: ignore[attr-defined]
+    fact = candidate(
+        label,
+        canonical_name,
+        aliases=(alias,),
+        official_website=website,
+    )
+    observer_attempting = Event()
+    observer_acquired = Event()
+    lock_keys = company_identity_service._identity_lock_keys(  # type: ignore[attr-defined]
+        company_identity_service._company_identities_key_material(  # type: ignore[attr-defined]
+            names=lock_names,
+            official_websites=lock_websites,
+        )
+    )
+
+    def lock_states() -> tuple[bool, ...]:
+        with company_identity_service._LOCAL_LOCKS_GUARD:  # type: ignore[attr-defined]
+            locks_by_key = company_identity_service._LOCAL_LOCKS.get(  # type: ignore[attr-defined]
+                engine,
+                {},
+            )
+            return tuple(
+                lock is not None and lock.locked()
+                for key in lock_keys
+                if (lock := locks_by_key.get(key)) is not None
+            )
+
+    def observe_after_identity_lock() -> tuple[CandidateDecisionStatus, int, int]:
+        with Session(engine, expire_on_commit=False) as observer:
+            observer_attempting.set()
+            with company_identity_service.serialized_company_identities(
+                observer,
+                lock_names,
+                official_websites=lock_websites,
+            ):
+                observer_acquired.set()
+                status = observer.scalar(
+                    select(CandidateFact.decision_status).where(
+                        CandidateFact.stable_evidence_id == fact.stable_evidence_id
+                    )
+                )
+                assert status is not None
+                return (
+                    status,
+                    observer.scalar(select(func.count()).select_from(Company)) or 0,
+                    observer.scalar(select(func.count()).select_from(CandidateReview))
+                    or 0,
+                )
+
+    try:
+        with Session(engine, expire_on_commit=False) as setup:
+            persist_candidates(setup, fact)
+
+        with (
+            Session(engine, expire_on_commit=False) as writer,
+            ThreadPoolExecutor(max_workers=1) as pool,
+        ):
+            outer_transaction = writer.begin()
+            try:
+                writer.connection().exec_driver_sql("BEGIN")
+                if writer_kind == "auto":
+                    assert resolve_candidates(writer) == IdentityResolutionSummary(
+                        auto_accepted=1,
+                        review_required=0,
+                    )
+                else:
+                    stored_fact = writer.scalar(
+                        select(CandidateFact).where(
+                            CandidateFact.stable_evidence_id == fact.stable_evidence_id
+                        )
+                    )
+                    assert stored_fact is not None
+                    assert apply_review_decisions(
+                        writer,
+                        (
+                            decision(
+                                stored_fact,
+                                action=ReviewAction.REJECT,
+                                resulting_status=CandidateDecisionStatus.REJECTED,
+                            ),
+                        ),
+                    ) == ReviewSummary(applied=1, replayed=0)
+
+                held_before_root_end = lock_states()
+                observer_future = pool.submit(observe_after_identity_lock)
+                assert observer_attempting.wait(timeout=5)
+                acquired_before_root_end = observer_acquired.wait(timeout=0.2)
+                if outer_outcome == "commit":
+                    outer_transaction.commit()
+                else:
+                    outer_transaction.rollback()
+                observed = observer_future.result(timeout=15)
+            finally:
+                if writer.in_transaction():
+                    writer.rollback()
+
+        expected = (
+            (
+                CandidateDecisionStatus.ACCEPTED,
+                1,
+                0,
+            )
+            if writer_kind == "auto" and outer_outcome == "commit"
+            else (
+                CandidateDecisionStatus.REJECTED,
+                0,
+                1,
+            )
+            if writer_kind == "reject" and outer_outcome == "commit"
+            else (
+                CandidateDecisionStatus.REVIEW_REQUIRED,
+                0,
+                0,
+            )
+        )
+        assert held_before_root_end == (True,) * len(lock_keys)
+        assert not acquired_before_root_end
+        assert observed == expected
+        assert lock_states() == (False,) * len(lock_keys)
+    finally:
+        Base.metadata.drop_all(engine)  # type: ignore[attr-defined]
+        engine.dispose()
+
+
+@pytest.mark.parametrize("outer_outcome", ["commit", "rollback"])
+def test_sqlite_auto_identity_lock_waits_for_caller_root_transaction(
+    tmp_path: Path,
+    outer_outcome: Literal["commit", "rollback"],
+) -> None:
+    _assert_sqlite_manifest_lock_waits_for_caller_root_transaction(
+        tmp_path,
+        writer_kind="auto",
+        outer_outcome=outer_outcome,
+    )
+
+
+@pytest.mark.parametrize("outer_outcome", ["commit", "rollback"])
+def test_sqlite_manual_reject_identity_lock_waits_for_caller_root_transaction(
+    tmp_path: Path,
+    outer_outcome: Literal["commit", "rollback"],
+) -> None:
+    _assert_sqlite_manifest_lock_waits_for_caller_root_transaction(
+        tmp_path,
+        writer_kind="reject",
+        outer_outcome=outer_outcome,
+    )
 
 
 def test_fuzzy_name_match_requires_review(session: Session) -> None:

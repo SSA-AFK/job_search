@@ -11,7 +11,7 @@ from uuid import UUID
 from weakref import WeakKeyDictionary
 
 from pydantic import ValidationError
-from sqlalchemy import ColumnElement, String, cast, func, select, text, true
+from sqlalchemy import ColumnElement, String, cast, event, func, select, text, true
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import (
     DataError,
@@ -20,7 +20,7 @@ from sqlalchemy.exc import (
     SQLAlchemyError,
     StatementError,
 )
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, SessionTransaction
 
 from app.company_identity.contracts import (
     CompanyIdentityCandidateMatch,
@@ -47,6 +47,40 @@ _MAX_COMPANY_WEBSITE_LENGTH = 1_000
 _MAX_COMPANY_CITY_LENGTH = 50
 _LOCAL_LOCKS_GUARD = Lock()
 _LOCAL_LOCKS: WeakKeyDictionary[object, dict[int, Lock]] = WeakKeyDictionary()
+_LOCAL_TRANSACTION_LOCKS_INFO_KEY = "company_identity_local_transaction_locks"
+_LOCAL_TRANSACTION_LOCK_LISTENER_INFO_KEY = (
+    "company_identity_local_transaction_lock_listener"
+)
+
+
+class _LocalTransactionLocks:
+    def __init__(self) -> None:
+        self.by_transaction: dict[SessionTransaction, dict[int, Lock]] = {}
+
+
+def _release_local_transaction_locks(
+    session: Session,
+    transaction: SessionTransaction,
+) -> None:
+    if transaction.parent is not None:
+        return
+    state = session.info.get(_LOCAL_TRANSACTION_LOCKS_INFO_KEY)
+    if not isinstance(state, _LocalTransactionLocks):
+        return
+    locks_by_key = state.by_transaction.pop(transaction, {})
+    for lock in reversed(tuple(locks_by_key.values())):
+        lock.release()
+
+
+def _local_transaction_locks(session: Session) -> _LocalTransactionLocks:
+    state = session.info.get(_LOCAL_TRANSACTION_LOCKS_INFO_KEY)
+    if not isinstance(state, _LocalTransactionLocks):
+        state = _LocalTransactionLocks()
+        session.info[_LOCAL_TRANSACTION_LOCKS_INFO_KEY] = state
+    if not session.info.get(_LOCAL_TRANSACTION_LOCK_LISTENER_INFO_KEY, False):
+        event.listen(session, "after_transaction_end", _release_local_transaction_locks)
+        session.info[_LOCAL_TRANSACTION_LOCK_LISTENER_INFO_KEY] = True
+    return state
 
 
 class _IdentityReviewError(ValueError):
@@ -432,14 +466,39 @@ def _serialized_lock_keys(
     bind = session.get_bind()
     with _LOCAL_LOCKS_GUARD:
         locks_by_key = _LOCAL_LOCKS.setdefault(bind, {})
-        locks = tuple(locks_by_key.setdefault(key, Lock()) for key in lock_keys)
-    for lock in locks:
-        lock.acquire()
+        keyed_locks = tuple(
+            (key, locks_by_key.setdefault(key, Lock())) for key in lock_keys
+        )
+    transaction = session.get_transaction()
+    if transaction is None:
+        locks_to_acquire = keyed_locks
+        transaction_locks = None
+    else:
+        state = _local_transaction_locks(session)
+        transaction_locks = state.by_transaction.setdefault(transaction, {})
+        locks_to_acquire = tuple(
+            (key, lock)
+            for key, lock in keyed_locks
+            if key not in transaction_locks
+        )
+
+    acquired: list[tuple[int, Lock]] = []
+    try:
+        for keyed_lock in locks_to_acquire:
+            keyed_lock[1].acquire()
+            acquired.append(keyed_lock)
+    except BaseException:
+        for _key, lock in reversed(acquired):
+            lock.release()
+        raise
+    if transaction_locks is not None:
+        transaction_locks.update(acquired)
     try:
         yield
     finally:
-        for lock in reversed(locks):
-            lock.release()
+        if transaction_locks is None:
+            for _key, lock in reversed(acquired):
+                lock.release()
 
 
 def _validate_draft(draft: CompanyIdentityReviewDraft) -> CompanyIdentityReviewDraft:
