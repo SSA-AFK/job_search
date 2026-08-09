@@ -1,6 +1,8 @@
 import json
+from collections import Counter
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -106,9 +108,39 @@ def test_registry_allows_independently_budgeted_entries_on_one_host(tmp_path: Pa
     assert registry.require("official_detail").rehearsal_request_budget == 20
 
 
-def test_registry_contains_only_discovery_fallback_zhihu_initially() -> None:
+def test_gate1_registry_has_reviewed_source_census_and_host_budgets() -> None:
     registry = load_source_registry(GATE1_REGISTRY_PATH)
     zhihu = registry.require("zhihu_global_search")
+
+    role_counts = Counter(role.value for entry in registry.entries for role in entry.roles)
+    class_counts = Counter(entry.source_class.value for entry in registry.entries)
+    candidate_host_budgets: Counter[str] = Counter()
+    for entry in registry.entries:
+        if SourceRole.CANDIDATE_POOL not in entry.roles:
+            continue
+        assert entry.rehearsal_request_budget is not None
+        host = urlsplit(str(entry.base_url)).hostname
+        assert host is not None
+        candidate_host_budgets[host] += entry.rehearsal_request_budget
+
+    assert len(registry.entries) == 57
+    assert role_counts == {
+        SourceRole.CANDIDATE_POOL.value: 56,
+        SourceRole.ENTRY_DISCOVERY_FALLBACK.value: 1,
+    }
+    assert class_counts == {
+        "association": 37,
+        "authorized_api": 1,
+        "government": 19,
+    }
+    assert candidate_host_budgets == {
+        "www.cagd.gov.cn": 32,
+        "www.hunan.gov.cn": 2,
+        "www.jssia.cn": 33,
+        "www.miit.gov.cn": 4,
+        "www.sae-china.org": 3,
+        "www.zjsia.org.cn": 3,
+    }
     assert str(zhihu.base_url) == "https://developer.zhihu.com/api/v1/content/global_search"
     assert zhihu.roles == frozenset({SourceRole.ENTRY_DISCOVERY_FALLBACK})
     assert zhihu.requests_per_second == Decimal("1.0")
