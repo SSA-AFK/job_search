@@ -1,0 +1,16 @@
+{
+  "entries": [
+    {
+      "id": "zhihu_global_search",
+      "name": "Zhihu Developer Global Search API",
+      "base_url": "https://developer.zhihu.com/api/v1/content/global_search",
+      "source_class": "authorized_api",
+      "authorization_basis": "Existing authorized API contract for discovery fallback only.",
+      "robots_policy": "api_contract",
+      "roles": ["entry_discovery_fallback"],
+      "requests_per_second": "1.0",
+      "rehearsal_request_budget": 200,
+      "enabled": true
+    }
+  ]
+}

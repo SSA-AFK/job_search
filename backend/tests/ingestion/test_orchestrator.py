@@ -7,6 +7,15 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy.exc import OperationalError
 
+from app.company_identity.contracts import (
+    CompanyIdentityInput,
+    CompanyIdentityReviewDraft,
+    IdentityReviewReason,
+)
+from app.company_identity.service import (
+    IdentityReviewConflict,
+    IdentitySearchUnavailable,
+)
 from app.ingestion.contracts import ProviderQuery, ProviderResult, RawDocument
 from app.ingestion.errors import (
     ExtractionError,
@@ -15,7 +24,14 @@ from app.ingestion.errors import (
     RunClaimError,
 )
 from app.ingestion.extraction.schemas import CompanyCandidate
+from app.ingestion.normalization.company import normalize_company
 from app.ingestion.orchestrator import IngestionOrchestrator
+from app.ingestion.persistence.contracts import (
+    BatchBuildOutcome,
+    NormalizedBatch,
+    NormalizedCompanyRecord,
+    NormalizedDocument,
+)
 from app.ingestion.persistence.result import PersistenceResult
 from app.models import CollectionStatus
 
@@ -163,7 +179,49 @@ class FakeExtractor:
 
 
 class FakeBatchBuilder:
-    async def build(self, **_kwargs: object) -> object:
+    def __init__(self, outcome: BatchBuildOutcome | None = None) -> None:
+        self.outcome = outcome
+
+    async def build(self, **_kwargs: object) -> BatchBuildOutcome:
+        if self.outcome is not None:
+            return self.outcome
+        source = document()
+        collected_at = datetime(2026, 8, 7, tzinfo=UTC)
+        return BatchBuildOutcome.ready(
+            NormalizedBatch(
+                documents=(
+                    NormalizedDocument(
+                        evidence_id="acme-home",
+                        document=source,
+                        fetched_at=collected_at,
+                    ),
+                ),
+                company=NormalizedCompanyRecord(
+                    candidate=normalize_company(
+                        CompanyCandidate(
+                            name="Acme",
+                            evidence_ids=("acme-home",),
+                            confidence=1,
+                        )
+                    ),
+                    company_id=None,
+                ),
+                collected_at=collected_at,
+            )
+        )
+
+
+class FakeIdentityReviewRecorder:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.records: list[tuple[UUID, CompanyIdentityReviewDraft]] = []
+        self.error = error
+
+    def record(
+        self, *, crawl_run_id: UUID, draft: CompanyIdentityReviewDraft
+    ) -> object:
+        self.records.append((crawl_run_id, draft))
+        if self.error is not None:
+            raise self.error
         return object()
 
 
@@ -213,6 +271,8 @@ def orchestrator_for(
     profile: object | Exception | None = None,
     jobs: tuple[object, ...] = (),
     discovered: tuple[CompanyCandidate, ...] | None = None,
+    build_outcome: BatchBuildOutcome | None = None,
+    identity_review_recorder: FakeIdentityReviewRecorder | None = None,
 ) -> tuple[IngestionOrchestrator, FakeRuns, FakePersistence]:
     runs = FakeRuns({run.id: run})
     persistence = FakePersistence()
@@ -222,13 +282,115 @@ def orchestrator_for(
             extractor=FakeExtractor(
                 profile=profile or SimpleNamespace(name="Acme"), jobs=jobs, discovered=discovered
             ),
-            batch_builder=FakeBatchBuilder(),
+            batch_builder=FakeBatchBuilder(build_outcome),
             persistence=persistence,
             runs=runs,
+            identity_review_recorder=(
+                identity_review_recorder or FakeIdentityReviewRecorder()
+            ),
         ),
         runs,
         persistence,
     )
+
+
+def identity_review_outcome() -> tuple[BatchBuildOutcome, CompanyIdentityReviewDraft]:
+    draft = CompanyIdentityReviewDraft(
+        identity=CompanyIdentityInput(canonical_name="Acme Artificial Intelligenc"),
+        review_reasons=(IdentityReviewReason.FUZZY_NAME_NEIGHBOR,),
+        observed_at=datetime(2026, 8, 7, tzinfo=UTC),
+    )
+    return BatchBuildOutcome.review_required(draft), draft
+
+
+@pytest.mark.asyncio
+async def test_review_required_records_review_and_stops_before_persistence() -> None:
+    run = FakeRun(uuid4())
+    outcome, draft = identity_review_outcome()
+    recorder = FakeIdentityReviewRecorder()
+    orchestrator, _runs, persistence = orchestrator_for(
+        run,
+        providers=[FakeProvider("site", ProviderResult(documents=(document(),)))],
+        build_outcome=outcome,
+        identity_review_recorder=recorder,
+    )
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.FAILED
+    assert result.error_code == "company_identity_review_required"
+    assert recorder.records == [(run.id, draft)]
+    assert persistence.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_lost_claim_prevents_identity_review_write() -> None:
+    run = FakeRun(uuid4())
+    outcome, _draft = identity_review_outcome()
+    recorder = FakeIdentityReviewRecorder()
+    orchestrator, runs, persistence = orchestrator_for(
+        run,
+        providers=[FakeProvider("site", ProviderResult(documents=(document(),)))],
+        build_outcome=outcome,
+        identity_review_recorder=recorder,
+    )
+    runs.claim_is_current = False
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.RUNNING
+    assert recorder.records == []
+    assert persistence.calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "review_error",
+    [
+        OperationalError("insert review", {}, RuntimeError("private database detail")),
+        IdentitySearchUnavailable(),
+    ],
+)
+async def test_review_store_infrastructure_failure_is_retryable(
+    review_error: Exception,
+) -> None:
+    run = FakeRun(uuid4())
+    outcome, _draft = identity_review_outcome()
+    recorder = FakeIdentityReviewRecorder(review_error)
+    orchestrator, _runs, persistence = orchestrator_for(
+        run,
+        providers=[FakeProvider("site", ProviderResult(documents=(document(),)))],
+        build_outcome=outcome,
+        identity_review_recorder=recorder,
+    )
+
+    with pytest.raises(RetryableInfrastructureError) as raised:
+        await orchestrator.run(run.id)
+
+    assert raised.value.claim_token == run.claim_token
+    assert str(raised.value) == "retryable infrastructure failure"
+    assert run.status is CollectionStatus.RUNNING
+    assert persistence.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_review_validation_conflict_is_terminal_not_retryable() -> None:
+    run = FakeRun(uuid4())
+    outcome, _draft = identity_review_outcome()
+    recorder = FakeIdentityReviewRecorder(IdentityReviewConflict())
+    orchestrator, _runs, persistence = orchestrator_for(
+        run,
+        providers=[FakeProvider("site", ProviderResult(documents=(document(),)))],
+        build_outcome=outcome,
+        identity_review_recorder=recorder,
+    )
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.FAILED
+    assert result.error_code == "identity_review_conflict"
+    assert "private" not in (run.error_detail or "")
+    assert persistence.calls == 0
 
 
 @pytest.mark.asyncio

@@ -49,6 +49,7 @@ class ZhihuGlobalSearchProvider:
         clock: Callable[[], datetime] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         jitter: Callable[[], float] = lambda: random.uniform(0.0, 0.1),
+        before_request: Callable[[], Awaitable[None]] | None = None,
         total_timeout_seconds: float = 15.0,
         timeout: Callable[[float | None], Any] = asyncio.timeout,
     ) -> None:
@@ -63,6 +64,7 @@ class ZhihuGlobalSearchProvider:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._sleep = sleep
         self._jitter = jitter
+        self._before_request = before_request
         self._total_timeout_seconds = total_timeout_seconds
         self._timeout = timeout
 
@@ -97,6 +99,8 @@ class ZhihuGlobalSearchProvider:
 
         for attempt in range(len(_RETRY_DELAYS) + 1):
             try:
+                if self._before_request is not None:
+                    await self._before_request()
                 async with (
                     httpx.AsyncClient(timeout=timeout, trust_env=False) as client,
                     client.stream(

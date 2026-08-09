@@ -35,6 +35,7 @@ class JobEntry(Base, TimestampMixin):
     __tablename__ = "job_entries"
     __table_args__ = (
         UniqueConstraint("company_id", "normalized_url", name="uq_job_entry_company_url"),
+        UniqueConstraint("id", "company_id", name="uq_job_entries_id_company"),
         Index("ix_job_entries_status_checked", "status", "last_checked_at"),
         Index("ix_job_entries_platform_status", "platform", "status"),
     )

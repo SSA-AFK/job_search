@@ -13,15 +13,22 @@ from alembic.operations import Operations
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import URL, make_url
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from alembic import command
 
 EXPECTED_TABLES = {
+    "candidate_facts",
+    "candidate_reviews",
     "companies",
     "company_aliases",
+    "company_manifest_members",
+    "company_manifests",
+    "company_identity_review_decisions",
+    "company_identity_review_items",
     "source_documents",
     "company_sources",
+    "entry_discovery_observations",
     "job_postings",
     "job_sources",
     "regulatory_filings",
@@ -29,6 +36,11 @@ EXPECTED_TABLES = {
     "crawl_runs",
     "job_entries",
     "job_collection_snapshots",
+}
+
+REVIEW_TABLES = {
+    "company_identity_review_decisions",
+    "company_identity_review_items",
 }
 
 
@@ -675,6 +687,1025 @@ def test_job_source_snapshot_lifecycle_round_trip_preserves_legacy_rows(
         assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
 
 
+def _expect_integrity_error(
+    connection: Any, statement: str, parameters: dict[str, object]
+) -> None:
+    with pytest.raises(IntegrityError), connection.begin_nested():
+        connection.execute(text(statement), parameters)
+
+
+def test_gate1_manifest_discovery_round_trip_preserves_stage3a_rows(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "gate1-manifest-discovery.sqlite3"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config(Path(__file__).parents[2] / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", database_url)
+    engine = create_engine(database_url)
+    company_id = str(uuid4())
+    other_company_id = str(uuid4())
+    job_id = str(uuid4())
+    source_id = str(uuid4())
+    entry_id = str(uuid4())
+    snapshot_id = str(uuid4())
+    candidate_id = str(uuid4())
+    manifest_version = "a" * 64
+    created_at = "2026-08-06 00:00:00+00:00"
+
+    @event.listens_for(engine, "connect")
+    def enable_foreign_keys(
+        dbapi_connection: Any, _connection_record: object
+    ) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    command.upgrade(config, "0007_job_source_snapshot_lifecycle")
+    with engine.begin() as connection:
+        for row_id, canonical_name, normalized_name in (
+            (company_id, "Example", "example"),
+            (other_company_id, "Other", "other"),
+        ):
+            connection.execute(
+                text(
+                    "INSERT INTO companies "
+                    "(id, canonical_name, normalized_name, funding_stage, scale, "
+                    "created_at, updated_at) VALUES "
+                    "(:id, :canonical_name, :normalized_name, 'unknown', 'unknown', "
+                    ":created_at, :created_at)"
+                ),
+                {
+                    "id": row_id,
+                    "canonical_name": canonical_name,
+                    "normalized_name": normalized_name,
+                    "created_at": created_at,
+                },
+            )
+        connection.execute(
+            text(
+                "INSERT INTO job_postings "
+                "(id, company_id, title, normalized_title, job_type, city, "
+                "description, is_active, created_at, updated_at) VALUES "
+                "(:id, :company_id, 'Engineer', 'engineer', 'full_time', '', '', 1, "
+                ":created_at, :created_at)"
+            ),
+            {"id": job_id, "company_id": company_id, "created_at": created_at},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO job_entries "
+                "(id, company_id, url, normalized_url, provider, platform, "
+                "requires_rendering, status, failure_count, created_at, updated_at) "
+                "VALUES (:id, :company_id, 'https://example.com/jobs', "
+                "'https://example.com/jobs', 'official', 'custom', 0, 'unknown', 0, "
+                ":created_at, :created_at)"
+            ),
+            {"id": entry_id, "company_id": company_id, "created_at": created_at},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO job_collection_snapshots "
+                "(id, job_entry_id, status, pagination_complete, empty_confirmed, "
+                "observed_count, pages_fetched, command_hash, started_at, completed_at, "
+                "created_at) VALUES (:id, :entry_id, 'succeeded', 1, 1, 0, 0, "
+                ":command_hash, :created_at, :created_at, :created_at)"
+            ),
+            {
+                "id": snapshot_id,
+                "entry_id": entry_id,
+                "command_hash": "b" * 64,
+                "created_at": created_at,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO job_sources "
+                "(id, job_posting_id, job_entry_id, last_seen_snapshot_id, "
+                "missing_complete_snapshots, lifecycle_managed, provider, "
+                "source_raw_id, apply_url, first_seen_at, last_seen_at, is_active) "
+                "VALUES (:id, :job_id, :entry_id, :snapshot_id, 0, 1, 'official', "
+                "'job-1', 'https://example.com/job-1', :created_at, :created_at, 1)"
+            ),
+            {
+                "id": source_id,
+                "job_id": job_id,
+                "entry_id": entry_id,
+                "snapshot_id": snapshot_id,
+                "created_at": created_at,
+            },
+        )
+
+    command.upgrade(config, "0008_gate1_manifest_discovery")
+    inspector = inspect(engine)
+    assert set(inspector.get_table_names()) >= EXPECTED_TABLES - REVIEW_TABLES
+    assert {
+        index["name"]
+        for index in inspector.get_indexes("job_entries")
+        if index["unique"]
+    } >= {"uq_job_entries_id_company"}
+    assert {constraint["name"] for constraint in inspector.get_unique_constraints("candidate_facts")} >= {
+        "uq_candidate_fact_evidence"
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("company_manifest_members")
+    } >= {"uq_manifest_member_position", "uq_manifest_member_company"}
+
+    with engine.begin() as connection:
+        candidate_insert = (
+            "INSERT INTO candidate_facts "
+            "(id, stable_evidence_id, canonical_name, normalized_name, aliases, "
+            "primary_category, source_id, source_url, retrieved_at, evidence_summary, "
+            "confidence_tier, confidence_reason, decision_status, company_id, "
+            "created_at, updated_at) VALUES "
+            "(:id, :evidence_id, 'Example', 'example', '[\"Example\"]', "
+            "'foundation_models', 'source_a', 'https://source.example/item', "
+            ":created_at, 'Public evidence', 'high', 'Primary source', "
+            "'review_required', :company_id, :created_at, :created_at)"
+        )
+        connection.execute(
+            text(candidate_insert),
+            {
+                "id": candidate_id,
+                "evidence_id": "c" * 64,
+                "company_id": company_id,
+                "created_at": created_at,
+            },
+        )
+        _expect_integrity_error(
+            connection,
+            candidate_insert,
+            {
+                "id": str(uuid4()),
+                "evidence_id": "c" * 64,
+                "company_id": company_id,
+                "created_at": created_at,
+            },
+        )
+        _expect_integrity_error(
+            connection,
+            candidate_insert,
+            {
+                "id": str(uuid4()),
+                "evidence_id": "d" * 64,
+                "company_id": str(uuid4()),
+                "created_at": created_at,
+            },
+        )
+
+        review_insert = (
+            "INSERT INTO candidate_reviews "
+            "(id, candidate_fact_id, prior_status, action, resulting_status, "
+            "resulting_company_id, reason, decided_at) VALUES "
+            "(:id, :candidate_id, 'review_required', 'accept', 'accepted', "
+            ":company_id, 'Evidence reviewed', :created_at)"
+        )
+        connection.execute(
+            text(review_insert),
+            {
+                "id": str(uuid4()),
+                "candidate_id": candidate_id,
+                "company_id": company_id,
+                "created_at": created_at,
+            },
+        )
+        _expect_integrity_error(
+            connection,
+            review_insert,
+            {
+                "id": str(uuid4()),
+                "candidate_id": str(uuid4()),
+                "company_id": company_id,
+                "created_at": created_at,
+            },
+        )
+        _expect_integrity_error(
+            connection,
+            review_insert,
+            {
+                "id": str(uuid4()),
+                "candidate_id": candidate_id,
+                "company_id": str(uuid4()),
+                "created_at": created_at,
+            },
+        )
+
+        connection.execute(
+            text(
+                "INSERT INTO company_manifests "
+                "(version, config_fingerprint, member_count, canonical_quota, frozen_at) "
+                "VALUES (:version, :fingerprint, 2, '{}', :created_at)"
+            ),
+            {
+                "version": manifest_version,
+                "fingerprint": "e" * 64,
+                "created_at": created_at,
+            },
+        )
+        member_insert = (
+            "INSERT INTO company_manifest_members "
+            "(id, manifest_version, company_id, position, canonical_name, "
+            "primary_category) VALUES "
+            "(:id, :version, :company_id, :position, :canonical_name, "
+            "'foundation_models')"
+        )
+        connection.execute(
+            text(member_insert),
+            {
+                "id": str(uuid4()),
+                "version": manifest_version,
+                "company_id": company_id,
+                "position": 1,
+                "canonical_name": "Example",
+            },
+        )
+        for parameters in (
+            {
+                "id": str(uuid4()),
+                "version": manifest_version,
+                "company_id": other_company_id,
+                "position": 1,
+                "canonical_name": "Other",
+            },
+            {
+                "id": str(uuid4()),
+                "version": manifest_version,
+                "company_id": company_id,
+                "position": 2,
+                "canonical_name": "Example",
+            },
+            {
+                "id": str(uuid4()),
+                "version": "f" * 64,
+                "company_id": other_company_id,
+                "position": 2,
+                "canonical_name": "Other",
+            },
+            {
+                "id": str(uuid4()),
+                "version": manifest_version,
+                "company_id": str(uuid4()),
+                "position": 2,
+                "canonical_name": "Missing",
+            },
+        ):
+            _expect_integrity_error(connection, member_insert, parameters)
+
+        observation_insert = (
+            "INSERT INTO entry_discovery_observations "
+            "(id, manifest_version, company_id, method, status, requires_rendering, "
+            "job_entry_id, observed_at) VALUES "
+            "(:id, :version, :company_id, 'official_site', 'accepted', 0, "
+            ":entry_id, :created_at)"
+        )
+        connection.execute(
+            text(observation_insert),
+            {
+                "id": str(uuid4()),
+                "version": manifest_version,
+                "company_id": company_id,
+                "entry_id": entry_id,
+                "created_at": created_at,
+            },
+        )
+        for parameters in (
+            {
+                "id": str(uuid4()),
+                "version": "f" * 64,
+                "company_id": company_id,
+                "entry_id": None,
+                "created_at": created_at,
+            },
+            {
+                "id": str(uuid4()),
+                "version": manifest_version,
+                "company_id": str(uuid4()),
+                "entry_id": None,
+                "created_at": created_at,
+            },
+            {
+                "id": str(uuid4()),
+                "version": manifest_version,
+                "company_id": other_company_id,
+                "entry_id": entry_id,
+                "created_at": created_at,
+            },
+        ):
+            _expect_integrity_error(connection, observation_insert, parameters)
+        assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
+
+    command.upgrade(config, "head")
+    inspector = inspect(engine)
+    assert set(inspector.get_table_names()) >= EXPECTED_TABLES
+    assert {
+        index["name"] for index in inspector.get_indexes("companies")
+    }.isdisjoint({"ix_companies_normalized_name_trgm"})
+    assert {
+        index["name"] for index in inspector.get_indexes("company_aliases")
+    }.isdisjoint({"ix_company_aliases_normalized_alias_trgm"})
+    with engine.connect() as connection:
+        for table_name in (
+            "companies",
+            "job_entries",
+            "job_collection_snapshots",
+            "job_sources",
+            "candidate_facts",
+            "candidate_reviews",
+            "company_manifests",
+            "company_manifest_members",
+            "entry_discovery_observations",
+        ):
+            assert connection.scalar(text(f"SELECT count(*) FROM {table_name}")) >= 1
+        assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
+
+    command.downgrade(config, "0008_gate1_manifest_discovery")
+    inspector = inspect(engine)
+    assert set(inspector.get_table_names()).isdisjoint(REVIEW_TABLES)
+    with engine.connect() as connection:
+        for table_name in (
+            "companies",
+            "job_entries",
+            "job_collection_snapshots",
+            "job_sources",
+            "candidate_facts",
+            "candidate_reviews",
+            "company_manifests",
+            "company_manifest_members",
+            "entry_discovery_observations",
+        ):
+            assert connection.scalar(text(f"SELECT count(*) FROM {table_name}")) >= 1
+        assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
+
+    command.downgrade(config, "0007_job_source_snapshot_lifecycle")
+    inspector = inspect(engine)
+    assert set(inspector.get_table_names()).isdisjoint(
+        {
+            "candidate_facts",
+            "candidate_reviews",
+            "company_manifests",
+            "company_manifest_members",
+            "entry_discovery_observations",
+        }
+    )
+    assert {
+        index["name"] for index in inspector.get_indexes("job_entries")
+    }.isdisjoint({"uq_job_entries_id_company"})
+    with engine.connect() as connection:
+        assert connection.scalar(
+            text("SELECT count(*) FROM companies WHERE id IN (:first, :second)"),
+            {"first": company_id, "second": other_company_id},
+        ) == 2
+        assert connection.scalar(
+            text("SELECT count(*) FROM job_entries WHERE id = :id"), {"id": entry_id}
+        ) == 1
+        assert connection.scalar(
+            text("SELECT count(*) FROM job_collection_snapshots WHERE id = :id"),
+            {"id": snapshot_id},
+        ) == 1
+        assert connection.execute(
+            text(
+                "SELECT job_entry_id, last_seen_snapshot_id FROM job_sources "
+                "WHERE id = :id"
+            ),
+            {"id": source_id},
+        ).one() == (entry_id, snapshot_id)
+        assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
+
+
+def test_gate1_manifest_discovery_emits_named_postgresql_ddl() -> None:
+    migration_path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "0008_gate1_manifest_discovery.py"
+    )
+    migration = runpy.run_path(str(migration_path))
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect=postgresql.dialect(),
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    migration["upgrade"].__globals__["op"] = Operations(context)
+
+    migration["upgrade"]()
+
+    sql = " ".join(output.getvalue().split())
+    assert "CONSTRAINT uq_job_entries_id_company UNIQUE (id, company_id)" in sql
+    for constraint_name in (
+        "fk_candidate_facts_company_id",
+        "fk_candidate_reviews_candidate_fact_id",
+        "fk_candidate_reviews_resulting_company_id",
+        "fk_manifest_members_manifest_version",
+        "fk_manifest_members_company_id",
+        "fk_discovery_observations_manifest_version",
+        "fk_discovery_observations_company_id",
+        "fk_discovery_observation_entry_company",
+        "uq_candidate_fact_evidence",
+        "uq_manifest_member_position",
+        "uq_manifest_member_company",
+    ):
+        assert f"CONSTRAINT {constraint_name}" in sql
+    for index_name in (
+        "ix_candidate_facts_decision_category",
+        "ix_candidate_reviews_candidate_decided",
+        "ix_manifest_members_company",
+        "ix_discovery_observations_manifest_status",
+        "ix_discovery_observations_company_observed",
+    ):
+        assert f"CREATE INDEX {index_name}" in sql
+
+
+def test_0009_postgresql_sql_contains_bounded_similarity_indexes() -> None:
+    migration_path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "0009_company_identity_review.py"
+    )
+    migration = runpy.run_path(str(migration_path))
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect=postgresql.dialect(),
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    migration["upgrade"].__globals__["op"] = Operations(context)
+
+    migration["upgrade"]()
+
+    sql = " ".join(output.getvalue().split())
+    assert migration["revision"] == "0009_company_identity_review"
+    assert migration["down_revision"] == "0008_gate1_manifest_discovery"
+    assert "CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public" in sql
+    assert (
+        "CREATE INDEX ix_companies_normalized_name_trgm ON companies "
+        "USING gist (normalized_name public.gist_trgm_ops)" in sql
+    )
+    assert (
+        "CREATE INDEX ix_company_aliases_normalized_alias_trgm ON company_aliases "
+        "USING gist (normalized_alias public.gist_trgm_ops)" in sql
+    )
+    assert (
+        "ALTER TABLE companies ADD COLUMN normalized_website VARCHAR(1000) "
+        "DEFAULT '' NOT NULL" in sql
+    )
+    assert (
+        "ALTER TABLE regulatory_filings ADD COLUMN "
+        "normalized_filing_number VARCHAR(255) DEFAULT '' NOT NULL" in sql
+    )
+    assert (
+        "CREATE INDEX ix_companies_normalized_website "
+        "ON companies (normalized_website)" in sql
+    )
+    assert (
+        "CREATE INDEX ix_regulatory_filings_normalized_filing_number "
+        "ON regulatory_filings (normalized_filing_number)" in sql
+    )
+    assert (
+        "ALTER TABLE regulatory_filings DROP CONSTRAINT uq_filing_type_number" in sql
+    )
+    assert (
+        "ALTER TABLE regulatory_filings ADD CONSTRAINT "
+        "uq_filing_type_normalized_number UNIQUE "
+        "(filing_type, normalized_filing_number)" in sql
+    )
+    assert (
+        "DO $$ BEGIN IF EXISTS (SELECT 1 FROM companies WHERE website IS NOT NULL) "
+        "OR EXISTS (SELECT 1 FROM regulatory_filings) THEN RAISE EXCEPTION "
+        "'0009 normalized evidence backfill requires online migration'; "
+        "END IF; END $$" in sql
+    )
+    assert sql.index("DO $$") < sql.index("ALTER TABLE companies ADD COLUMN")
+    for constraint_name in (
+        "identity_review_status",
+        "identity_review_action",
+        "ck_identity_review_item_hash_format",
+        "ck_identity_review_item_status_resolution",
+        "ck_identity_review_decision_hash_format",
+        "ck_identity_review_decision_reason_length",
+        "ck_identity_review_decision_action_target",
+        "uq_identity_review_item_stable_hash",
+        "uq_identity_review_decision_hash",
+        "uq_identity_review_decision_item",
+        "fk_company_identity_review_items_first_crawl_run_id",
+        "fk_company_identity_review_decisions_review_item_id",
+        "fk_company_identity_review_decisions_target_company_id",
+        "fk_company_identity_review_decisions_resulting_company_id",
+    ):
+        assert f"CONSTRAINT {constraint_name}" in sql
+    for column_name in (
+        "aliases",
+        "legal_identifiers",
+        "public_evidence_refs",
+        "candidate_matches",
+        "review_reasons",
+    ):
+        assert f"{column_name} JSON NOT NULL" in sql
+    assert (
+        "CREATE INDEX ix_company_identity_review_items_status_created "
+        "ON company_identity_review_items (status, created_at)" in sql
+    )
+    assert sql.count("ON DELETE RESTRICT") == 4
+
+
+@pytest.mark.postgresql
+def test_0009_existing_pg_trgm_outside_public_fails_closed_and_rolls_back() -> None:
+    database_url = os.getenv("TEST_POSTGRES_URL")
+    if database_url is None:
+        pytest.skip("TEST_POSTGRES_URL is not configured")
+
+    migration_path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "0009_company_identity_review.py"
+    )
+    migration = runpy.run_path(str(migration_path))
+    sql_names = {
+        "_POSTGRESQL_PG_TRGM_EXTENSION_SQL",
+        "_POSTGRESQL_COMPANIES_TRGM_INDEX_SQL",
+        "_POSTGRESQL_ALIASES_TRGM_INDEX_SQL",
+    }
+    assert sql_names <= migration.keys()
+
+    extension_sql = migration["_POSTGRESQL_PG_TRGM_EXTENSION_SQL"]
+    index_sql = migration["_POSTGRESQL_COMPANIES_TRGM_INDEX_SQL"]
+    schema_name = f"trgm_edge_{uuid4().hex}"
+    if re.fullmatch(r"trgm_edge_[0-9a-f]{32}", schema_name) is None:
+        raise ValueError("invalid pg_trgm edge schema name")
+    quoted_schema_name = f'"{schema_name}"'
+    engine = create_engine(database_url)
+
+    try:
+        with engine.connect() as connection:
+            original_namespace = connection.scalar(
+                text(
+                    "SELECT namespace.nspname FROM pg_catalog.pg_extension AS extension "
+                    "JOIN pg_catalog.pg_namespace AS namespace "
+                    "ON namespace.oid = extension.extnamespace "
+                    "WHERE extension.extname = 'pg_trgm'"
+                )
+            )
+        assert original_namespace is not None
+
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                connection.execute(text("DROP EXTENSION pg_trgm"))
+                connection.execute(text(f"CREATE SCHEMA {quoted_schema_name}"))
+                connection.execute(
+                    text(
+                        f"CREATE EXTENSION pg_trgm WITH SCHEMA {quoted_schema_name}"
+                    )
+                )
+                connection.execute(text(extension_sql))
+                namespace = connection.scalar(
+                    text(
+                        "SELECT namespace.nspname "
+                        "FROM pg_catalog.pg_extension AS extension "
+                        "JOIN pg_catalog.pg_namespace AS namespace "
+                        "ON namespace.oid = extension.extnamespace "
+                        "WHERE extension.extname = 'pg_trgm'"
+                    )
+                )
+                assert namespace == schema_name
+                connection.execute(
+                    text(f"SET LOCAL search_path TO {quoted_schema_name}")
+                )
+                connection.execute(text("CREATE TABLE companies (normalized_name text)"))
+
+                with pytest.raises(DBAPIError) as error_info:
+                    connection.execute(text(index_sql))
+                assert getattr(error_info.value.orig, "sqlstate", None) == "42704"
+            finally:
+                transaction.rollback()
+
+        with engine.connect() as connection:
+            restored_namespace = connection.scalar(
+                text(
+                    "SELECT namespace.nspname FROM pg_catalog.pg_extension AS extension "
+                    "JOIN pg_catalog.pg_namespace AS namespace "
+                    "ON namespace.oid = extension.extnamespace "
+                    "WHERE extension.extname = 'pg_trgm'"
+                )
+            )
+            edge_schema_exists = connection.scalar(
+                text(
+                    "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace "
+                    "WHERE nspname = :schema_name)"
+                ),
+                {"schema_name": schema_name},
+            )
+        assert restored_namespace == original_namespace
+        assert edge_schema_exists is False
+    finally:
+        engine.dispose()
+
+
+def test_0009_postgresql_downgrade_owns_only_review_objects() -> None:
+    migration_path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "0009_company_identity_review.py"
+    )
+    migration = runpy.run_path(str(migration_path))
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect=postgresql.dialect(),
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    migration["downgrade"].__globals__["op"] = Operations(context)
+
+    migration["downgrade"]()
+
+    sql = " ".join(output.getvalue().split())
+    assert "DROP INDEX IF EXISTS ix_companies_normalized_name_trgm" in sql
+    assert "DROP INDEX IF EXISTS ix_company_aliases_normalized_alias_trgm" in sql
+    assert "DROP TABLE company_identity_review_decisions" in sql
+    assert "DROP TABLE company_identity_review_items" in sql
+    assert "DROP INDEX ix_companies_normalized_website" in sql
+    assert "DROP INDEX ix_regulatory_filings_normalized_filing_number" in sql
+    assert "ALTER TABLE companies DROP COLUMN normalized_website" in sql
+    assert (
+        "ALTER TABLE regulatory_filings DROP COLUMN normalized_filing_number" in sql
+    )
+    assert (
+        "ALTER TABLE regulatory_filings DROP CONSTRAINT "
+        "uq_filing_type_normalized_number" in sql
+    )
+    assert (
+        "ALTER TABLE regulatory_filings ADD CONSTRAINT uq_filing_type_number "
+        "UNIQUE (filing_type, filing_number)" in sql
+    )
+    assert sql.index("ADD CONSTRAINT uq_filing_type_number") < sql.index(
+        "DROP COLUMN normalized_filing_number"
+    )
+    assert "DROP EXTENSION" not in sql
+    assert "CASCADE" not in sql
+    for shared_object in (
+        "DROP TABLE companies",
+        "DROP TABLE company_aliases",
+        "DROP TABLE crawl_runs",
+        "DROP INDEX ix_companies_normalized_name",
+        "DROP INDEX ix_company_aliases_normalized_alias",
+    ):
+        assert shared_object not in sql
+
+
+def test_0009_sqlite_sql_skips_postgresql_similarity_objects() -> None:
+    migration_path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "0009_company_identity_review.py"
+    )
+    migration = runpy.run_path(str(migration_path))
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect=sqlite.dialect(),
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    operations = Operations(context)
+    migration["upgrade"].__globals__["op"] = operations
+
+    migration["upgrade"]()
+
+    sql = " ".join(output.getvalue().split())
+    assert "CREATE TABLE company_identity_review_items" in sql
+    assert "CREATE TABLE company_identity_review_decisions" in sql
+    assert "pg_trgm" not in sql
+    assert "gist_trgm_ops" not in sql
+    assert "ix_companies_normalized_name_trgm" not in sql
+    assert "ix_company_aliases_normalized_alias_trgm" not in sql
+    assert "ALTER TABLE companies ADD COLUMN normalized_website VARCHAR(1000)" in sql
+    assert (
+        "ALTER TABLE regulatory_filings ADD COLUMN "
+        "normalized_filing_number VARCHAR(255)" in sql
+    )
+    assert (
+        "CONSTRAINT uq_filing_type_normalized_number UNIQUE "
+        "(filing_type, normalized_filing_number)" in sql
+    )
+
+
+def test_0009_backfills_normalized_evidence_for_legacy_rows(tmp_path: Path) -> None:
+    database_path = tmp_path / "identity-evidence-backfill.sqlite3"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config(Path(__file__).parents[2] / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", database_url)
+    engine = create_engine(database_url)
+    company_id = str(uuid4())
+    filing_id = str(uuid4())
+    other_company_id = str(uuid4())
+    other_filing_id = str(uuid4())
+    created_at = "2026-08-07 00:00:00+00:00"
+
+    command.upgrade(config, "0008_gate1_manifest_discovery")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO companies "
+                "(id, canonical_name, normalized_name, funding_stage, scale, website, "
+                "created_at, updated_at) VALUES "
+                "(:id, 'Legacy Company', 'legacycompany', 'unknown', 'unknown', "
+                ":website, :created_at, :created_at)"
+            ),
+            {
+                "id": company_id,
+                "website": "HTTPS://Legacy.Example/path?campaign=old#fragment",
+                "created_at": created_at,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO companies "
+                "(id, canonical_name, normalized_name, funding_stage, scale, "
+                "created_at, updated_at) VALUES "
+                "(:id, 'Other Legacy Company', 'otherlegacycompany', 'unknown', "
+                "'unknown', :created_at, :created_at)"
+            ),
+            {"id": other_company_id, "created_at": created_at},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO regulatory_filings "
+                "(id, company_id, filing_type, filing_number, filing_name, "
+                "created_at, updated_at) VALUES "
+                "(:id, :company_id, 'business_license', 'K STRASSE 43', "
+                "'Other legacy filing', :created_at, :created_at)"
+            ),
+            {
+                "id": other_filing_id,
+                "company_id": other_company_id,
+                "created_at": created_at,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO regulatory_filings "
+                "(id, company_id, filing_type, filing_number, filing_name, "
+                "created_at, updated_at) VALUES "
+                "(:id, :company_id, 'business_license', :filing_number, "
+                "'Legacy filing', :created_at, :created_at)"
+            ),
+            {
+                "id": filing_id,
+                "company_id": company_id,
+                "filing_number": "  Ｋ\u3000Straße\t42 ",
+                "created_at": created_at,
+            },
+        )
+
+    command.upgrade(config, "head")
+    with engine.connect() as connection:
+        assert connection.scalar(
+            text("SELECT normalized_website FROM companies WHERE id = :id"),
+            {"id": company_id},
+        ) == "https://legacy.example/path"
+        assert connection.scalar(
+            text(
+                "SELECT normalized_filing_number FROM regulatory_filings "
+                "WHERE id = :id"
+            ),
+            {"id": filing_id},
+        ) == "kstrasse42"
+        assert connection.scalar(
+            text(
+                "SELECT normalized_filing_number FROM regulatory_filings "
+                "WHERE id = :id"
+            ),
+            {"id": other_filing_id},
+        ) == "kstrasse43"
+        normalized_filing_column = next(
+            column
+            for column in inspect(connection).get_columns("regulatory_filings")
+            if column["name"] == "normalized_filing_number"
+        )
+        assert normalized_filing_column["nullable"] is False
+        normalized_website_column = next(
+            column
+            for column in inspect(connection).get_columns("companies")
+            if column["name"] == "normalized_website"
+        )
+        assert normalized_website_column["nullable"] is False
+        assert {index["name"] for index in inspect(connection).get_indexes("companies")} >= {
+            "ix_companies_normalized_website"
+        }
+        assert {
+            index["name"]
+            for index in inspect(connection).get_indexes("regulatory_filings")
+        } >= {"ix_regulatory_filings_normalized_filing_number"}
+        unique_constraints = {
+            constraint["name"]
+            for constraint in inspect(connection).get_unique_constraints(
+                "regulatory_filings"
+            )
+        }
+        assert "uq_filing_type_normalized_number" in unique_constraints
+        assert "uq_filing_type_number" not in unique_constraints
+
+    command.downgrade(config, "0008_gate1_manifest_discovery")
+    inspector = inspect(engine)
+    assert "normalized_website" not in {
+        column["name"] for column in inspector.get_columns("companies")
+    }
+    assert "normalized_filing_number" not in {
+        column["name"] for column in inspector.get_columns("regulatory_filings")
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("regulatory_filings")
+    } >= {"uq_filing_type_number"}
+
+
+def test_0009_rejects_normalized_filing_collisions_without_deleting_rows(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "identity-evidence-collision.sqlite3"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = Config(Path(__file__).parents[2] / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", database_url)
+    engine = create_engine(database_url)
+    company_id = str(uuid4())
+    created_at = "2026-08-07 00:00:00+00:00"
+
+    command.upgrade(config, "0008_gate1_manifest_discovery")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO companies "
+                "(id, canonical_name, normalized_name, funding_stage, scale, "
+                "created_at, updated_at) VALUES "
+                "(:id, 'Legacy Company', 'legacycompany', 'unknown', 'unknown', "
+                ":created_at, :created_at)"
+            ),
+            {"id": company_id, "created_at": created_at},
+        )
+        for filing_number in ("ICP 123", "icp123"):
+            connection.execute(
+                text(
+                    "INSERT INTO regulatory_filings "
+                    "(id, company_id, filing_type, filing_number, filing_name, "
+                    "created_at, updated_at) VALUES "
+                    "(:id, :company_id, 'icp', :filing_number, 'Legacy filing', "
+                    ":created_at, :created_at)"
+                ),
+                {
+                    "id": str(uuid4()),
+                    "company_id": company_id,
+                    "filing_number": filing_number,
+                    "created_at": created_at,
+                },
+            )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"^0009 normalized filing identity collision$",
+    ):
+        command.upgrade(config, "head")
+
+    with engine.connect() as connection:
+        assert connection.scalar(
+            text("SELECT count(*) FROM regulatory_filings")
+        ) == 2
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+            "0008_gate1_manifest_discovery"
+        )
+        assert "normalized_filing_number" not in {
+            column["name"] for column in inspect(connection).get_columns("regulatory_filings")
+        }
+        assert "normalized_website" not in {
+            column["name"] for column in inspect(connection).get_columns("companies")
+        }
+        assert {
+            constraint["name"]
+            for constraint in inspect(connection).get_unique_constraints(
+                "regulatory_filings"
+            )
+        } >= {"uq_filing_type_number"}
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE regulatory_filings SET filing_number = 'icp124' "
+                "WHERE filing_number = 'icp123'"
+            )
+        )
+
+    command.upgrade(config, "head")
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+            "0009_company_identity_review"
+        )
+        assert connection.scalar(
+            text("SELECT count(*) FROM regulatory_filings")
+        ) == 2
+
+
+@pytest.mark.postgresql
+def test_0009_postgresql_offline_guard_rejects_legacy_evidence() -> None:
+    database_url = os.getenv("TEST_POSTGRES_URL")
+    if database_url is None:
+        pytest.skip("TEST_POSTGRES_URL is not configured")
+
+    migration_path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "0009_company_identity_review.py"
+    )
+    guard_sql = runpy.run_path(str(migration_path))[
+        "_POSTGRESQL_OFFLINE_BACKFILL_GUARD"
+    ]
+    schema_name = f"stage3a_test_{uuid4().hex}"
+    quoted_schema_name = _quoted_isolated_schema_name(schema_name)
+    schema_url = _isolated_postgresql_url(database_url, schema_name)
+    config = Config(Path(__file__).parents[2] / "alembic.ini")
+    _set_alembic_sqlalchemy_url(config, schema_url)
+    admin_engine = create_engine(database_url)
+    schema_engine = None
+    schema_created = False
+
+    try:
+        with admin_engine.begin() as connection:
+            connection.execute(text(f"CREATE SCHEMA {quoted_schema_name}"))
+        schema_created = True
+        command.upgrade(config, "0008_gate1_manifest_discovery")
+        schema_engine = create_engine(schema_url)
+        with schema_engine.begin() as connection:
+            connection.execute(text(guard_sql))
+            connection.execute(
+                text(
+                    "INSERT INTO companies "
+                    "(id, canonical_name, normalized_name, funding_stage, scale, "
+                    "website, created_at, updated_at) VALUES "
+                    "(:id, 'Legacy Guard', 'legacyguard', 'unknown', 'unknown', "
+                    ":website, :created_at, :created_at)"
+                ),
+                {
+                    "id": str(uuid4()),
+                    "website": "https://legacy.example/path?query=old",
+                    "created_at": "2026-08-07 00:00:00+00:00",
+                },
+            )
+        with pytest.raises(
+            DBAPIError,
+            match="0009 normalized evidence backfill requires online migration",
+        ), schema_engine.begin() as connection:
+            connection.execute(text(guard_sql))
+    finally:
+        if schema_engine is not None:
+            schema_engine.dispose()
+        if schema_created:
+            _cleanup_isolated_postgresql_schema(admin_engine, config, schema_name)
+        admin_engine.dispose()
+
+
+def test_gate1_manifest_discovery_default_sqlite_offline_upgrade_completes() -> None:
+    output = StringIO()
+    config = Config(Path(__file__).parents[2] / "alembic.ini", output_buffer=output)
+    config.set_main_option("sqlalchemy.url", "sqlite://")
+
+    command.upgrade(config, "head", sql=True)
+
+    sql = " ".join(output.getvalue().split())
+    assert "CREATE UNIQUE INDEX uq_job_entries_id_company ON job_entries (id, company_id)" in sql
+    for table_name in (
+        "candidate_facts",
+        "candidate_reviews",
+        "company_manifests",
+        "company_manifest_members",
+        "entry_discovery_observations",
+    ):
+        assert f"CREATE TABLE {table_name}" in sql
+    assert "CONSTRAINT fk_discovery_observation_entry_company" in sql
+    assert "FOREIGN KEY(job_entry_id, company_id)" in sql
+    assert "REFERENCES job_entries (id, company_id) ON DELETE RESTRICT" in sql
+
+
+def test_gate1_manifest_discovery_default_sqlite_offline_downgrade_completes() -> None:
+    output = StringIO()
+    config = Config(Path(__file__).parents[2] / "alembic.ini", output_buffer=output)
+    config.set_main_option("sqlalchemy.url", "sqlite://")
+
+    command.downgrade(
+        config,
+        "0008_gate1_manifest_discovery:0007_job_source_snapshot_lifecycle",
+        sql=True,
+    )
+
+    sql = " ".join(output.getvalue().split())
+    for table_name in (
+        "entry_discovery_observations",
+        "company_manifest_members",
+        "company_manifests",
+        "candidate_reviews",
+        "candidate_facts",
+    ):
+        assert f"DROP TABLE {table_name}" in sql
+    assert "DROP INDEX uq_job_entries_id_company" in sql
+
+
 def test_job_source_snapshot_lifecycle_emits_named_postgresql_ddl() -> None:
     migration_path = (
         Path(__file__).parents[2]
@@ -985,12 +2016,13 @@ def test_job_entries_postgresql_schema_round_trip() -> None:
                 )
         finally:
             legacy_schema_engine.dispose()
-        command.upgrade(config, "head")
+        command.upgrade(config, "0007_job_source_snapshot_lifecycle")
         schema_engine = create_engine(schema_url)
         try:
             with schema_engine.begin() as connection:
                 company_id = str(uuid4())
                 entry_id = str(uuid4())
+                snapshot_id = str(uuid4())
                 job_id = str(uuid4())
                 source_id = str(uuid4())
                 created_at = "2026-08-05 00:00:00+00:00"
@@ -1016,16 +2048,6 @@ def test_job_entries_postgresql_schema_round_trip() -> None:
                 )
                 connection.execute(
                     text(
-                        "INSERT INTO job_sources "
-                        "(id, job_posting_id, provider, source_raw_id, apply_url, "
-                        "first_seen_at, last_seen_at, is_active) VALUES "
-                        "(:id, :job_id, 'legacy', 'legacy-job-1', "
-                        "'https://example.com/legacy-job-1', :created_at, :created_at, true)"
-                    ),
-                    {"id": source_id, "job_id": job_id, "created_at": created_at},
-                )
-                connection.execute(
-                    text(
                         "INSERT INTO job_entries "
                         "(id, company_id, url, normalized_url, provider, platform, requires_rendering, "
                         "status, failure_count, created_at, updated_at) VALUES "
@@ -1043,9 +2065,27 @@ def test_job_entries_postgresql_schema_round_trip() -> None:
                         ":created_at, :created_at, :created_at)"
                     ),
                     {
-                        "id": str(uuid4()),
+                        "id": snapshot_id,
                         "entry_id": entry_id,
                         "command_hash": "b" * 64,
+                        "created_at": created_at,
+                    },
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO job_sources "
+                        "(id, job_posting_id, job_entry_id, last_seen_snapshot_id, "
+                        "provider, source_raw_id, apply_url, first_seen_at, last_seen_at, "
+                        "is_active) VALUES "
+                        "(:id, :job_id, :entry_id, :snapshot_id, 'legacy', "
+                        "'legacy-job-1', 'https://example.com/legacy-job-1', "
+                        ":created_at, :created_at, true)"
+                    ),
+                    {
+                        "id": source_id,
+                        "job_id": job_id,
+                        "entry_id": entry_id,
+                        "snapshot_id": snapshot_id,
                         "created_at": created_at,
                     },
                 )
@@ -1064,6 +2104,111 @@ def test_job_entries_postgresql_schema_round_trip() -> None:
                 ) is False
                 assert connection.scalar(text("SELECT count(*) FROM job_entries")) == 1
                 assert connection.scalar(text("SELECT count(*) FROM job_collection_snapshots")) == 1
+        finally:
+            schema_engine.dispose()
+
+        command.upgrade(config, "head")
+        schema_engine = create_engine(schema_url)
+        try:
+            with schema_engine.begin() as connection:
+                inspector = inspect(connection)
+                assert set(inspector.get_table_names()) >= EXPECTED_TABLES
+                assert {
+                    constraint["name"]
+                    for constraint in inspector.get_unique_constraints("job_entries")
+                } >= {"uq_job_entries_id_company"}
+                other_company_id = str(uuid4())
+                manifest_version = "a" * 64
+                connection.execute(
+                    text(
+                        "INSERT INTO companies "
+                        "(id, canonical_name, normalized_name, funding_stage, scale, "
+                        "created_at, updated_at) VALUES "
+                        "(:id, 'Postgres Other', 'postgres other', 'unknown', 'unknown', "
+                        ":created_at, :created_at)"
+                    ),
+                    {"id": other_company_id, "created_at": created_at},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO company_manifests "
+                        "(version, config_fingerprint, member_count, canonical_quota, "
+                        "frozen_at) VALUES (:version, :fingerprint, 1, '{}', :created_at)"
+                    ),
+                    {
+                        "version": manifest_version,
+                        "fingerprint": "b" * 64,
+                        "created_at": created_at,
+                    },
+                )
+                observation_insert = (
+                    "INSERT INTO entry_discovery_observations "
+                    "(id, manifest_version, company_id, method, status, "
+                    "requires_rendering, job_entry_id, observed_at) VALUES "
+                    "(:id, :version, :company_id, 'official_site', 'accepted', false, "
+                    ":entry_id, :created_at)"
+                )
+                connection.execute(
+                    text(observation_insert),
+                    {
+                        "id": str(uuid4()),
+                        "version": manifest_version,
+                        "company_id": company_id,
+                        "entry_id": entry_id,
+                        "created_at": created_at,
+                    },
+                )
+                _expect_integrity_error(
+                    connection,
+                    observation_insert,
+                    {
+                        "id": str(uuid4()),
+                        "version": manifest_version,
+                        "company_id": other_company_id,
+                        "entry_id": entry_id,
+                        "created_at": created_at,
+                    },
+                )
+        finally:
+            schema_engine.dispose()
+
+        command.downgrade(config, "0007_job_source_snapshot_lifecycle")
+        schema_engine = create_engine(schema_url)
+        try:
+            with schema_engine.connect() as connection:
+                assert connection.scalar(
+                    text("SELECT count(*) FROM companies WHERE id = :id"),
+                    {"id": company_id},
+                ) == 1
+                assert connection.scalar(
+                    text("SELECT count(*) FROM job_entries WHERE id = :id"),
+                    {"id": entry_id},
+                ) == 1
+                assert connection.scalar(
+                    text("SELECT count(*) FROM job_collection_snapshots WHERE id = :id"),
+                    {"id": snapshot_id},
+                ) == 1
+                source_relationship = connection.execute(
+                    text(
+                        "SELECT job_posting_id, job_entry_id, last_seen_snapshot_id "
+                        "FROM job_sources WHERE id = :id"
+                    ),
+                    {"id": source_id},
+                ).one()
+                assert tuple(str(value) for value in source_relationship) == (
+                    job_id,
+                    entry_id,
+                    snapshot_id,
+                )
+                assert set(inspect(connection).get_table_names()).isdisjoint(
+                    {
+                        "candidate_facts",
+                        "candidate_reviews",
+                        "company_manifests",
+                        "company_manifest_members",
+                        "entry_discovery_observations",
+                    }
+                )
         finally:
             schema_engine.dispose()
 

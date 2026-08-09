@@ -134,6 +134,7 @@ async def test_extracts_immutable_title_and_links_from_bounded_html(
 
     assert document.title == "Example Company"
     assert document.links == ("/careers", "team")
+    assert document.anchors == (("/careers", "Careers"), ("team", "Team"))
     with pytest.raises(FrozenInstanceError):
         document.title = "Changed"
 
@@ -243,3 +244,57 @@ async def test_enforces_total_timeout() -> None:
         await client.get_text("https://example.com/slow", allowed_hosts={"example.com"})
 
     assert caught.value.retryable is True
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_request_start_hook_runs_for_initial_and_redirect_requests() -> None:
+    starts: list[str] = []
+
+    async def record_start(url: str) -> None:
+        starts.append(url)
+
+    respx.get("https://example.com/start").mock(
+        return_value=httpx.Response(302, headers={"location": "/final"})
+    )
+    respx.get("https://example.com/final").mock(
+        return_value=httpx.Response(
+            200, headers={"content-type": "text/plain"}, text="done"
+        )
+    )
+    client = SafeHttpClient(dns_resolver=public_dns, before_request=record_start)
+
+    document = await client.get_text(
+        "https://example.com/start", allowed_hosts={"example.com"}
+    )
+
+    assert document.text == "done"
+    assert starts == ["https://example.com/start", "https://example.com/final"]
+
+
+@pytest.mark.anyio
+@respx.mock
+@pytest.mark.parametrize(
+    ("status_code", "error_code", "retryable"),
+    [
+        (401, "provider_access_denied", False),
+        (403, "provider_access_denied", False),
+        (429, "provider_rate_limited", True),
+        (500, "http_status", True),
+    ],
+)
+async def test_maps_stop_statuses_to_stable_provider_errors(
+    status_code: int, error_code: str, retryable: bool
+) -> None:
+    respx.get("https://example.com/status").mock(
+        return_value=httpx.Response(status_code, text="diagnostic body")
+    )
+    client = SafeHttpClient(dns_resolver=public_dns)
+
+    with pytest.raises(ProviderError) as caught:
+        await client.get_text(
+            "https://example.com/status", allowed_hosts={"example.com"}
+        )
+
+    assert caught.value.code == error_code
+    assert caught.value.retryable is retryable

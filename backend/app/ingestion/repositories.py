@@ -2,33 +2,19 @@
 
 from collections.abc import Iterable
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.ingestion.deduplication.company import CompanyForComparison
+from app.company_identity.repository import SqlAlchemyCompanyIdentityRepository
 from app.ingestion.deduplication.job import JobForComparison, SourceJobMatch
 from app.ingestion.extraction.schemas import EmploymentType
-from app.models import Company, CompanyAlias, JobPosting, JobSource
+from app.models import JobPosting, JobSource
 
 _EMPLOYMENT_TYPE_VALUES = {item.value for item in EmploymentType}
 
 
-class SqlAlchemyCompanyDeduplicationRepository:
-    def __init__(self, session: Session) -> None:
-        self.session = session
-
-    async def find_by_normalized_name_or_alias(self, normalized_name: str):
-        return self.session.scalar(
-            select(Company.id).outerjoin(CompanyAlias).where(
-                or_(Company.normalized_name == normalized_name, CompanyAlias.normalized_alias == normalized_name)
-            )
-        )
-
-    async def list_for_deduplication(self) -> Iterable[CompanyForComparison]:
-        return tuple(
-            CompanyForComparison(company_id=item.id, normalized_name=item.normalized_name)
-            for item in self.session.scalars(select(Company))
-        )
+class SqlAlchemyCompanyDeduplicationRepository(SqlAlchemyCompanyIdentityRepository):
+    """Legacy runtime name for the bounded identity repository."""
 
 
 class SqlAlchemyJobDeduplicationRepository:
@@ -37,7 +23,10 @@ class SqlAlchemyJobDeduplicationRepository:
 
     async def find_by_source(self, provider: str, source_raw_id: str) -> SourceJobMatch | None:
         source = self.session.scalar(
-            select(JobSource).where(JobSource.provider == provider, JobSource.source_raw_id == source_raw_id)
+            select(JobSource).where(
+                JobSource.provider == provider,
+                JobSource.source_raw_id == source_raw_id,
+            )
         )
         if source is None:
             return None
@@ -57,5 +46,7 @@ class SqlAlchemyJobDeduplicationRepository:
                     else None
                 ),
             )
-            for item in self.session.scalars(select(JobPosting).where(JobPosting.company_id == company_id))
+            for item in self.session.scalars(
+                select(JobPosting).where(JobPosting.company_id == company_id)
+            )
         )

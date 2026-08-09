@@ -1,7 +1,7 @@
 """Validated DTOs at the normalization-to-persistence boundary."""
 
 from datetime import date, datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
 from pydantic import (
@@ -15,6 +15,8 @@ from pydantic import (
     model_validator,
 )
 
+from app.company_identity.contracts import CompanyIdentityReviewDraft
+from app.core.normalization import normalize_name
 from app.ingestion.contracts import RawDocument, require_statically_public_url
 from app.ingestion.extraction.schemas import FilingCandidate
 from app.ingestion.normalization.company import NormalizedCompanyCandidate
@@ -128,6 +130,14 @@ class NormalizedFilingRecord(FrozenDTO):
     detail_url: ExternalUrl | None = None
     source_evidence_id: EvidenceId | None = None
 
+    @field_validator("filing_number")
+    @classmethod
+    def normalize_filing_identity(cls, value: str) -> str:
+        normalized = normalize_name(value)
+        if not normalized:
+            raise ValueError("filing_number is required")
+        return normalized
+
     @classmethod
     def from_candidate(
         cls, candidate: FilingCandidate, *, source_evidence_id: str | None
@@ -205,3 +215,22 @@ class NormalizedBatch(FrozenDTO):
             filings=self.filings,
             collected_at=fetched_at,
         )
+
+
+class BatchBuildOutcome(FrozenDTO):
+    batch: NormalizedBatch | None = None
+    review_draft: CompanyIdentityReviewDraft | None = None
+
+    @model_validator(mode="after")
+    def validate_exactly_one_payload(self) -> Self:
+        if (self.batch is None) == (self.review_draft is None):
+            raise ValueError("exactly one of batch or review_draft is required")
+        return self
+
+    @classmethod
+    def ready(cls, batch: NormalizedBatch) -> Self:
+        return cls(batch=batch)
+
+    @classmethod
+    def review_required(cls, draft: CompanyIdentityReviewDraft) -> Self:
+        return cls(review_draft=draft)

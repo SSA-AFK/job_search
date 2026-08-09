@@ -1,7 +1,7 @@
 # Stage 3 万级职位覆盖迁移总计划
 
-> **状态：Stage 3A 已完成；七项计划任务及 Task 7 审阅全部通过**
-> **修订日期：2026-08-06**
+> **状态：Stage 3A 已完成；Company Identity Resolution Hardening 本地 gate 已通过，Task 10 等待最终 whole-branch review**
+> **修订日期：2026-08-08**
 > **定位：** 基于已完成 Stage 2 的 Stage 3 执行路线；Stage 3A 已按获批详细计划实施，后续阶段仍不是可直接开工的 implementation plan。
 > **设计依据：** [job-coverage-at-scale-plan.md](job-coverage-at-scale-plan.md)
 > **审批规则：** 本文批准后仍需生成详细 implementation plan，并再次获得执行授权。
@@ -11,7 +11,7 @@
 ### 1.1 已进入正式基线
 
 - FastAPI 搜索与公司详情 API；
-- SQLAlchemy 模型和 Alembic `0001`–`0007`；
+- SQLAlchemy 模型和 Alembic `0001`–`0009`（当前 hardening 分支）；
 - 公司、职位、来源、证据、备案、采集请求和运行模型；
 - 幂等持久化、规范化和确定性优先去重；
 - SSRF 安全 HTTP、知乎和公司官网 Provider；
@@ -110,13 +110,26 @@ backend/app/
 - 迁移现有数据时保留当前 active 状态；
 - 外键和唯一约束在 SQLite 重建表时保持完整。
 
-### `0008_job_details`
+### `0008_gate1_manifest_discovery`
+
+- 创建候选事实、review decision、manifest/member 与 entry discovery observation 表；
+- 保留 Stage 3A 行与外键，Task 10 仍不得在 release prerequisites 未通过时执行真实候选导入或 live discovery。
+
+### `0009_company_identity_review`
+
+- 创建 company identity review item 与 append-only decision audit；
+- 为公司、别名和备案证据增加规范化 identity keys 与约束；
+- 保留 `filing_number` 原始展示值，以 `(filing_type, normalized_filing_number)` 强制 identity 唯一；迁移在切换 raw unique constraint 前执行有界 collision preflight/guard；
+- PostgreSQL 增加 `pg_trgm` capability/index DDL，SQLite 保持离线兼容；
+- 所有新增 audit-history 外键使用 `ON DELETE RESTRICT`。
+
+### `0010_job_details`
 
 - 创建一对一 `job_details`；
 - 存储部门、学历、经验、要求、福利、标签和增强时间；
 - 长文本和标签设置明确长度/数量上限。
 
-### `0009_coverage_query_indexes`
+### `0011_coverage_query_indexes`
 
 - 根据 Gate 1 的真实查询计划增加必要索引；
 - PostgreSQL 使用经过 `EXPLAIN` 证明的部分索引；
@@ -157,6 +170,29 @@ Tasks 1–7 均已实现并通过审阅。Task 7 gate 与最终修复提交为 `
 `83a8f14` 当前矩阵：Ruff clean；mypy 79 个源文件 clean；backend `539 passed / 2 skipped / 2 deselected`；integration `13 passed`；performance `2 passed / 541 deselected`；offline Alembic upgrade/downgrade clean；live PostgreSQL `2 passed / 17 deselected`，清理后 `stage3a_test_*` schema 残留为零。Provider 目录没有 Stage 3A 快照写入调用，默认 suite 不依赖网络、浏览器、Redis 或 LLM；backend 全量测试保留一个既有非整数 `salary_months` 负向测试的 intentional Pydantic serializer warning。
 
 Task 7 及全分支最终审阅在 round 4/5 后得到 specification PASS 和 quality APPROVED，没有开放的 Critical、Important 或 Minor finding。Stage 3A 状态为“已完成”；Stage 3B 状态为“等待单独实施计划与审批”，不得在本 gate 中开始。
+
+### Company Identity Resolution Hardening 状态（2026-08-08）
+
+用户覆盖指定的获批执行基线为 `5d6f2cf`；最终 whole-branch review 仍以 `2143f8f..HEAD` 为范围。实现提交按任务为：Task 1 `64d1a3e`、`2427ecf`；Task 2 `104ef3d`、`23de812`；Task 3 `906d3b4`、`7d7415a`、`bab4ab9`、`ff922fc`、`d7730ae`；Task 4 `b0890fd`、`6ef0235`、`53792cd`；Task 5 `cb2c0b6`、`d9d98d1`、`ca01958`；Task 6 `ad1ddb9`、`99c4cb4`；Task 7 `c4ec697`、`4efb39b`、`249c32d`；Task 8 offline-gate repair `5464a92`、`8153f64`、`2f71395`；Task 8 PostgreSQL/performance gate closure `c5de19b`（稳定 `pg_trgm` extension schema）、`97e2478`（覆盖 schema edge cases）、`1e0f5ea`（修复 benchmark harness）、`f5e1ab5`（强制精确 company count）。前三项 offline repair 均已独立 review clean。
+
+Task 6 audit categories 固定为：Critical `cross_table_name_owner`、`shared_website_identity`、`incompatible_recruitment_identities`、`audit_findings_truncated`；Important `accepted_candidate_name_unrepresented`、`fuzzy_name_cluster`、`orphan_alias`、`pending_review_owner_changed`、`similarity_search_unavailable`；Minor `canonical_name_normalized_drift`、`alias_normalized_drift`、`filing_number_normalized_drift`、`website_normalized_drift`。人工裁定保留窄 pending-owner 语义，只报告可证明的新当前所有权或基数变化，不增加 prior exact-owner UUID schema。Task 7 人工裁定把 POSIX output directory 作为可信 operator-controlled boundary；Windows 保持 pinned native-handle 保护，POSIX 同权限 writer 的 syscall 间竞态是明确剩余风险。
+
+Task 8 final 本地证据为：第一组离线测试 `729 passed / 8 conditional skips`；第二组 `221 passed`；Ruff clean；mypy `98 source files` clean。PostgreSQL migration/service marker 为 `5 passed / 58 deselected`，所选测试没有 skip；PostgreSQL performance 文件为 `5 passed`，没有 skip。性能数据集为 9,975 个 regular Companies 加 25 个 boundary Companies，合计恰好 10,000 个 Companies，并有 `9,975 aliases`。`pg_trgm` 位于 `public` namespace；测试自有的非 `CASCADE` 清理确认 `identity_resolution_*` schema 零残留。
+
+all-tracked secret pattern scan 只包含以下六项 tracked baseline synthetic examples/tests。复核没有输出匹配值；六项 path、line 与 SHA-256 均未变化，且 `9df90a6..f5e1ab5` changed-range scan 为零命中。此后任何新增、删除、移动或哈希变化都必须重新审阅：
+
+| Path | Line | SHA-256 |
+| --- | ---: | --- |
+| `.agents/skills/subagent-driven-development/SKILL.md` | 57 | `8de105e3bd07359ea603d72d5c6cec36480c7db49258606292d16376d4c2e7f2` |
+| `.agents/skills/subagent-driven-development/SKILL.md` | 84 | `3f608c056a6083f751e877730521334b08330c2edf7e2d8495bea612073d68b4` |
+| `.agents/skills/subagent-driven-development/SKILL.md` | 85 | `b84c521a3403fe31c687e7d95e63017eacbfb08839f05d63cb8b6ae733373d7b` |
+| `.agents/skills/subagent-driven-development/SKILL.md` | 300 | `ba8434c8179a46144aa389d9d2dfad302e4fa20b34f74aa9b6582b971787f00a` |
+| `backend/tests/company_identity/test_cli.py` | 436 | `3413a723213180695b84a3b7b43b96e164b6a54c9f54788433ec2643aa80d0f8` |
+| `backend/tests/manifest/test_reporting.py` | 263 | `aea4bf9f6063bf94a2d3c373aad60cfc383d45415bc73da5f502b44780b916bb` |
+
+专用 read-only audit 数据库已升级到 `0009_company_identity_review`，sanitized CLI 报告零 findings；外部 audit report 未被读取或提交。本次没有执行真实 candidate import、live discovery，也没有生成 manifest artifact 或 external runtime report。
+
+Task 10 release prerequisites 中，本地离线、PostgreSQL、严格 10,000-company performance、secret baseline 与专用只读审计 gate 均已满足；Task 10 仍保持 paused，唯一剩余 prerequisite 是 `2143f8f..HEAD` whole-branch review clean。剩余 Minor 包括 advisory lock key 未排序去重的理论 hash-collision deadlock、seed importer direct `RegulatoryFiling` writer 不在 Task 3 locking 内、audit chunk display capacity、POSIX runtime 未实测、Windows symlink privilege skip，以及人工接受的 POSIX 同权限竞态风险。
 
 ## 6. Stage 3B：ATS 正式接入
 

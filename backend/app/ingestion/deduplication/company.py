@@ -1,61 +1,52 @@
-"""Exact-first company resolution with deterministic fuzzy fallback."""
+"""Compatibility adapter for exact-only company identity resolution."""
 
-from collections.abc import Iterable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
-from rapidfuzz.fuzz import ratio
-
+from app.company_identity.contracts import CompanyIdentityInput
+from app.company_identity.repository import CompanyIdentityRepository
+from app.company_identity.resolver import CompanyIdentityResolver
 from app.ingestion.extraction.schemas import CompanyCandidate
-from app.ingestion.normalization.company import normalize_company
-
-_FUZZY_MATCH_THRESHOLD = 80.0
 
 
 @dataclass(frozen=True)
 class CompanyForComparison:
+    """Legacy comparison row retained for import compatibility only."""
+
     company_id: UUID
     normalized_name: str
 
 
+class CompanyMatchKind(StrEnum):
+    EXISTING = "existing"
+    NEW = "new"
+    REVIEW_REQUIRED = "review_required"
+
+
 @dataclass(frozen=True)
 class CompanyMatch:
-    kind: str
+    kind: CompanyMatchKind
     company_id: UUID | None
 
 
-class CompanyDeduplicationRepository(Protocol):
-    async def find_by_normalized_name_or_alias(self, normalized_name: str) -> UUID | None: ...
-
-    async def list_for_deduplication(self) -> Iterable[CompanyForComparison]: ...
+class CompanyDeduplicationRepository(CompanyIdentityRepository, Protocol):
+    pass
 
 
 class CompanyDeduplicator:
     def __init__(self, repository: CompanyDeduplicationRepository) -> None:
-        self._repository = repository
+        self._resolver = CompanyIdentityResolver(repository)
 
     async def resolve(self, candidate: CompanyCandidate) -> CompanyMatch:
-        normalized = normalize_company(candidate)
-        exact_match = await self._repository.find_by_normalized_name_or_alias(
-            normalized.normalized_name
+        identity = CompanyIdentityInput(
+            canonical_name=candidate.name,
+            aliases=candidate.aliases,
+            official_website=None if candidate.website is None else str(candidate.website),
         )
-        if exact_match is not None:
-            return CompanyMatch("existing", exact_match)
-
-        comparisons = await self._repository.list_for_deduplication()
-        best_match = max(
-            (
-                (self._similarity(normalized.normalized_name, item.normalized_name), item)
-                for item in comparisons
-            ),
-            default=None,
-            key=lambda result: (result[0], str(result[1].company_id)),
+        resolution = await self._resolver.resolve(identity)
+        return CompanyMatch(
+            kind=CompanyMatchKind(resolution.kind.value),
+            company_id=resolution.company_id,
         )
-        if best_match is not None and best_match[0] >= _FUZZY_MATCH_THRESHOLD:
-            return CompanyMatch("existing", best_match[1].company_id)
-        return CompanyMatch("new", None)
-
-    @staticmethod
-    def _similarity(left: str, right: str) -> float:
-        return ratio(left, right)

@@ -17,6 +17,7 @@ MAX_TEXT_LENGTH = 200_000
 MAX_REDIRECTS = 5
 SUPPORTED_CONTENT_TYPES = frozenset({"text/html", "text/plain", "application/xhtml+xml"})
 RedirectValidator = Callable[[str], Awaitable[bool]]
+RequestStartHook = Callable[[str], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +27,7 @@ class HttpDocument:
     content_type: str
     title: str | None = None
     links: tuple[str, ...] = ()
+    anchors: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +117,9 @@ class _PlainTextExtractor(HTMLParser):
         self._parts: list[str] = []
         self._title_parts: list[str] = []
         self._links: list[str] = []
+        self._anchors: list[tuple[str, str]] = []
+        self._anchor_href: str | None = None
+        self._anchor_parts: list[str] = []
         self._ignored_depth = 0
         self._title_depth = 0
 
@@ -131,6 +136,8 @@ class _PlainTextExtractor(HTMLParser):
                 )
                 if href is not None:
                     self._links.append(href)
+                    self._anchor_href = href
+                    self._anchor_parts = []
             if normalized_tag in self._BLOCK_TAGS:
                 self._parts.append(" ")
 
@@ -141,6 +148,11 @@ class _PlainTextExtractor(HTMLParser):
         elif not self._ignored_depth:
             if normalized_tag == "title" and self._title_depth:
                 self._title_depth -= 1
+            elif normalized_tag == "a" and self._anchor_href is not None:
+                text = " ".join("".join(self._anchor_parts).split())
+                self._anchors.append((self._anchor_href, text))
+                self._anchor_href = None
+                self._anchor_parts = []
             if normalized_tag in self._BLOCK_TAGS:
                 self._parts.append(" ")
 
@@ -149,6 +161,8 @@ class _PlainTextExtractor(HTMLParser):
             self._parts.append(data)
             if self._title_depth:
                 self._title_parts.append(data)
+            if self._anchor_href is not None:
+                self._anchor_parts.append(data)
 
     def text(self) -> str:
         return " ".join("".join(self._parts).split())
@@ -160,6 +174,9 @@ class _PlainTextExtractor(HTMLParser):
     def links(self) -> tuple[str, ...]:
         return tuple(self._links)
 
+    def anchors(self) -> tuple[tuple[str, str], ...]:
+        return tuple(self._anchors)
+
 
 class SafeHttpClient:
     def __init__(
@@ -169,11 +186,13 @@ class SafeHttpClient:
         connect_timeout_seconds: float = 5.0,
         total_timeout_seconds: float = 15.0,
         network_backend: httpcore.AsyncNetworkBackend | None = None,
+        before_request: RequestStartHook | None = None,
     ) -> None:
         self._dns_resolver = dns_resolver
         self._connect_timeout_seconds = connect_timeout_seconds
         self._total_timeout_seconds = total_timeout_seconds
         self._network_backend = network_backend
+        self._before_request = before_request
 
     async def get_text(
         self,
@@ -213,6 +232,8 @@ class SafeHttpClient:
         ) as client:
             for _ in range(MAX_REDIRECTS + 1):
                 transport.pin(current_url)
+                if self._before_request is not None:
+                    await self._before_request(str(current_url.url))
                 async with client.stream(
                     "GET", current_url.url, headers={"Accept-Encoding": "identity"}
                 ) as response:
@@ -241,9 +262,15 @@ class SafeHttpClient:
                         continue
 
                     if response.is_error:
+                        if response.status_code in {401, 403}:
+                            error_code = "provider_access_denied"
+                        elif response.status_code == 429:
+                            error_code = "provider_rate_limited"
+                        else:
+                            error_code = "http_status"
                         raise ProviderError(
-                            code="http_status",
-                            retryable=response.status_code >= 500,
+                            code=error_code,
+                            retryable=response.status_code == 429 or response.status_code >= 500,
                             detail=f"received HTTP {response.status_code}",
                         )
 
@@ -266,13 +293,14 @@ class SafeHttpClient:
 
                     body = await self._read_limited_body(response)
                     decoded = body.decode(response.encoding or "utf-8", errors="replace")
-                    text, title, links = self._extract_content(decoded, content_type)
+                    text, title, links, anchors = self._extract_content(decoded, content_type)
                     return HttpDocument(
                         url=str(current_url.url),
                         text=text[:MAX_TEXT_LENGTH],
                         content_type=content_type,
                         title=title,
                         links=links,
+                        anchors=anchors,
                     )
 
         raise ProviderError(
@@ -325,10 +353,10 @@ class SafeHttpClient:
     @staticmethod
     def _extract_content(
         body: str, content_type: str
-    ) -> tuple[str, str | None, tuple[str, ...]]:
+    ) -> tuple[str, str | None, tuple[str, ...], tuple[tuple[str, str], ...]]:
         if content_type == "text/plain":
-            return body, None, ()
+            return body, None, (), ()
         parser = _PlainTextExtractor()
         parser.feed(body)
         parser.close()
-        return parser.text(), parser.title(), parser.links()
+        return parser.text(), parser.title(), parser.links(), parser.anchors()

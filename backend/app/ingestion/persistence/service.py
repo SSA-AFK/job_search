@@ -8,13 +8,15 @@ from typing import Any, TypeVar, cast
 from uuid import UUID
 
 from pydantic import ValidationError
-from sqlalchemy import Select, select, update
+from sqlalchemy import Select, case, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import DataError, IntegrityError, StatementError
 from sqlalchemy.orm import Session
 
 from app.cache.base import CompanyCache
-from app.core.normalization import normalize_url
+from app.company_identity.service import serialized_company_identity_names
+from app.core.normalization import normalize_name, normalize_public_identity_url, normalize_url
+from app.ingestion.extraction.schemas import CompanyCandidate
 from app.ingestion.persistence.contracts import (
     NormalizedBatch,
     NormalizedCompanyRecord,
@@ -27,6 +29,7 @@ from app.models import (
     CollectionRequest,
     CollectionStatus,
     Company,
+    CompanyAlias,
     CompanySource,
     CrawlRun,
     JobPosting,
@@ -37,8 +40,10 @@ from app.models import (
 
 _TEXT_EXCERPT_LIMIT = 4_000
 _MAX_SQL_SMALLINT = 32_767
+_FILING_IDENTITY_LOCK_PREFIX = b"company_search:regulatory_filing:v1\0"
 _KNOWN_CONSTRAINT_MARKERS = {
     "companies.normalized_name": "uq_company_normalized_name",
+    "company_aliases.normalized_alias": "uq_company_alias_normalized_alias",
     "source_documents.provider, source_documents.external_id": (
         "uq_source_document_provider_external_id"
     ),
@@ -49,8 +54,8 @@ _KNOWN_CONSTRAINT_MARKERS = {
         "pk_company_sources"
     ),
     "job_sources.provider, job_sources.source_raw_id": "uq_job_source_provider_raw_id",
-    "regulatory_filings.filing_type, regulatory_filings.filing_number": (
-        "uq_filing_type_number"
+    "regulatory_filings.filing_type, regulatory_filings.normalized_filing_number": (
+        "uq_filing_type_normalized_number"
     ),
 }
 _ModelT = TypeVar("_ModelT")
@@ -119,23 +124,47 @@ class PersistenceService:
                 detail="invalid persistence boundary data",
             ) from exc
         self._require_clean_entry(run_id)
+        identity_names = self._company_identity_names(batch.company)
+        identity_website = self._company_identity_website(batch.company)
         try:
-            with self.session.begin():
+            transaction = self.session.begin()
+            try:
                 self._materialize_outer_transaction()
-                if expected_claim_token is not None:
-                    self._lock_claim(run_id, expected_claim_token)
-                documents = self._upsert_documents(batch.documents, run_id)
-                company = self._upsert_company(batch.company, run_id)
-                self._upsert_company_evidence(company, batch.company, documents, run_id)
-                job_ids, warnings = self._upsert_jobs(company.id, batch.jobs, documents, run_id)
-                self._upsert_filings(company.id, batch.filings, documents, run_id)
-                company.last_collected_at = batch.collected_at
-                result = PersistenceResult(
-                    company_id=company.id,
-                    documents_written=len({document.id for document in documents.values()}),
-                    jobs_written=len(job_ids),
-                    warnings=warnings,
-                )
+                with serialized_company_identity_names(
+                    self.session,
+                    identity_names,
+                    official_website=identity_website,
+                ), transaction:
+                    if expected_claim_token is not None:
+                        self._lock_claim(run_id, expected_claim_token)
+                    documents = self._upsert_documents(batch.documents, run_id)
+                    company = self._upsert_company_locked(
+                        batch.company,
+                        run_id,
+                        identity_names=identity_names,
+                    )
+                    self._upsert_company_evidence(
+                        company, batch.company, documents, run_id
+                    )
+                    job_ids, warnings = self._upsert_jobs(
+                        company.id, batch.jobs, documents, run_id
+                    )
+                    self._upsert_filings(
+                        company.id, batch.filings, documents, run_id
+                    )
+                    company.last_collected_at = batch.collected_at
+                    result = PersistenceResult(
+                        company_id=company.id,
+                        documents_written=len(
+                            {document.id for document in documents.values()}
+                        ),
+                        jobs_written=len(job_ids),
+                        warnings=warnings,
+                    )
+            except BaseException:
+                if self.session.in_transaction():
+                    self.session.rollback()
+                raise
             if self.cache is not None:
                 self.cache.invalidate_company(result.company_id)
             return result
@@ -287,6 +316,54 @@ class PersistenceService:
         )
 
     def _upsert_company(self, record: NormalizedCompanyRecord, run_id: UUID) -> Company:
+        identity_names = self._company_identity_names(record)
+        identity_website = self._company_identity_website(record)
+        with serialized_company_identity_names(
+            self.session,
+            identity_names,
+            official_website=identity_website,
+        ):
+            return self._upsert_company_locked(
+                record,
+                run_id,
+                identity_names=identity_names,
+            )
+
+    @staticmethod
+    def _company_identity_names(
+        record: NormalizedCompanyRecord,
+    ) -> tuple[str, ...]:
+        normalized = record.candidate
+        return tuple(
+            sorted(
+                {
+                    name
+                    for name in (
+                        normalized.normalized_name,
+                        *(
+                            normalize_name(alias)
+                            for alias in normalized.candidate.aliases
+                        ),
+                    )
+                    if name
+                }
+            )
+        )
+
+    @staticmethod
+    def _company_identity_website(record: NormalizedCompanyRecord) -> str | None:
+        website = record.candidate.candidate.website
+        if website is None:
+            return None
+        return normalize_public_identity_url(str(website))
+
+    def _upsert_company_locked(
+        self,
+        record: NormalizedCompanyRecord,
+        run_id: UUID,
+        *,
+        identity_names: tuple[str, ...],
+    ) -> Company:
         normalized = record.candidate
         candidate = normalized.candidate
         if record.company_id is not None:
@@ -301,6 +378,32 @@ class PersistenceService:
             company = self.session.scalar(
                 select(Company).where(Company.normalized_name == normalized.normalized_name)
             )
+
+        allowed_owner_ids = set() if company is None else {company.id}
+        for identity_name in identity_names:
+            owner_ids = self._company_identity_name_owner_ids(identity_name)
+            if owner_ids - allowed_owner_ids:
+                raise PersistenceError(
+                    run_id=run_id,
+                    constraint="uq_company_alias_normalized_alias",
+                    detail="company identity name is owned by another company",
+                )
+
+        identity_website = self._company_identity_website(record)
+        if identity_website is not None:
+            website_owner_ids = set(
+                self.session.scalars(
+                    select(Company.id).where(
+                        Company.normalized_website == identity_website
+                    )
+                )
+            )
+            if website_owner_ids - allowed_owner_ids:
+                raise PersistenceError(
+                    run_id=run_id,
+                    constraint="company_identity_website",
+                    detail="company website identity is owned by another company",
+                )
 
         if company is None:
             candidate_company = Company(
@@ -318,13 +421,72 @@ class PersistenceService:
                 constraint="uq_company_normalized_name",
             )
             company = inserted_company
-        company.canonical_name = candidate.name
-        company.normalized_name = normalized.normalized_name
         if candidate.website is not None:
             company.website = str(candidate.website)
         if candidate.description is not None:
             company.description = candidate.description
+        self._upsert_company_aliases(company, candidate, run_id)
         return company
+
+    def _company_identity_name_owner_ids(self, normalized_name: str) -> set[UUID]:
+        return {
+            *self.session.scalars(
+                select(Company.id).where(Company.normalized_name == normalized_name)
+            ),
+            *self.session.scalars(
+                select(CompanyAlias.company_id).where(
+                    CompanyAlias.normalized_alias == normalized_name
+                )
+            ),
+        }
+
+    def _upsert_company_aliases(
+        self,
+        company: Company,
+        candidate: CompanyCandidate,
+        run_id: UUID,
+    ) -> None:
+        aliases_by_normalized: dict[str, str] = {}
+        for display_alias in (candidate.name, *candidate.aliases):
+            normalized_alias = normalize_name(display_alias)
+            if normalized_alias and normalized_alias != company.normalized_name:
+                aliases_by_normalized.setdefault(normalized_alias, display_alias)
+
+        for normalized_alias in sorted(aliases_by_normalized):
+            canonical_owner = self.session.scalar(
+                select(Company).where(Company.normalized_name == normalized_alias)
+            )
+            if canonical_owner is not None and canonical_owner.id != company.id:
+                raise PersistenceError(
+                    run_id=run_id,
+                    constraint="uq_company_alias_normalized_alias",
+                    detail="company alias is owned by another company",
+                )
+            stored_alias = self.session.scalar(
+                select(CompanyAlias).where(
+                    CompanyAlias.normalized_alias == normalized_alias
+                )
+            )
+            if stored_alias is None:
+                inserted_alias, _created = self._insert_or_reselect(
+                    CompanyAlias(
+                        company_id=company.id,
+                        alias=aliases_by_normalized[normalized_alias],
+                        normalized_alias=normalized_alias,
+                    ),
+                    select(CompanyAlias).where(
+                        CompanyAlias.normalized_alias == normalized_alias
+                    ),
+                    run_id=run_id,
+                    constraint="uq_company_alias_normalized_alias",
+                )
+                stored_alias = inserted_alias
+            if stored_alias.company_id != company.id:
+                raise PersistenceError(
+                    run_id=run_id,
+                    constraint="uq_company_alias_normalized_alias",
+                    detail="company alias is owned by another company",
+                )
 
     def _upsert_company_evidence(
         self,
@@ -560,23 +722,13 @@ class PersistenceService:
         if len(keys) != len(set(keys)):
             raise PersistenceError(
                 run_id=run_id,
-                constraint="uq_filing_type_number",
+                constraint="uq_filing_type_normalized_number",
                 detail="duplicate filing identity in batch",
             )
+        self._lock_filing_identities(records)
 
         for record in records:
-            filing = self.session.scalar(
-                select(RegulatoryFiling).where(
-                    RegulatoryFiling.filing_type == record.filing_type,
-                    RegulatoryFiling.filing_number == record.filing_number,
-                )
-            )
-            if filing is not None and filing.company_id != company_id:
-                raise PersistenceError(
-                    run_id=run_id,
-                    constraint="uq_filing_type_number",
-                    detail="filing identity belongs to another company",
-                )
+            filing = self._owned_filing_for_identity(company_id, record, run_id)
             values = {
                 "company_id": company_id,
                 "source_document_id": (
@@ -594,24 +746,81 @@ class PersistenceService:
             }
             if filing is None:
                 candidate_filing = RegulatoryFiling(**values)
-                inserted_filing, _created = self._insert_or_reselect(
+                self._insert_or_reselect(
                     candidate_filing,
-                    select(RegulatoryFiling).where(
-                        RegulatoryFiling.filing_type == record.filing_type,
-                        RegulatoryFiling.filing_number == record.filing_number,
-                    ),
+                    self._filing_identity_statement(record),
                     run_id=run_id,
-                    constraint="uq_filing_type_number",
+                    constraint="uq_filing_type_normalized_number",
                 )
-                filing = inserted_filing
-            if filing.company_id != company_id:
-                raise PersistenceError(
-                    run_id=run_id,
-                    constraint="uq_filing_type_number",
-                    detail="filing identity belongs to another company",
-                )
+                filing = self._owned_filing_for_identity(company_id, record, run_id)
+                if filing is None:
+                    raise PersistenceError(
+                        run_id=run_id,
+                        constraint="uq_filing_type_normalized_number",
+                        detail="filing identity could not be reselected",
+                    )
             for field, value in values.items():
                 setattr(filing, field, value)
+
+    def _lock_filing_identities(
+        self, records: tuple[NormalizedFilingRecord, ...]
+    ) -> None:
+        if self.session.get_bind().dialect.name != "postgresql":
+            return
+        for record in sorted(
+            records,
+            key=lambda item: (item.filing_type.value, item.filing_number),
+        ):
+            identity = (
+                _FILING_IDENTITY_LOCK_PREFIX
+                + record.filing_type.value.encode("utf-8")
+                + b"\0"
+                + record.filing_number.encode("utf-8")
+            )
+            lock_key = int.from_bytes(
+                sha256(identity).digest()[:8], byteorder="big", signed=True
+            )
+            self.session.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                {"lock_key": lock_key},
+            )
+
+    @staticmethod
+    def _filing_identity_statement(
+        record: NormalizedFilingRecord,
+    ) -> Select[tuple[RegulatoryFiling]]:
+        return (
+            select(RegulatoryFiling)
+            .where(
+                RegulatoryFiling.filing_type == record.filing_type,
+                RegulatoryFiling.normalized_filing_number == record.filing_number,
+            )
+            .order_by(
+                case(
+                    (RegulatoryFiling.filing_number == record.filing_number, 0),
+                    else_=1,
+                ),
+                RegulatoryFiling.filing_number,
+                RegulatoryFiling.id,
+            )
+        )
+
+    def _owned_filing_for_identity(
+        self,
+        company_id: UUID,
+        record: NormalizedFilingRecord,
+        run_id: UUID,
+    ) -> RegulatoryFiling | None:
+        matches = tuple(self.session.scalars(self._filing_identity_statement(record)))
+        if not matches:
+            return None
+        if {filing.company_id for filing in matches} != {company_id}:
+            raise PersistenceError(
+                run_id=run_id,
+                constraint="uq_filing_type_normalized_number",
+                detail="filing identity has ambiguous company ownership",
+            )
+        return matches[0]
 
     def _insert_or_reselect(
         self,

@@ -2,8 +2,9 @@ from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import ForeignKey, Index, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, validates
 
+from app.core.normalization import normalize_public_identity_url
 from app.models.base import GUID, Base, TimestampMixin, UTCDateTime
 
 
@@ -12,6 +13,7 @@ class Company(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("normalized_name", name="uq_company_normalized_name"),
         Index("ix_companies_normalized_name", "normalized_name"),
+        Index("ix_companies_normalized_website", "normalized_website"),
         Index("ix_companies_industry", "industry"),
         Index("ix_companies_sub_industry", "sub_industry"),
         Index("ix_companies_funding_stage", "funding_stage"),
@@ -29,8 +31,22 @@ class Company(Base, TimestampMixin):
     city: Mapped[str | None] = mapped_column(String(50))
     logo_url: Mapped[str | None] = mapped_column(String(1000))
     website: Mapped[str | None] = mapped_column(String(1000))
+    normalized_website: Mapped[str] = mapped_column(
+        String(1000), nullable=False, default=""
+    )
     description: Mapped[str | None] = mapped_column(Text)
     last_collected_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+    @validates("website")
+    def normalize_identity_website(self, _key: str, value: str | None) -> str | None:
+        if value is None:
+            self.normalized_website = ""
+            return None
+        normalized = normalize_public_identity_url(value)
+        if len(normalized) > 1_000:
+            raise ValueError("website exceeds database length")
+        self.normalized_website = normalized
+        return normalized
 
 
 class CompanyAlias(Base):

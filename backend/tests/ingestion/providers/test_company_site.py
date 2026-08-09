@@ -297,6 +297,23 @@ async def test_robots_policy_fails_closed_when_robots_cannot_be_fetched() -> Non
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("error_code", ["provider_access_denied", "provider_rate_limited"])
+async def test_robots_policy_preserves_source_stop_errors(error_code: str) -> None:
+    safe_client = AsyncMock(spec=SafeHttpClient)
+    safe_client.get_text.side_effect = ProviderError(
+        code=error_code,
+        retryable=error_code == "provider_rate_limited",
+    )
+    policy = RobotsPolicy(http_client=safe_client)
+
+    with pytest.raises(ProviderError) as captured:
+        await policy.can_fetch("https://example.com/about")
+
+    assert captured.value.code == error_code
+    assert safe_client.get_text.await_count == 1
+
+
+@pytest.mark.anyio
 async def test_robots_policy_fetches_once_for_concurrent_same_host_checks() -> None:
     safe_client = AsyncMock(spec=SafeHttpClient)
     fetch_started = asyncio.Event()
