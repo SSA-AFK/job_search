@@ -113,7 +113,7 @@ backend/app/
 ### `0008_gate1_manifest_discovery`
 
 - 创建候选事实、review decision、manifest/member 与 entry discovery observation 表；
-- 保留 Stage 3A 行与外键，Task 10 仍不得在 release prerequisites 未通过时执行真实候选导入或 live discovery。
+- 保留 Stage 3A 行与外键；Task 10 已完成 import/freeze 与受限 entry-evidence smoke。
 
 ### `0009_company_identity_review`
 
@@ -171,7 +171,7 @@ Tasks 1–7 均已实现并通过审阅。Task 7 gate 与最终修复提交为 `
 
 Task 7 及全分支最终审阅在 round 4/5 后得到 specification PASS 和 quality APPROVED，没有开放的 Critical、Important 或 Minor finding。Stage 3A 状态为“已完成”；Stage 3B 状态为“等待单独实施计划与审批”，不得在本 gate 中开始。
 
-### Company Identity Resolution Hardening 状态（2026-08-08）
+### Company Identity Resolution Hardening 与 Stage 3B0 状态（2026-08-09）
 
 用户覆盖指定的获批执行基线为 `5d6f2cf`；最终 whole-branch review 仍以 `2143f8f..HEAD` 为范围。实现提交按任务为：Task 1 `64d1a3e`、`2427ecf`；Task 2 `104ef3d`、`23de812`；Task 3 `906d3b4`、`7d7415a`、`bab4ab9`、`ff922fc`、`d7730ae`；Task 4 `b0890fd`、`6ef0235`、`53792cd`；Task 5 `cb2c0b6`、`d9d98d1`、`ca01958`；Task 6 `ad1ddb9`、`99c4cb4`；Task 7 `c4ec697`、`4efb39b`、`249c32d`；Task 8 offline-gate repair `5464a92`、`8153f64`、`2f71395`；Task 8 PostgreSQL/performance gate closure `c5de19b`（稳定 `pg_trgm` extension schema）、`97e2478`（覆盖 schema edge cases）、`1e0f5ea`（修复 benchmark harness）、`f5e1ab5`（强制精确 company count）。前三项 offline repair 均已独立 review clean。
 
@@ -190,9 +190,11 @@ all-tracked secret pattern scan 只包含以下六项 tracked baseline synthetic
 | `backend/tests/company_identity/test_cli.py` | 436 | `3413a723213180695b84a3b7b43b96e164b6a54c9f54788433ec2643aa80d0f8` |
 | `backend/tests/manifest/test_reporting.py` | 263 | `aea4bf9f6063bf94a2d3c373aad60cfc383d45415bc73da5f502b44780b916bb` |
 
-专用 read-only audit 数据库已升级到 `0009_company_identity_review`，sanitized CLI 报告零 findings；外部 audit report 未被读取或提交。本次没有执行真实 candidate import、live discovery，也没有生成 manifest artifact 或 external runtime report。
+专用 read-only audit 数据库已升级到 `0009_company_identity_review`，sanitized CLI 报告零 findings；外部 audit report 未被读取或提交。Task 10 source registry 在已记录的 source commits 及随后移除不适用来源后固定为 45 项（44 个 candidate-pool source、1 个 discovery fallback；19 个 government、25 个 association、1 个 authorized API）。reviewed external JSONL 包含 5,111 个 exact identity，SHA-256 `8839e91442378224a2a5df9120561eb00080d000711b5990e53ab5eb221dfc6d`；import 后 5,111 项全部 accepted/resolved，两个 review queue 与 populated identity audit 均为 0。
 
-Task 10 release prerequisites 中，本地离线、PostgreSQL、严格 10,000-company performance、secret baseline 与专用只读审计 gate 均已满足；Task 10 仍保持 paused，唯一剩余 prerequisite 是 `2143f8f..HEAD` whole-branch review clean。剩余 Minor 包括 advisory lock key 未排序去重的理论 hash-collision deadlock、seed importer direct `RegulatoryFiling` writer 不在 Task 3 locking 内、audit chunk display capacity、POSIX runtime 未实测、Windows symlink privilege skip，以及人工接受的 POSIX 同权限竞态风险。
+Stage 3B0 canonical manifest 已冻结 1,000 家，version 为 `abaad7965cabbaaa09e2dab6013be11c8b26d112e1444c18c36a8bb68bf584c4`。tracked manifest SHA-256 为 `8ba503a77a37c18d2c1ddf8792fc161e423597d0b1e38e4630cddb9bdef52c81`，tracked quota SHA-256 为 `343b3cf9ce5849d88b158f252953d1ad38273f99058e91693f09a552d2bc54e8`；两项均与三个独立 external replay byte-identical。5,111 家公司的 city 均未提供、scale 均为 `unknown`。
+
+`0010_entry_evidence_rounds` 增加不可变 discovery round、追加式 observation predecessor 链与分层 audit。2026-08-09 的 `evidence-smoke-20260809` 对 2 条已核验公开招聘入口执行 2 次 DashScope `qwen-plus` 调用：accepted 2、self-hosted 2、抽检 2/2、严重误判 0、暂停分层 0，aggregate entry coverage 为 0.2%。legacy 1,000 条 `not_found` 保留且未被覆盖；Zhihu 请求为 0。本 gate 未运行 Playwright、job-list enumeration 或 Stage 3B。原 `job_details` 与 coverage indexes 迁移顺延为 `0011`、`0012`；Stage 3B 继续等待单独 implementation plan 与明确审批。剩余 Minor 包括 advisory lock key 未排序去重的理论 hash-collision deadlock、seed importer direct `RegulatoryFiling` writer 不在 Task 3 locking 内、audit chunk display capacity、POSIX runtime 未实测、Windows symlink privilege skip，以及人工接受的 POSIX 同权限竞态风险。
 
 ## 6. Stage 3B：ATS 正式接入
 

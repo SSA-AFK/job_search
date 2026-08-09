@@ -1,10 +1,10 @@
 # 万级公司职位覆盖设计
 
-> **状态：Stage 3A 已完成；Company Identity Resolution Hardening 本地 gate 已通过，Task 10 等待最终 whole-branch review**
-> **修订日期：2026-08-08**
+> **状态：Stage 3A 已完成；Stage 3B0 manifest 已冻结，entry-evidence smoke 已通过**
+> **修订日期：2026-08-09**
 > **定位：** Stage 3 的产品与技术设计，定义万级公司下职位覆盖、完整性、新鲜度和成本边界。
 > **实施入口：** [migration-master-plan.md](migration-master-plan.md)
-> **当前基线：** Stage 1、Stage 2 已合并到 `main`；Stage 3A 在隔离分支完成实现、最终审阅和当前矩阵，尚未集成；Stage 3B 等待单独实施计划与审批。
+> **当前基线：** Stage 1、Stage 2 已合并到 `main`；Stage 3A 在隔离分支完成实现、最终审阅和当前矩阵，尚未集成；Stage 3B0 已冻结 1,000 家 canonical manifest，并完成 2 条公开证据的受限模型 smoke；Stage 3B 仍等待单独实施计划与审批。
 
 ## 1. 结论
 
@@ -241,7 +241,7 @@ Stage 3 建议增加以下模型，最终字段以审批后的 Alembic 计划为
 
 ## 12. 审批门
 
-Stage 3A 已按获批的详细 implementation plan 完成，七项计划任务及 Task 7 审阅全部通过。Company Identity Resolution Hardening 的离线、PostgreSQL、严格 10,000-company performance、secret baseline 与专用只读审计数据库本地 gate 均已通过；Task 10 仍只因 `2143f8f..HEAD` 最终 whole-branch review 尚未完成而暂停。Stage 3B 状态继续为“等待单独实施计划与审批”；本次未执行真实候选导入、live discovery、manifest artifact、职位列表枚举、ATS、Playwright、在线 HTTP、外部 LLM、前端看板或规模扩容，也未生成外部 runtime report。
+Stage 3A 已按获批的详细 implementation plan 完成，七项计划任务及 Task 7 审阅全部通过。Company Identity Resolution Hardening 的离线、PostgreSQL、严格 10,000-company performance、secret baseline 与专用只读审计数据库本地 gate 均已通过。Task 10 已完成 reviewed candidate import、identity resolution、review/audit gate、canonical manifest freeze 与受限 entry-evidence smoke。Stage 3B 状态继续为“等待单独实施计划与审批”；本次未执行职位列表枚举、Playwright、前端看板或规模扩容。
 
 ## 13. Stage 3A 实施记录
 
@@ -290,6 +290,16 @@ Tasks 1–7 均已完成。Task 7 及全分支最终审阅在 round 4/5 后得�
 | `backend/tests/company_identity/test_cli.py` | 436 | `3413a723213180695b84a3b7b43b96e164b6a54c9f54788433ec2643aa80d0f8` |
 | `backend/tests/manifest/test_reporting.py` | 263 | `aea4bf9f6063bf94a2d3c373aad60cfc383d45415bc73da5f502b44780b916bb` |
 
-专用只读 audit 数据库已升级到 `0009_company_identity_review`，sanitized CLI 报告零 findings。外部 audit report 未被读取或提交。本次没有执行真实 candidate import、live discovery，也没有生成 manifest artifact 或外部 runtime report。Task 10 继续暂停，恢复执行前唯一剩余 gate 是 `2143f8f..HEAD` 最终 whole-branch review clean。
+专用只读 audit 数据库已升级到 `0009_company_identity_review`，sanitized CLI 报告零 findings。外部 audit report 未被读取或提交。
+
+### Task 10 Stage 3B0 数据 gate（2026-08-09）
+
+候选源 registry 在提交 `1996a7b`、`095f555`、`1a8f33c`、`4ac898d`、`0d18c47`、`79e0c26`，以及随后移除不适用来源的提交后固定为 45 项：44 个 `candidate_pool`、1 个 `entry_discovery_fallback`；source class 为 19 个 government、25 个 association、1 个 authorized API。外部 reviewed JSONL 在排除 2 个叙述性误提取后包含 5,111 个 exact identity，SHA-256 为 `8839e91442378224a2a5df9120561eb00080d000711b5990e53ab5eb221dfc6d`。候选主分类分布为 chips/compute 47、cloud/model platforms 46、autonomous transport 80、computer vision 1,236、data/MLOps 524、enterprise/vertical AI 801、foundation models 784、robotics 70、speech/language 1,523；九类均满足 allocation floor。
+
+专用 PostgreSQL 18 数据库处于 `0009_company_identity_review`，import 创建并自动接受 5,111 项，review-required、rejected、accepted-but-unresolved 均为 0；candidate review queue 与 identity review queue 均为 0，填充后 company identity audit 为 0 findings。5,111 家公司的 city 全部未提供，scale 全部为 `unknown`，不得将其误报为已取得真实 city/scale 分布。
+
+canonical manifest version 为 `abaad7965cabbaaa09e2dab6013be11c8b26d112e1444c18c36a8bb68bf584c4`，包含 1,000 个唯一 company id 与 1,000 个唯一 position。最终 allocation 为 chips/compute 45、cloud/model platforms 44、autonomous transport 49、computer vision 197、data/MLOps 105、enterprise/vertical AI 141、foundation models 139、robotics 47、speech/language 233。tracked manifest 为 230,607 bytes，SHA-256 `8ba503a77a37c18d2c1ddf8792fc161e423597d0b1e38e4630cddb9bdef52c81`；tracked quota 为 1,308 bytes，SHA-256 `343b3cf9ce5849d88b158f252953d1ad38273f99058e91693f09a552d2bc54e8`。tracked 文件与三个独立 external freeze replay 均 byte-identical。
+
+legacy discovery 已完成 1,000 条 `not_found`，未发出 Zhihu 请求。随后新增不可变 entry-evidence round `evidence-smoke-20260809`：从已登记 CAGD 证据关联到七牛云与万兴科技的公开官方招聘页，DashScope `qwen-plus` 共调用 2 次，得到 2 条 `accepted` self-hosted entry；2 条均进入分层抽检并完成审计，严重误判 0、暂停分层 0。aggregate entry coverage 为 2/1,000（0.2%）。本结果只证明受限证据流水线可运行，不代表整体覆盖率目标已达成；不得请求或枚举 job list。新增迁移 `0010_entry_evidence_rounds`，原计划 job details 与 coverage indexes 顺延为 `0011`、`0012`。Stage 3B 仍等待自己的 implementation plan 与明确审批。
 
 仍需跟踪的 Minor/运行风险：advisory lock keys 尚未排序去重，理论上存在 64-bit hash collision 下的锁顺序风险；既有 seed importer 直接写 `RegulatoryFiling` 的路径在 Task 3 persistence locking 范围外；100-company audit chunk 的 common evidence 可能占用 display slot，`display_names` 可能不完整；POSIX 分支缺少项目依赖齐全的 runtime 验证，Windows symlink 测试又受当前账户权限限制；POSIX 同权限 writer 的剩余竞态按人工裁定保留。上述风险不得被 Task 10 数据执行静默覆盖。
