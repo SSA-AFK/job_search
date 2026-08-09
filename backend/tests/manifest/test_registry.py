@@ -123,13 +123,13 @@ def test_gate1_registry_has_reviewed_source_census_and_host_budgets() -> None:
         assert host is not None
         candidate_host_budgets[host] += entry.rehearsal_request_budget
 
-    assert len(registry.entries) == 24
+    assert len(registry.entries) == 45
     assert role_counts == {
-        SourceRole.CANDIDATE_POOL.value: 23,
+        SourceRole.CANDIDATE_POOL.value: 44,
         SourceRole.ENTRY_DISCOVERY_FALLBACK.value: 1,
     }
     assert class_counts == {
-        "association": 4,
+        "association": 25,
         "authorized_api": 1,
         "government": 19,
     }
@@ -138,7 +138,7 @@ def test_gate1_registry_has_reviewed_source_census_and_host_budgets() -> None:
         "www.hunan.gov.cn": 2,
         "www.miit.gov.cn": 4,
         "www.sae-china.org": 3,
-        "www.zjsia.org.cn": 3,
+        "www.zjsia.org.cn": 24,
     }
     assert str(zhihu.base_url) == "https://developer.zhihu.com/api/v1/content/global_search"
     assert zhihu.roles == frozenset({SourceRole.ENTRY_DISCOVERY_FALLBACK})
