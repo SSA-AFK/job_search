@@ -85,6 +85,30 @@
       "enabled": true
     },
     {
+      "id": "jiangsu_semiconductor_association_homepage",
+      "name": "Jiangsu Semiconductor Industry Association Public Homepage",
+      "base_url": "http://www.jssia.cn/index.html",
+      "source_class": "association",
+      "authorization_basis": "Official public homepage of the Jiangsu Semiconductor Industry Association linked by the Zhejiang Semiconductor Industry Association public peer-association directory; bounded credential-free access is limited to publisher-rendered public member-directory discovery, and no robots.txt disallow was published at validation time.",
+      "robots_policy": "required",
+      "roles": ["candidate_pool"],
+      "requests_per_second": "0.5",
+      "rehearsal_request_budget": 1,
+      "enabled": true
+    },
+    {
+      "id": "hefei_semiconductor_association_homepage",
+      "name": "Hefei Semiconductor Industry Association Public Homepage",
+      "base_url": "http://www.hfsia.com/",
+      "source_class": "association",
+      "authorization_basis": "Official public homepage of the Hefei Semiconductor Industry Association linked by the Zhejiang Semiconductor Industry Association public peer-association directory; bounded credential-free access is limited to publisher-rendered public member-directory discovery, and the published robots.txt permits the root path.",
+      "robots_policy": "required",
+      "roles": ["candidate_pool"],
+      "requests_per_second": "0.5",
+      "rehearsal_request_budget": 1,
+      "enabled": true
+    },
+    {
       "id": "cagd_deep_synthesis_batch_01",
       "name": "CAC Domestic Deep Synthesis Algorithm Filing Notice - Batch 1",
       "base_url": "https://www.cagd.gov.cn/v/2023/06/3389.html",
