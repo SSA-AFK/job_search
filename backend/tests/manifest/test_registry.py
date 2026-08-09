@@ -123,20 +123,19 @@ def test_gate1_registry_has_reviewed_source_census_and_host_budgets() -> None:
         assert host is not None
         candidate_host_budgets[host] += entry.rehearsal_request_budget
 
-    assert len(registry.entries) == 57
+    assert len(registry.entries) == 24
     assert role_counts == {
-        SourceRole.CANDIDATE_POOL.value: 56,
+        SourceRole.CANDIDATE_POOL.value: 23,
         SourceRole.ENTRY_DISCOVERY_FALLBACK.value: 1,
     }
     assert class_counts == {
-        "association": 37,
+        "association": 4,
         "authorized_api": 1,
         "government": 19,
     }
     assert candidate_host_budgets == {
         "www.cagd.gov.cn": 32,
         "www.hunan.gov.cn": 2,
-        "www.jssia.cn": 33,
         "www.miit.gov.cn": 4,
         "www.sae-china.org": 3,
         "www.zjsia.org.cn": 3,
