@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from threading import Event
+from threading import Event, Lock
 from uuid import UUID, uuid4
 
 import pytest
@@ -39,6 +39,15 @@ from app.models import Base, CollectionStatus, Company, CompanyAlias, CrawlRun, 
 
 NOW = datetime(2026, 8, 7, 12, tzinfo=UTC)
 COMPANY_A = UUID("00000000-0000-0000-0000-000000000001")
+
+
+def _release_stuck_test_identity_mutex(mutex: Lock) -> None:
+    if not mutex.locked():
+        return
+    try:
+        mutex.release()
+    except RuntimeError:
+        return
 
 
 @pytest.fixture
@@ -996,6 +1005,284 @@ def test_identity_lock_keys_are_domain_separated_deduplicated_and_key_ordered() 
     keys = identity_service._identity_lock_keys(material)
 
     assert keys == (-6410938119080746435, -1983210520360554722)
+
+
+@pytest.mark.parametrize("root_a_outcome", ["commit", "rollback"])
+def test_sqlite_root_identity_mutex_prevents_opposite_order_deadlock(
+    tmp_path,
+    root_a_outcome: str,
+) -> None:
+    engine = create_engine(
+        f"sqlite:///{tmp_path / f'root-identity-{root_a_outcome}.sqlite3'}",
+        connect_args={"check_same_thread": False, "timeout": 10},
+    )
+    identity_mutex = Lock()
+    with identity_service._LOCAL_LOCKS_GUARD:  # type: ignore[attr-defined]
+        identity_service._LOCAL_IDENTITY_MUTEXES[engine] = (  # type: ignore[attr-defined]
+            identity_mutex
+        )
+    root_a_first_acquired = Event()
+    root_a_repeat_requested = Event()
+    root_a_repeated_call_completed = Event()
+    root_a_completion_requested = Event()
+    root_b_attempting = Event()
+    root_b_first_acquired = Event()
+    fallback_release = Event()
+    root_b_should_repeat = Event()
+    root_b_repeated_call_completed = Event()
+
+    def run_root_a() -> None:
+        with Session(engine) as root_a:
+            transaction = root_a.begin()
+            try:
+                with identity_service.serialized_company_identities(
+                    root_a,
+                    ("zulu identity",),
+                ):
+                    root_a_first_acquired.set()
+                if not root_a_repeat_requested.wait(timeout=15):
+                    raise TimeoutError("root A repeat was not requested")
+                with identity_service.serialized_company_identities(
+                    root_a,
+                    ("alpha identity",),
+                ):
+                    root_a_repeated_call_completed.set()
+                if not root_a_completion_requested.wait(timeout=15):
+                    raise TimeoutError("root A completion was not requested")
+                if root_a_outcome == "commit":
+                    transaction.commit()
+                else:
+                    transaction.rollback()
+            finally:
+                if root_a.in_transaction():
+                    root_a.rollback()
+
+    def run_root_b() -> None:
+        with Session(engine) as root_b:
+            transaction = root_b.begin()
+            try:
+                root_b_attempting.set()
+                with identity_service.serialized_company_identities(
+                    root_b,
+                    ("alpha identity",),
+                ):
+                    root_b_first_acquired.set()
+                    if not fallback_release.wait(timeout=15):
+                        raise TimeoutError("root B continuation was not released")
+                if root_b_should_repeat.is_set():
+                    with identity_service.serialized_company_identities(
+                        root_b,
+                        ("zulu identity",),
+                    ):
+                        root_b_repeated_call_completed.set()
+                transaction.rollback()
+            finally:
+                if root_b.in_transaction():
+                    root_b.rollback()
+
+    pool = ThreadPoolExecutor(max_workers=2)
+    root_a_future = pool.submit(run_root_a)
+    root_b_future = None
+    try:
+        assert root_a_first_acquired.wait(timeout=5)
+        root_b_future = pool.submit(run_root_b)
+        assert root_b_attempting.wait(timeout=5)
+        assert not root_b_first_acquired.wait(timeout=0.2)
+        root_a_repeat_requested.set()
+        assert root_a_repeated_call_completed.wait(timeout=5)
+        root_a_completion_requested.set()
+        root_a_future.result(timeout=15)
+        assert root_b_first_acquired.wait(timeout=5)
+        root_b_should_repeat.set()
+        fallback_release.set()
+        assert root_b_repeated_call_completed.wait(timeout=5)
+        root_b_future.result(timeout=15)
+    finally:
+        fallback_release.set()
+        root_a_repeat_requested.set()
+        root_a_completion_requested.set()
+        try:
+            try:
+                for future in (root_a_future, root_b_future):
+                    if future is not None:
+                        future.exception(timeout=15)
+            except TimeoutError:
+                _release_stuck_test_identity_mutex(identity_mutex)
+                for future in (root_a_future, root_b_future):
+                    if future is not None:
+                        future.exception(timeout=15)
+        finally:
+            _release_stuck_test_identity_mutex(identity_mutex)
+            pool.shutdown(wait=False, cancel_futures=True)
+            engine.dispose()
+
+
+def test_sqlite_nested_end_keeps_root_mutex_and_reused_session_competes_fresh(
+    tmp_path,
+) -> None:
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'root-identity-lifetime.sqlite3'}",
+        connect_args={"check_same_thread": False, "timeout": 10},
+    )
+    identity_mutex = Lock()
+    with identity_service._LOCAL_LOCKS_GUARD:  # type: ignore[attr-defined]
+        identity_service._LOCAL_IDENTITY_MUTEXES[engine] = (  # type: ignore[attr-defined]
+            identity_mutex
+        )
+    nested_ended = Event()
+    root_b_attempting = Event()
+    root_b_acquired = Event()
+    root_b_release = Event()
+    root_a_first_completion_requested = Event()
+    root_a_second_attempt_requested = Event()
+    root_a_second_attempting = Event()
+    root_a_second_acquired = Event()
+
+    def run_reused_root_a() -> None:
+        with Session(engine) as root_a:
+            first_transaction = root_a.begin()
+            try:
+                with identity_service.serialized_company_identities(
+                    root_a,
+                    ("shared identity",),
+                ):
+                    pass
+                nested_transaction = root_a.begin_nested()
+                with identity_service.serialized_company_identities(
+                    root_a,
+                    ("nested identity",),
+                ):
+                    pass
+                nested_transaction.commit()
+                nested_ended.set()
+                if not root_a_first_completion_requested.wait(timeout=15):
+                    raise TimeoutError("root A first completion was not requested")
+                first_transaction.commit()
+            finally:
+                if root_a.in_transaction():
+                    root_a.rollback()
+
+            if not root_a_second_attempt_requested.wait(timeout=15):
+                raise TimeoutError("root A second attempt was not requested")
+            second_transaction = root_a.begin()
+            try:
+                root_a_second_attempting.set()
+                with identity_service.serialized_company_identities(
+                    root_a,
+                    ("shared identity",),
+                ):
+                    root_a_second_acquired.set()
+                second_transaction.rollback()
+            finally:
+                if root_a.in_transaction():
+                    root_a.rollback()
+
+    def run_root_b() -> None:
+        with Session(engine) as root_b:
+            transaction = root_b.begin()
+            try:
+                root_b_attempting.set()
+                with identity_service.serialized_company_identities(
+                    root_b,
+                    ("shared identity",),
+                ):
+                    root_b_acquired.set()
+                    if not root_b_release.wait(timeout=15):
+                        raise TimeoutError("root B release was not requested")
+                transaction.rollback()
+            finally:
+                if root_b.in_transaction():
+                    root_b.rollback()
+
+    pool = ThreadPoolExecutor(max_workers=2)
+    root_a_future = pool.submit(run_reused_root_a)
+    root_b_future = None
+    try:
+        assert nested_ended.wait(timeout=5)
+        root_b_future = pool.submit(run_root_b)
+        assert root_b_attempting.wait(timeout=5)
+        assert not root_b_acquired.wait(timeout=0.2)
+        root_a_first_completion_requested.set()
+        assert root_b_acquired.wait(timeout=5)
+        root_a_second_attempt_requested.set()
+        assert root_a_second_attempting.wait(timeout=5)
+        assert not root_a_second_acquired.wait(timeout=0.2)
+        root_b_release.set()
+        assert root_a_second_acquired.wait(timeout=5)
+        root_a_future.result(timeout=15)
+        root_b_future.result(timeout=15)
+    finally:
+        root_a_first_completion_requested.set()
+        root_b_release.set()
+        try:
+            if root_b_future is not None:
+                try:
+                    root_b_future.exception(timeout=15)
+                except TimeoutError:
+                    _release_stuck_test_identity_mutex(identity_mutex)
+                    root_b_future.exception(timeout=15)
+        finally:
+            root_a_second_attempt_requested.set()
+            try:
+                try:
+                    root_a_future.exception(timeout=15)
+                except TimeoutError:
+                    _release_stuck_test_identity_mutex(identity_mutex)
+                    root_a_future.exception(timeout=15)
+            finally:
+                _release_stuck_test_identity_mutex(identity_mutex)
+                pool.shutdown(wait=False, cancel_futures=True)
+                engine.dispose()
+
+
+@pytest.mark.parametrize("failure_stage", ["listener", "ownership"])
+def test_sqlite_root_identity_mutex_releases_when_ownership_setup_fails(
+    tmp_path,
+    monkeypatch,
+    failure_stage: str,
+) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'root-identity-failure.sqlite3'}")
+    identity_mutex = Lock()
+    with identity_service._LOCAL_LOCKS_GUARD:  # type: ignore[attr-defined]
+        identity_service._LOCAL_IDENTITY_MUTEXES[engine] = (  # type: ignore[attr-defined]
+            identity_mutex
+        )
+
+    class RejectOwnership(dict[object, object]):
+        def __setitem__(self, key: object, value: object) -> None:
+            raise RuntimeError("ownership setup failed")
+
+    def reject_listener(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("listener setup failed")
+
+    try:
+        with Session(engine) as database_session:
+            transaction = database_session.begin()
+            if failure_stage == "listener":
+                monkeypatch.setattr(identity_service.event, "listen", reject_listener)
+                expected_message = "listener setup failed"
+            else:
+                state = identity_service._LocalTransactionLocks()  # type: ignore[attr-defined]
+                state.by_transaction = RejectOwnership()  # type: ignore[assignment]
+                database_session.info[
+                    identity_service._LOCAL_TRANSACTION_LOCKS_INFO_KEY  # type: ignore[attr-defined]
+                ] = state
+                expected_message = "ownership setup failed"
+
+            with (
+                pytest.raises(RuntimeError, match=expected_message),
+                identity_service.serialized_company_identities(
+                    database_session,
+                    ("failing identity",),
+                ),
+            ):
+                pass
+
+            assert not identity_mutex.locked()
+            transaction.rollback()
+    finally:
+        _release_stuck_test_identity_mutex(identity_mutex)
+        engine.dispose()
 
 
 def test_company_identity_locks_use_shared_name_and_website_namespace_order() -> None:

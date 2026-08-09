@@ -46,7 +46,7 @@ _FILING_IDENTITY_LOCK_PREFIX = b"company_search:regulatory_filing:v1\0"
 _MAX_COMPANY_WEBSITE_LENGTH = 1_000
 _MAX_COMPANY_CITY_LENGTH = 50
 _LOCAL_LOCKS_GUARD = Lock()
-_LOCAL_LOCKS: WeakKeyDictionary[object, dict[int, Lock]] = WeakKeyDictionary()
+_LOCAL_IDENTITY_MUTEXES: WeakKeyDictionary[object, Lock] = WeakKeyDictionary()
 _LOCAL_TRANSACTION_LOCKS_INFO_KEY = "company_identity_local_transaction_locks"
 _LOCAL_TRANSACTION_LOCK_LISTENER_INFO_KEY = (
     "company_identity_local_transaction_lock_listener"
@@ -55,7 +55,7 @@ _LOCAL_TRANSACTION_LOCK_LISTENER_INFO_KEY = (
 
 class _LocalTransactionLocks:
     def __init__(self) -> None:
-        self.by_transaction: dict[SessionTransaction, dict[int, Lock]] = {}
+        self.by_transaction: dict[SessionTransaction, Lock] = {}
 
 
 def _release_local_transaction_locks(
@@ -67,9 +67,9 @@ def _release_local_transaction_locks(
     state = session.info.get(_LOCAL_TRANSACTION_LOCKS_INFO_KEY)
     if not isinstance(state, _LocalTransactionLocks):
         return
-    locks_by_key = state.by_transaction.pop(transaction, {})
-    for lock in reversed(tuple(locks_by_key.values())):
-        lock.release()
+    mutex = state.by_transaction.pop(transaction, None)
+    if mutex is not None:
+        mutex.release()
 
 
 def _local_transaction_locks(session: Session) -> _LocalTransactionLocks:
@@ -81,6 +81,12 @@ def _local_transaction_locks(session: Session) -> _LocalTransactionLocks:
         event.listen(session, "after_transaction_end", _release_local_transaction_locks)
         session.info[_LOCAL_TRANSACTION_LOCK_LISTENER_INFO_KEY] = True
     return state
+
+
+def _local_identity_mutex(session: Session) -> Lock:
+    bind = session.get_bind()
+    with _LOCAL_LOCKS_GUARD:
+        return _LOCAL_IDENTITY_MUTEXES.setdefault(bind, Lock())
 
 
 class _IdentityReviewError(ValueError):
@@ -463,42 +469,25 @@ def _serialized_lock_keys(
         yield
         return
 
-    bind = session.get_bind()
-    with _LOCAL_LOCKS_GUARD:
-        locks_by_key = _LOCAL_LOCKS.setdefault(bind, {})
-        keyed_locks = tuple(
-            (key, locks_by_key.setdefault(key, Lock())) for key in lock_keys
-        )
     transaction = session.get_transaction()
+    mutex = _local_identity_mutex(session)
     if transaction is None:
-        locks_to_acquire = keyed_locks
-        transaction_locks = None
-    else:
-        state = _local_transaction_locks(session)
-        transaction_locks = state.by_transaction.setdefault(transaction, {})
-        locks_to_acquire = tuple(
-            (key, lock)
-            for key, lock in keyed_locks
-            if key not in transaction_locks
-        )
+        with mutex:
+            yield
+        return
 
-    acquired: list[tuple[int, Lock]] = []
-    try:
-        for keyed_lock in locks_to_acquire:
-            keyed_lock[1].acquire()
-            acquired.append(keyed_lock)
-    except BaseException:
-        for _key, lock in reversed(acquired):
-            lock.release()
-        raise
-    if transaction_locks is not None:
-        transaction_locks.update(acquired)
-    try:
-        yield
-    finally:
-        if transaction_locks is None:
-            for _key, lock in reversed(acquired):
-                lock.release()
+    state = _local_transaction_locks(session)
+    if transaction not in state.by_transaction:
+        acquired = False
+        try:
+            mutex.acquire()
+            acquired = True
+            state.by_transaction[transaction] = mutex
+        except BaseException:
+            if acquired:
+                mutex.release()
+            raise
+    yield
 
 
 def _validate_draft(draft: CompanyIdentityReviewDraft) -> CompanyIdentityReviewDraft:

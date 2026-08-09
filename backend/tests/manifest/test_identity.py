@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID, uuid4
@@ -67,6 +67,15 @@ def _drop_manifest_identity_race_schema(
     )
     for statement in statements:
         connection.execute(text(statement))
+
+
+def _release_stuck_test_identity_mutex(mutex: Lock) -> None:
+    if not mutex.locked():
+        return
+    try:
+        mutex.release()
+    except RuntimeError:
+        return
 
 
 @pytest.fixture
@@ -810,6 +819,11 @@ def _assert_sqlite_manifest_lock_waits_for_caller_root_transaction(
         f"sqlite:///{tmp_path / f'{label}.sqlite3'}",
         connect_args={"check_same_thread": False, "timeout": 10},
     )
+    identity_mutex = Lock()
+    with company_identity_service._LOCAL_LOCKS_GUARD:  # type: ignore[attr-defined]
+        company_identity_service._LOCAL_IDENTITY_MUTEXES[engine] = (  # type: ignore[attr-defined]
+            identity_mutex
+        )
     Base.metadata.create_all(engine)  # type: ignore[attr-defined]
     fact = candidate(
         label,
@@ -819,24 +833,7 @@ def _assert_sqlite_manifest_lock_waits_for_caller_root_transaction(
     )
     observer_attempting = Event()
     observer_acquired = Event()
-    lock_keys = company_identity_service._identity_lock_keys(  # type: ignore[attr-defined]
-        company_identity_service._company_identities_key_material(  # type: ignore[attr-defined]
-            names=lock_names,
-            official_websites=lock_websites,
-        )
-    )
-
-    def lock_states() -> tuple[bool, ...]:
-        with company_identity_service._LOCAL_LOCKS_GUARD:  # type: ignore[attr-defined]
-            locks_by_key = company_identity_service._LOCAL_LOCKS.get(  # type: ignore[attr-defined]
-                engine,
-                {},
-            )
-            return tuple(
-                lock is not None and lock.locked()
-                for key in lock_keys
-                if (lock := locks_by_key.get(key)) is not None
-            )
+    fallback_release = Event()
 
     def observe_after_identity_lock() -> tuple[CandidateDecisionStatus, int, int]:
         with Session(engine, expire_on_commit=False) as observer:
@@ -847,6 +844,8 @@ def _assert_sqlite_manifest_lock_waits_for_caller_root_transaction(
                 official_websites=lock_websites,
             ):
                 observer_acquired.set()
+                if not fallback_release.wait(timeout=15):
+                    raise TimeoutError("manifest lock observer was not released")
                 status = observer.scalar(
                     select(CandidateFact.decision_status).where(
                         CandidateFact.stable_evidence_id == fact.stable_evidence_id
@@ -860,14 +859,13 @@ def _assert_sqlite_manifest_lock_waits_for_caller_root_transaction(
                     or 0,
                 )
 
+    pool = ThreadPoolExecutor(max_workers=1)
+    observer_future = None
     try:
         with Session(engine, expire_on_commit=False) as setup:
             persist_candidates(setup, fact)
 
-        with (
-            Session(engine, expire_on_commit=False) as writer,
-            ThreadPoolExecutor(max_workers=1) as pool,
-        ):
+        with Session(engine, expire_on_commit=False) as writer:
             outer_transaction = writer.begin()
             try:
                 writer.connection().exec_driver_sql("BEGIN")
@@ -894,15 +892,21 @@ def _assert_sqlite_manifest_lock_waits_for_caller_root_transaction(
                         ),
                     ) == ReviewSummary(applied=1, replayed=0)
 
-                held_before_root_end = lock_states()
                 observer_future = pool.submit(observe_after_identity_lock)
-                assert observer_attempting.wait(timeout=5)
-                acquired_before_root_end = observer_acquired.wait(timeout=0.2)
-                if outer_outcome == "commit":
-                    outer_transaction.commit()
-                else:
-                    outer_transaction.rollback()
-                observed = observer_future.result(timeout=15)
+                try:
+                    assert observer_attempting.wait(timeout=5)
+                    assert not observer_acquired.wait(timeout=0.2)
+                    if outer_outcome == "commit":
+                        outer_transaction.commit()
+                    else:
+                        outer_transaction.rollback()
+                    assert observer_acquired.wait(timeout=5)
+                    fallback_release.set()
+                    observed = observer_future.result(timeout=15)
+                finally:
+                    if writer.in_transaction():
+                        writer.rollback()
+                    fallback_release.set()
             finally:
                 if writer.in_transaction():
                     writer.rollback()
@@ -926,13 +930,21 @@ def _assert_sqlite_manifest_lock_waits_for_caller_root_transaction(
                 0,
             )
         )
-        assert held_before_root_end == (True,) * len(lock_keys)
-        assert not acquired_before_root_end
         assert observed == expected
-        assert lock_states() == (False,) * len(lock_keys)
     finally:
-        Base.metadata.drop_all(engine)  # type: ignore[attr-defined]
-        engine.dispose()
+        fallback_release.set()
+        try:
+            if observer_future is not None:
+                try:
+                    observer_future.exception(timeout=15)
+                except TimeoutError:
+                    _release_stuck_test_identity_mutex(identity_mutex)
+                    observer_future.exception(timeout=15)
+        finally:
+            _release_stuck_test_identity_mutex(identity_mutex)
+            pool.shutdown(wait=False, cancel_futures=True)
+            Base.metadata.drop_all(engine)  # type: ignore[attr-defined]
+            engine.dispose()
 
 
 @pytest.mark.parametrize("outer_outcome", ["commit", "rollback"])
