@@ -73,6 +73,18 @@
       "enabled": true
     },
     {
+      "id": "shanghai_ic_industry_association_members",
+      "name": "Shanghai Integrated Circuit Industry Association Public Member Directory",
+      "base_url": "https://www.sica.org.cn/",
+      "source_class": "association",
+      "authorization_basis": "Official credential-free website of the Shanghai Integrated Circuit Industry Association exposing its public member directory through the normal stock-browser user interface; access permitted by the published robots policy at validation time.",
+      "robots_policy": "required",
+      "roles": ["candidate_pool"],
+      "requests_per_second": "0.5",
+      "rehearsal_request_budget": 1,
+      "enabled": true
+    },
+    {
       "id": "cagd_deep_synthesis_batch_01",
       "name": "CAC Domestic Deep Synthesis Algorithm Filing Notice - Batch 1",
       "base_url": "https://www.cagd.gov.cn/v/2023/06/3389.html",
