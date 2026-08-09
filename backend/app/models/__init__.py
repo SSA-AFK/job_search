@@ -30,6 +30,9 @@ if TYPE_CHECKING:
         CompanyManifest,
         CompanyManifestMember,
         EntryDiscoveryObservation,
+        EntryDiscoveryRound,
+        EntryEvidenceAuditFinding,
+        EntryEvidenceAuditSample,
     )
 
 
@@ -40,6 +43,9 @@ _MANIFEST_MODEL_NAMES = frozenset(
         "CompanyManifest",
         "CompanyManifestMember",
         "EntryDiscoveryObservation",
+        "EntryDiscoveryRound",
+        "EntryEvidenceAuditFinding",
+        "EntryEvidenceAuditSample",
     }
 )
 
@@ -97,6 +103,9 @@ __all__ = [
     "CompanySource",
     "CrawlRun",
     "EntryDiscoveryObservation",
+    "EntryDiscoveryRound",
+    "EntryEvidenceAuditFinding",
+    "EntryEvidenceAuditSample",
     "FilingType",
     "FundingStage",
     "JobCollectionSnapshot",

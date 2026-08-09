@@ -136,6 +136,33 @@ class CompanyManifestMember(Base):
     recruitment_url: Mapped[str | None] = mapped_column(String(2000))
 
 
+class EntryDiscoveryRound(Base):
+    __tablename__ = "entry_discovery_rounds"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ("predecessor_round_id", "manifest_version"),
+            ("entry_discovery_rounds.id", "entry_discovery_rounds.manifest_version"),
+            name="fk_discovery_round_predecessor_manifest",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("id", "manifest_version", name="uq_discovery_round_id_manifest"),
+        UniqueConstraint(
+            "manifest_version", "name", name="uq_discovery_round_manifest_name"
+        ),
+        Index("ix_discovery_rounds_manifest_started", "manifest_version", "started_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
+    manifest_version: Mapped[str] = mapped_column(
+        ForeignKey("company_manifests.version", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    config_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    predecessor_round_id: Mapped[UUID | None] = mapped_column(GUID())
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
 class EntryDiscoveryObservation(Base):
     __tablename__ = "entry_discovery_observations"
     __table_args__ = (
@@ -145,14 +172,43 @@ class EntryDiscoveryObservation(Base):
             name="fk_discovery_observation_entry_company",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ("discovery_round_id", "manifest_version"),
+            ("entry_discovery_rounds.id", "entry_discovery_rounds.manifest_version"),
+            name="fk_discovery_observation_round_manifest",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ("predecessor_observation_id", "manifest_version", "company_id"),
+            (
+                "entry_discovery_observations.id",
+                "entry_discovery_observations.manifest_version",
+                "entry_discovery_observations.company_id",
+            ),
+            name="fk_discovery_observation_predecessor_identity",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "id", "manifest_version", "company_id", name="uq_discovery_observation_identity"
+        ),
+        UniqueConstraint(
+            "id", "discovery_round_id", name="uq_discovery_observation_id_round"
+        ),
+        UniqueConstraint(
+            "discovery_round_id", "company_id", name="uq_discovery_observation_round_company"
+        ),
         Index("ix_discovery_observations_manifest_status", "manifest_version", "status"),
         Index("ix_discovery_observations_company_observed", "company_id", "observed_at"),
+        Index("ix_discovery_observations_round_status", "discovery_round_id", "status"),
+        Index("ix_discovery_observations_predecessor", "predecessor_observation_id"),
     )
 
     id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
     manifest_version: Mapped[str] = mapped_column(
         ForeignKey("company_manifests.version", ondelete="CASCADE"), nullable=False
     )
+    discovery_round_id: Mapped[UUID | None] = mapped_column(GUID())
+    predecessor_observation_id: Mapped[UUID | None] = mapped_column(GUID())
     company_id: Mapped[UUID] = mapped_column(
         ForeignKey("companies.id", ondelete="RESTRICT"), nullable=False
     )
@@ -171,3 +227,52 @@ class EntryDiscoveryObservation(Base):
     error_code: Mapped[str | None] = mapped_column(String(100))
     job_entry_id: Mapped[UUID | None] = mapped_column(GUID())
     observed_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class EntryEvidenceAuditSample(Base):
+    __tablename__ = "entry_evidence_audit_samples"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ("observation_id", "discovery_round_id"),
+            (
+                "entry_discovery_observations.id",
+                "entry_discovery_observations.discovery_round_id",
+            ),
+            name="fk_evidence_audit_sample_observation_round",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "discovery_round_id", "observation_id", name="uq_evidence_audit_sample_observation"
+        ),
+        Index(
+            "ix_evidence_audit_samples_stratum",
+            "discovery_round_id",
+            "source_id",
+            "platform",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
+    discovery_round_id: Mapped[UUID] = mapped_column(
+        ForeignKey("entry_discovery_rounds.id", ondelete="RESTRICT"), nullable=False
+    )
+    observation_id: Mapped[UUID] = mapped_column(GUID(), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    platform: Mapped[str] = mapped_column(String(50), nullable=False)
+    selected_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class EntryEvidenceAuditFinding(Base):
+    __tablename__ = "entry_evidence_audit_findings"
+    __table_args__ = (
+        UniqueConstraint("audit_sample_id", name="uq_evidence_audit_finding_sample"),
+        Index("ix_evidence_audit_findings_severe_audited", "severe_error", "audited_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
+    audit_sample_id: Mapped[UUID] = mapped_column(
+        ForeignKey("entry_evidence_audit_samples.id", ondelete="RESTRICT"), nullable=False
+    )
+    severe_error: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    audited_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)

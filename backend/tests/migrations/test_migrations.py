@@ -29,6 +29,9 @@ EXPECTED_TABLES = {
     "source_documents",
     "company_sources",
     "entry_discovery_observations",
+    "entry_discovery_rounds",
+    "entry_evidence_audit_findings",
+    "entry_evidence_audit_samples",
     "job_postings",
     "job_sources",
     "regulatory_filings",
@@ -41,6 +44,12 @@ EXPECTED_TABLES = {
 REVIEW_TABLES = {
     "company_identity_review_decisions",
     "company_identity_review_items",
+}
+
+ENTRY_EVIDENCE_ROUND_TABLES = {
+    "entry_discovery_rounds",
+    "entry_evidence_audit_findings",
+    "entry_evidence_audit_samples",
 }
 
 
@@ -797,7 +806,9 @@ def test_gate1_manifest_discovery_round_trip_preserves_stage3a_rows(
 
     command.upgrade(config, "0008_gate1_manifest_discovery")
     inspector = inspect(engine)
-    assert set(inspector.get_table_names()) >= EXPECTED_TABLES - REVIEW_TABLES
+    assert set(inspector.get_table_names()) >= (
+        EXPECTED_TABLES - REVIEW_TABLES - ENTRY_EVIDENCE_ROUND_TABLES
+    )
     assert {
         index["name"]
         for index in inspector.get_indexes("job_entries")
@@ -1595,7 +1606,7 @@ def test_0009_rejects_normalized_filing_collisions_without_deleting_rows(
     command.upgrade(config, "head")
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0009_company_identity_review"
+            "0010_entry_evidence_rounds"
         )
         assert connection.scalar(
             text("SELECT count(*) FROM regulatory_filings")

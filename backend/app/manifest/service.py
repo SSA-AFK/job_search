@@ -38,6 +38,9 @@ from app.manifest.models import (
     CompanyManifest,
     CompanyManifestMember,
     EntryDiscoveryObservation,
+    EntryDiscoveryRound,
+    EntryEvidenceAuditFinding,
+    EntryEvidenceAuditSample,
 )
 from app.models.company import Company
 from app.models.enums import JobEntryStatus
@@ -76,7 +79,28 @@ class DiscoveryRecordSummary:
     entry_created: bool
 
 
+@dataclass(frozen=True)
+class DiscoveryRoundSummary:
+    round_id: UUID
+    created: bool
+
+
+@dataclass(frozen=True)
+class EvidenceAuditSampleSummary:
+    audit_sample_id: UUID
+    created: bool
+
+
+@dataclass(frozen=True)
+class EvidenceAuditFindingSummary:
+    audit_finding_id: UUID
+    created: bool
+
+
 _FINGERPRINT_PATTERN = re.compile(r"[0-9a-f]{64}")
+_ROUND_NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{2,99}")
+_SOURCE_ID_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,49}")
+_PLATFORM_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,49}")
 _CONFIDENCE_ORDER = {
     ConfidenceTier.HIGH: 0,
     ConfidenceTier.MEDIUM: 1,
@@ -217,6 +241,351 @@ def _upsert_discovered_entry(
     return entry, created
 
 
+def _lock_sqlite_writer(session: Session) -> None:
+    if session.get_bind().dialect.name == "sqlite":
+        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+
+
+def create_discovery_round(
+    session: Session,
+    *,
+    manifest_version: str,
+    name: str,
+    config_fingerprint: str,
+    model_fingerprint: str,
+    started_at: datetime,
+    predecessor_round_id: UUID | None = None,
+) -> DiscoveryRoundSummary:
+    """Create or exactly replay one named immutable discovery round."""
+
+    if session.in_transaction():
+        raise DiscoveryRecordConflict("discovery round creation requires a clean session")
+    if _ROUND_NAME_PATTERN.fullmatch(name) is None:
+        raise DiscoveryRecordConflict("discovery round name is invalid")
+    if any(
+        _FINGERPRINT_PATTERN.fullmatch(value) is None
+        for value in (manifest_version, config_fingerprint, model_fingerprint)
+    ):
+        raise DiscoveryRecordConflict("discovery round fingerprint is invalid")
+    if started_at.tzinfo is None or started_at.utcoffset() is None:
+        raise DiscoveryRecordConflict("discovery round start time must be timezone-aware")
+    normalized_started_at = started_at.astimezone(UTC)
+
+    with session.begin():
+        _lock_sqlite_writer(session)
+        manifest = session.scalar(
+            select(CompanyManifest)
+            .where(CompanyManifest.version == manifest_version)
+            .with_for_update()
+        )
+        if manifest is None:
+            raise DiscoveryRecordConflict("discovery round manifest does not exist")
+        existing = session.scalar(
+            select(EntryDiscoveryRound)
+            .where(
+                EntryDiscoveryRound.manifest_version == manifest_version,
+                EntryDiscoveryRound.name == name,
+            )
+            .with_for_update()
+        )
+        if existing is not None:
+            matches = (
+                existing.config_fingerprint == config_fingerprint
+                and existing.model_fingerprint == model_fingerprint
+                and existing.predecessor_round_id == predecessor_round_id
+                and existing.started_at == normalized_started_at
+            )
+            if not matches:
+                raise DiscoveryRecordConflict("named discovery round conflicts with stored round")
+            return DiscoveryRoundSummary(round_id=existing.id, created=False)
+
+        predecessor: EntryDiscoveryRound | None = None
+        if predecessor_round_id is not None:
+            predecessor = session.scalar(
+                select(EntryDiscoveryRound)
+                .where(EntryDiscoveryRound.id == predecessor_round_id)
+                .with_for_update()
+            )
+            if predecessor is None or predecessor.manifest_version != manifest_version:
+                raise DiscoveryRecordConflict("predecessor discovery round does not exist")
+            if normalized_started_at <= predecessor.started_at:
+                raise DiscoveryRecordConflict(
+                    "discovery round must start after its predecessor"
+                )
+
+        discovery_round = EntryDiscoveryRound(
+            manifest_version=manifest_version,
+            name=name,
+            config_fingerprint=config_fingerprint,
+            model_fingerprint=model_fingerprint,
+            predecessor_round_id=None if predecessor is None else predecessor.id,
+            started_at=normalized_started_at,
+        )
+        session.add(discovery_round)
+        session.flush()
+        return DiscoveryRoundSummary(round_id=discovery_round.id, created=True)
+
+
+def record_discovery_result_in_round(
+    session: Session,
+    *,
+    round_id: UUID,
+    command: RecordDiscoveryCommand,
+    predecessor_observation_id: UUID | None = None,
+) -> DiscoveryRecordSummary:
+    """Append one immutable result to a named round, optionally linking prior evidence."""
+
+    if session.in_transaction():
+        raise DiscoveryRecordConflict("round discovery recording requires a clean session")
+    classification = (
+        _accepted_classification(command.result)
+        if command.result.status is DiscoveryStatus.ACCEPTED
+        else command.result.classification
+    )
+
+    with session.begin():
+        _lock_sqlite_writer(session)
+        discovery_round = session.scalar(
+            select(EntryDiscoveryRound)
+            .where(EntryDiscoveryRound.id == round_id)
+            .with_for_update()
+        )
+        if (
+            discovery_round is None
+            or discovery_round.manifest_version != command.manifest_version
+        ):
+            raise DiscoveryRecordConflict("discovery round does not exist for manifest")
+        member = session.scalar(
+            select(CompanyManifestMember)
+            .where(
+                CompanyManifestMember.manifest_version == command.manifest_version,
+                CompanyManifestMember.company_id == command.company_id,
+            )
+            .with_for_update()
+        )
+        if member is None:
+            raise DiscoveryRecordConflict(
+                "discovery company is not a member of the requested manifest"
+            )
+
+        existing = session.scalar(
+            select(EntryDiscoveryObservation)
+            .where(
+                EntryDiscoveryObservation.discovery_round_id == round_id,
+                EntryDiscoveryObservation.company_id == command.company_id,
+            )
+            .with_for_update()
+        )
+        if existing is not None:
+            if (
+                _observation_values(existing) == _result_values(command.result)
+                and existing.observed_at == command.observed_at
+                and existing.predecessor_observation_id == predecessor_observation_id
+            ):
+                return DiscoveryRecordSummary(
+                    observation_id=existing.id,
+                    job_entry_id=existing.job_entry_id,
+                    observation_created=False,
+                    entry_created=False,
+                )
+            raise DiscoveryRecordConflict("round already has a different result for company")
+
+        predecessor: EntryDiscoveryObservation | None = None
+        if predecessor_observation_id is not None:
+            predecessor = session.scalar(
+                select(EntryDiscoveryObservation)
+                .where(EntryDiscoveryObservation.id == predecessor_observation_id)
+                .with_for_update()
+            )
+            if (
+                predecessor is None
+                or predecessor.manifest_version != command.manifest_version
+                or predecessor.company_id != command.company_id
+                or predecessor.discovery_round_id == round_id
+            ):
+                raise DiscoveryRecordConflict("predecessor observation does not exist")
+            if (
+                discovery_round.predecessor_round_id is not None
+                and predecessor.discovery_round_id != discovery_round.predecessor_round_id
+            ):
+                raise DiscoveryRecordConflict(
+                    "predecessor observation is not from the predecessor round"
+                )
+            if command.observed_at <= predecessor.observed_at:
+                raise DiscoveryRecordConflict(
+                    "round observation must be newer than predecessor evidence"
+                )
+
+        entry: JobEntry | None = None
+        entry_created = False
+        if command.result.status is DiscoveryStatus.ACCEPTED:
+            assert classification is not None
+            entry, entry_created = _upsert_discovered_entry(
+                session,
+                command=command,
+                classification=classification,
+            )
+
+        result = command.result
+        observation = EntryDiscoveryObservation(
+            manifest_version=command.manifest_version,
+            discovery_round_id=round_id,
+            predecessor_observation_id=(
+                None if predecessor is None else predecessor.id
+            ),
+            company_id=command.company_id,
+            method=result.method,
+            status=result.status,
+            candidate_url=(
+                None if result.candidate_url is None else str(result.candidate_url)
+            ),
+            normalized_url=(
+                None if result.normalized_url is None else str(result.normalized_url)
+            ),
+            source_id=result.source_id,
+            ownership_evidence=result.ownership_evidence,
+            platform=None if classification is None else classification.platform,
+            requires_rendering=(
+                False if classification is None else classification.requires_rendering
+            ),
+            error_code=result.error_code,
+            job_entry_id=None if entry is None else entry.id,
+            observed_at=command.observed_at,
+        )
+        session.add(observation)
+        session.flush()
+        return DiscoveryRecordSummary(
+            observation_id=observation.id,
+            job_entry_id=observation.job_entry_id,
+            observation_created=True,
+            entry_created=entry_created,
+        )
+
+
+def record_evidence_audit_sample(
+    session: Session,
+    *,
+    round_id: UUID,
+    observation_id: UUID,
+    source_id: str,
+    platform: str,
+    selected_at: datetime,
+) -> EvidenceAuditSampleSummary:
+    """Append or exactly replay one deterministic audit selection."""
+
+    if session.in_transaction():
+        raise DiscoveryRecordConflict("audit sample recording requires a clean session")
+    if _SOURCE_ID_PATTERN.fullmatch(source_id) is None:
+        raise DiscoveryRecordConflict("audit sample source is invalid")
+    if _PLATFORM_PATTERN.fullmatch(platform) is None:
+        raise DiscoveryRecordConflict("audit sample platform is invalid")
+    if selected_at.tzinfo is None or selected_at.utcoffset() is None:
+        raise DiscoveryRecordConflict("audit sample time must be timezone-aware")
+    normalized_selected_at = selected_at.astimezone(UTC)
+
+    with session.begin():
+        _lock_sqlite_writer(session)
+        observation = session.scalar(
+            select(EntryDiscoveryObservation)
+            .where(
+                EntryDiscoveryObservation.id == observation_id,
+                EntryDiscoveryObservation.discovery_round_id == round_id,
+            )
+            .with_for_update()
+        )
+        if observation is None:
+            raise DiscoveryRecordConflict("audit sample observation does not exist in round")
+        if observation.status is not DiscoveryStatus.ACCEPTED:
+            raise DiscoveryRecordConflict("audit sample requires an accepted observation")
+        if observation.source_id != source_id or observation.platform != platform:
+            raise DiscoveryRecordConflict("audit sample stratum conflicts with observation")
+        if normalized_selected_at < observation.observed_at:
+            raise DiscoveryRecordConflict("audit sample cannot predate its observation")
+
+        existing = session.scalar(
+            select(EntryEvidenceAuditSample)
+            .where(
+                EntryEvidenceAuditSample.discovery_round_id == round_id,
+                EntryEvidenceAuditSample.observation_id == observation_id,
+            )
+            .with_for_update()
+        )
+        if existing is not None:
+            if (
+                existing.source_id != source_id
+                or existing.platform != platform
+                or existing.selected_at != normalized_selected_at
+            ):
+                raise DiscoveryRecordConflict("audit sample conflicts with stored selection")
+            return EvidenceAuditSampleSummary(audit_sample_id=existing.id, created=False)
+
+        sample = EntryEvidenceAuditSample(
+            discovery_round_id=round_id,
+            observation_id=observation_id,
+            source_id=source_id,
+            platform=platform,
+            selected_at=normalized_selected_at,
+        )
+        session.add(sample)
+        session.flush()
+        return EvidenceAuditSampleSummary(audit_sample_id=sample.id, created=True)
+
+
+def record_evidence_audit_finding(
+    session: Session,
+    *,
+    audit_sample_id: UUID,
+    severe_error: bool,
+    reason: str,
+    audited_at: datetime,
+) -> EvidenceAuditFindingSummary:
+    """Append or exactly replay one immutable finding for an audit sample."""
+
+    if session.in_transaction():
+        raise DiscoveryRecordConflict("audit finding recording requires a clean session")
+    if not 1 <= len(reason) <= 2_000:
+        raise DiscoveryRecordConflict("audit finding reason is invalid")
+    if audited_at.tzinfo is None or audited_at.utcoffset() is None:
+        raise DiscoveryRecordConflict("audit finding time must be timezone-aware")
+    normalized_audited_at = audited_at.astimezone(UTC)
+
+    with session.begin():
+        _lock_sqlite_writer(session)
+        sample = session.scalar(
+            select(EntryEvidenceAuditSample)
+            .where(EntryEvidenceAuditSample.id == audit_sample_id)
+            .with_for_update()
+        )
+        if sample is None:
+            raise DiscoveryRecordConflict("audit sample does not exist")
+        if normalized_audited_at < sample.selected_at:
+            raise DiscoveryRecordConflict("audit finding cannot predate sample selection")
+
+        existing = session.scalar(
+            select(EntryEvidenceAuditFinding)
+            .where(EntryEvidenceAuditFinding.audit_sample_id == audit_sample_id)
+            .with_for_update()
+        )
+        if existing is not None:
+            if (
+                existing.severe_error != severe_error
+                or existing.reason != reason
+                or existing.audited_at != normalized_audited_at
+            ):
+                raise DiscoveryRecordConflict("audit finding conflicts with stored finding")
+            return EvidenceAuditFindingSummary(audit_finding_id=existing.id, created=False)
+
+        finding = EntryEvidenceAuditFinding(
+            audit_sample_id=audit_sample_id,
+            severe_error=severe_error,
+            reason=reason,
+            audited_at=normalized_audited_at,
+        )
+        session.add(finding)
+        session.flush()
+        return EvidenceAuditFindingSummary(audit_finding_id=finding.id, created=True)
+
+
 def record_discovery_result(
     session: Session,
     command: RecordDiscoveryCommand,
@@ -269,6 +638,7 @@ def record_discovery_result(
                     EntryDiscoveryObservation.manifest_version
                     == command.manifest_version,
                     EntryDiscoveryObservation.company_id == command.company_id,
+                    EntryDiscoveryObservation.discovery_round_id.is_(None),
                 )
                 .order_by(EntryDiscoveryObservation.id)
                 .with_for_update()
@@ -388,6 +758,7 @@ def transition_retryable_discovery_result(
                     EntryDiscoveryObservation.manifest_version
                     == command.manifest_version,
                     EntryDiscoveryObservation.company_id == command.company_id,
+                    EntryDiscoveryObservation.discovery_round_id.is_(None),
                 )
                 .order_by(EntryDiscoveryObservation.id)
                 .with_for_update()
@@ -395,7 +766,7 @@ def transition_retryable_discovery_result(
         )
         if not observations:
             raise DiscoveryRecordConflict(
-                "retry transition observation does not exist"
+                "retry transition legacy observation does not exist"
             )
         if len(observations) != 1:
             raise DiscoveryRecordConflict(
@@ -404,7 +775,7 @@ def transition_retryable_discovery_result(
         observation = observations[0]
         if observation.id != observation_id:
             raise DiscoveryRecordConflict(
-                "retry transition observation does not exist"
+                "retry transition legacy observation does not exist"
             )
         if not is_retryable_discovery_observation(observation):
             raise DiscoveryRecordConflict(
