@@ -73,6 +73,18 @@
       "enabled": true
     },
     {
+      "id": "zhejiang_semiconductor_association_members",
+      "name": "Zhejiang Semiconductor Industry Association Public Member Directory",
+      "base_url": "http://www.zjsia.org.cn/page/HYZC507",
+      "source_class": "association",
+      "authorization_basis": "Official public member directory linked by the Zhejiang Semiconductor Industry Association homepage; the publisher exposes the directory only over plaintext HTTP, so the bounded request sends no credentials or secrets, and no robots.txt disallow was published at validation time.",
+      "robots_policy": "required",
+      "roles": ["candidate_pool"],
+      "requests_per_second": "0.5",
+      "rehearsal_request_budget": 1,
+      "enabled": true
+    },
+    {
       "id": "cagd_deep_synthesis_batch_01",
       "name": "CAC Domestic Deep Synthesis Algorithm Filing Notice - Batch 1",
       "base_url": "https://www.cagd.gov.cn/v/2023/06/3389.html",
