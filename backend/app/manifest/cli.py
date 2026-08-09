@@ -13,7 +13,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from hashlib import sha256
 from pathlib import Path
@@ -44,12 +44,15 @@ from app.company_identity.service import (
     IdentityReviewConflict,
     IdentitySearchUnavailable,
 )
+from app.core.normalization import normalize_url
 from app.manifest.candidates import (
     CandidateEvidenceConflict,
     UnregisteredSourceError,
     import_candidate_facts,
 )
 from app.manifest.contracts import (
+    AtsClassification,
+    CandidateDecisionStatus,
     CandidateFactInput,
     DiscoveryStatus,
     EntryDiscoveryResult,
@@ -58,6 +61,20 @@ from app.manifest.contracts import (
     ReviewDecisionInput,
     SourceRegistry,
     SourceRole,
+)
+from app.manifest.evidence_live import (
+    MAX_LIVE_EVIDENCE_ITEMS,
+    EvidenceBatchGate,
+    EvidenceCandidateInput,
+    EvidenceEvaluation,
+    EvidenceInputError,
+    evaluate_evidence_batch,
+    parse_evidence_candidates,
+)
+from app.manifest.evidence_policy import (
+    AuditSampleSelector,
+    AuditStratum,
+    EvidenceAcceptancePolicy,
 )
 from app.manifest.identity import (
     ReviewDecisionConflict,
@@ -82,7 +99,9 @@ from app.manifest.service import (
     freeze_manifest,
     is_retryable_discovery_observation,
     record_discovery_result,
+    record_discovery_result_in_round,
     record_evidence_audit_finding,
+    record_evidence_audit_sample,
     transition_retryable_discovery_result,
 )
 
@@ -168,6 +187,13 @@ def _positive_integer(value: str) -> int:
     return parsed
 
 
+def _evidence_item_limit(value: str) -> int:
+    parsed = _positive_integer(value)
+    if parsed > MAX_LIVE_EVIDENCE_ITEMS:
+        raise argparse.ArgumentTypeError("evidence item limit is too large")
+    return parsed
+
+
 def _round_name(value: str) -> str:
     if re.fullmatch(r"[a-z0-9][a-z0-9_-]{2,99}", value) is None:
         raise argparse.ArgumentTypeError("round name is invalid")
@@ -217,7 +243,11 @@ def _parser() -> argparse.ArgumentParser:
     _add_manifest_selector(evidence_regenerate)
     evidence_regenerate.add_argument("--round-name", type=_round_name, required=True)
     evidence_regenerate.add_argument("--model", action="store_true")
+    evidence_regenerate.add_argument("--live", action="store_true")
     evidence_regenerate.add_argument("--dry-run", action="store_true")
+    evidence_regenerate.add_argument("--evidence-input", type=Path)
+    evidence_regenerate.add_argument("--limit", type=_evidence_item_limit)
+    evidence_regenerate.add_argument("--registry", type=Path)
 
     evidence_audit = commands.add_parser("evidence-audit")
     _add_manifest_selector(evidence_audit)
@@ -1193,6 +1223,169 @@ def _evidence_model_fingerprint(settings: Any) -> str:
     ).hexdigest()
 
 
+def _evidence_llm_client(settings: Any) -> Any:
+    from app.ingestion.extraction.client import OpenAICompatibleLlmClient
+
+    if not settings.openai_compatible_base_url or not settings.openai_compatible_api_key:
+        raise ManifestCommandError("evidence model transport is not configured")
+    return OpenAICompatibleLlmClient(
+        base_url=settings.openai_compatible_base_url,
+        model=settings.entry_evidence_model_name,
+        api_key=settings.openai_compatible_api_key,
+        timeout_seconds=settings.openai_request_timeout_seconds,
+    )
+
+
+def _evidence_inputs(path: Path, *, limit: int) -> tuple[EvidenceCandidateInput, ...]:
+    resolved = _require_external_candidate_path(path)
+    content = _read_bounded(resolved, error_message="evidence input is invalid")
+    try:
+        candidates = parse_evidence_candidates(content)
+    except EvidenceInputError as error:
+        raise ManifestCommandError(str(error)) from error
+    return candidates[:limit]
+
+
+def _source_is_registered(candidate: EvidenceCandidateInput, registry: SourceRegistry) -> bool:
+    try:
+        registered = registry.require(candidate.source_id)
+    except KeyError:
+        return False
+    return bool(
+        candidate.source_registered
+        and SourceRole.CANDIDATE_POOL in registered.roles
+        and normalize_url(str(registered.base_url)) == normalize_url(candidate.source_url)
+    )
+
+
+def _validated_evidence_inputs(
+    candidates: tuple[EvidenceCandidateInput, ...],
+    *,
+    registry: SourceRegistry,
+) -> tuple[EvidenceCandidateInput, ...]:
+    return tuple(
+        candidate.model_copy(
+            update={"source_registered": _source_is_registered(candidate, registry)}
+        )
+        for candidate in candidates
+    )
+
+
+def _evidence_result(evaluation: EvidenceEvaluation) -> EntryDiscoveryResult:
+    item = evaluation.input
+    decision = evaluation.decision
+    if decision.status is CandidateDecisionStatus.ACCEPTED:
+        status = DiscoveryStatus.ACCEPTED
+        error_code = None
+    elif decision.status is CandidateDecisionStatus.REVIEW_REQUIRED:
+        status = DiscoveryStatus.REVIEW_REQUIRED
+        error_code = decision.reason_code
+    elif decision.reason_code.startswith("model_"):
+        status = DiscoveryStatus.FAILED
+        error_code = decision.reason_code
+    else:
+        status = DiscoveryStatus.BLOCKED
+        error_code = decision.reason_code
+    return EntryDiscoveryResult.model_validate(
+        {
+            "status": status,
+            "method": (
+                "entry_evidence_model" if evaluation.model_called else "entry_evidence_policy"
+            ),
+            "candidate_url": item.candidate_url,
+            "normalized_url": normalize_url(item.candidate_url),
+            "source_id": item.source_id,
+            "ownership_evidence": item.ownership_evidence,
+            "classification": AtsClassification(platform=item.platform),
+            "error_code": error_code,
+        }
+    )
+
+
+def _record_evidence_evaluations(
+    *,
+    SessionLocal: Any,
+    manifest_version: str,
+    discovery_round: EntryDiscoveryRound,
+    evaluations: tuple[EvidenceEvaluation, ...],
+) -> tuple[dict[UUID, UUID], Counter[DiscoveryStatus]]:
+    predecessor_observations: dict[UUID, EntryDiscoveryObservation] = {}
+    if discovery_round.predecessor_round_id is not None:
+        with SessionLocal() as session:
+            predecessor_observations = {
+                observation.company_id: observation
+                for observation in session.scalars(
+                    select(EntryDiscoveryObservation).where(
+                        EntryDiscoveryObservation.discovery_round_id
+                        == discovery_round.predecessor_round_id
+                    )
+                )
+            }
+    observation_ids: dict[UUID, UUID] = {}
+    status_counts: Counter[DiscoveryStatus] = Counter()
+    for evaluation in evaluations:
+        predecessor = predecessor_observations.get(evaluation.input.company_id)
+        observed_at = datetime.now(UTC)
+        if predecessor is not None and observed_at <= predecessor.observed_at:
+            observed_at = predecessor.observed_at + timedelta(microseconds=1)
+        command = RecordDiscoveryCommand(
+            manifest_version=manifest_version,
+            company_id=evaluation.input.company_id,
+            result=_evidence_result(evaluation),
+            observed_at=observed_at,
+        )
+        with SessionLocal() as session:
+            summary = record_discovery_result_in_round(
+                session,
+                round_id=discovery_round.id,
+                command=command,
+                predecessor_observation_id=None if predecessor is None else predecessor.id,
+            )
+        observation_ids[evaluation.input.company_id] = summary.observation_id
+        status_counts[command.result.status] += 1
+    return observation_ids, status_counts
+
+
+def _record_evidence_audit_samples(
+    *,
+    SessionLocal: Any,
+    round_id: UUID,
+    evaluations: tuple[EvidenceEvaluation, ...],
+    observation_ids: dict[UUID, UUID],
+) -> int:
+    accepted = tuple(
+        evaluation
+        for evaluation in evaluations
+        if evaluation.decision.status is CandidateDecisionStatus.ACCEPTED
+    )
+    selected = AuditSampleSelector().select(
+        evaluation.input.to_policy_candidate() for evaluation in accepted
+    )
+    evaluations_by_key = {
+        (
+            evaluation.input.source_id,
+            evaluation.input.platform,
+            evaluation.input.candidate_url,
+        ): evaluation
+        for evaluation in accepted
+    }
+    selected_at = datetime.now(UTC)
+    for sample in selected:
+        evaluation = evaluations_by_key[
+            (sample.stratum.source_id, sample.stratum.platform, sample.candidate_url)
+        ]
+        with SessionLocal() as session:
+            record_evidence_audit_sample(
+                session,
+                round_id=round_id,
+                observation_id=observation_ids[evaluation.input.company_id],
+                source_id=sample.stratum.source_id,
+                platform=sample.stratum.platform,
+                selected_at=selected_at,
+            )
+    return len(selected)
+
+
 def _evidence_regenerate(args: argparse.Namespace) -> dict[str, object]:
     settings = _load_settings()
     SessionLocal = _session_factory()
@@ -1228,7 +1421,17 @@ def _evidence_regenerate(args: argparse.Namespace) -> dict[str, object]:
         "round_name": args.round_name,
     }
     if args.dry_run:
-        return {**common, "would_create_round": existing is None}
+        if args.evidence_input is None:
+            return {**common, "would_create_round": existing is None}
+        if args.limit is None:
+            raise ManifestCommandError("evidence item limit is required")
+        preview_candidates = _evidence_inputs(args.evidence_input, limit=args.limit)
+        return {
+            **common,
+            "live_enabled": bool(settings.gate1_live_discovery_enabled and args.live),
+            "would_create_round": existing is None,
+            "would_process": len(preview_candidates),
+        }
     if not model_enabled:
         raise ManifestCommandError("evidence model is disabled")
 
@@ -1239,26 +1442,120 @@ def _evidence_regenerate(args: argparse.Namespace) -> dict[str, object]:
             or existing.model_fingerprint != model_fingerprint
         ):
             raise ManifestCommandError("named evidence round conflicts with configuration")
+        if args.evidence_input is None:
+            return {
+                **common,
+                "round_created": False,
+                "round_id": existing.id,
+            }
+
+    candidates: tuple[EvidenceCandidateInput, ...] | None = None
+    llm_client: Any | None = None
+    if args.evidence_input is not None:
+        if not settings.gate1_live_discovery_enabled or not args.live:
+            raise ManifestCommandError("live evidence execution is disabled")
+        if args.limit is None:
+            raise ManifestCommandError("evidence item limit is required")
+        candidates = _evidence_inputs(args.evidence_input, limit=args.limit)
+        registry = _load_registry(_registry_path(args, settings))
+        candidates = _validated_evidence_inputs(candidates, registry=registry)
+        company_ids = {candidate.company_id for candidate in candidates}
+        with SessionLocal() as session:
+            member_ids = set(
+                session.scalars(
+                    select(CompanyManifestMember.company_id).where(
+                        CompanyManifestMember.manifest_version == version,
+                        CompanyManifestMember.company_id.in_(company_ids),
+                    )
+                )
+            )
+        if member_ids != company_ids:
+            raise ManifestCommandError("evidence input contains a non-member company")
+        llm_client = _evidence_llm_client(settings)
+
+    if existing is None:
+        with SessionLocal() as session:
+            summary = create_discovery_round(
+                session,
+                manifest_version=version,
+                name=args.round_name,
+                config_fingerprint=stored_fingerprint,
+                model_fingerprint=model_fingerprint,
+                predecessor_round_id=None if latest is None else latest.id,
+                started_at=datetime.now(UTC),
+            )
+        with SessionLocal() as session:
+            discovery_round = session.get(EntryDiscoveryRound, summary.round_id)
+            assert discovery_round is not None
+            session.expunge(discovery_round)
+    else:
+        summary = None
+        discovery_round = existing
+
+    if args.evidence_input is None:
+        assert summary is not None
         return {
             **common,
-            "round_created": False,
-            "round_id": existing.id,
+            "round_created": summary.created,
+            "round_id": summary.round_id,
         }
-
+    assert candidates is not None
+    assert llm_client is not None
+    company_ids = {candidate.company_id for candidate in candidates}
     with SessionLocal() as session:
-        summary = create_discovery_round(
-            session,
-            manifest_version=version,
-            name=args.round_name,
-            config_fingerprint=stored_fingerprint,
-            model_fingerprint=model_fingerprint,
-            predecessor_round_id=None if latest is None else latest.id,
-            started_at=datetime.now(UTC),
+        existing_company_ids = set(
+            session.scalars(
+                select(EntryDiscoveryObservation.company_id).where(
+                    EntryDiscoveryObservation.discovery_round_id == discovery_round.id,
+                    EntryDiscoveryObservation.company_id.in_(company_ids),
+                )
+            )
         )
+    pending = tuple(
+        candidate for candidate in candidates if candidate.company_id not in existing_company_ids
+    )
+    paused = frozenset(AuditStratum.model_validate(item) for item in paused_strata)
+    evaluations = asyncio.run(
+        evaluate_evidence_batch(
+            pending,
+            llm_client=llm_client,
+            policy=EvidenceAcceptancePolicy(
+                confidence_threshold=settings.entry_evidence_model_confidence_threshold,
+                paused_strata=paused,
+            ),
+            gate=EvidenceBatchGate(
+                cli_live=bool(args.live),
+                cli_model=bool(args.model),
+                config_live=bool(settings.gate1_live_discovery_enabled),
+                config_model=bool(settings.entry_evidence_model_enabled),
+            ),
+        )
+    )
+    observation_ids, status_counts = _record_evidence_evaluations(
+        SessionLocal=SessionLocal,
+        manifest_version=version,
+        discovery_round=discovery_round,
+        evaluations=evaluations,
+    )
+    sample_count = _record_evidence_audit_samples(
+        SessionLocal=SessionLocal,
+        round_id=discovery_round.id,
+        evaluations=evaluations,
+        observation_ids=observation_ids,
+    )
     return {
         **common,
-        "round_created": summary.created,
-        "round_id": summary.round_id,
+        "audit_samples": sample_count,
+        "model_calls": sum(evaluation.model_called for evaluation in evaluations),
+        "processed": len(evaluations),
+        "round_created": summary is not None and summary.created,
+        "round_id": discovery_round.id,
+        "skipped": len(existing_company_ids),
+        "status_counts": {
+            status.value: status_counts[status]
+            for status in DiscoveryStatus
+            if status_counts[status]
+        },
     }
 
 

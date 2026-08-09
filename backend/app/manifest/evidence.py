@@ -40,6 +40,13 @@ class ModelEvidenceInput(FrozenEvidenceDTO):
     visible_summary: str = Field(min_length=1, max_length=4_000)
     anchor_text: str = Field(min_length=1, max_length=500)
 
+    @field_validator("source_url", "candidate_url")
+    @classmethod
+    def reject_sensitive_url(cls, value: DocumentUrl) -> DocumentUrl:
+        if _SENSITIVE_ASSIGNMENT.search(str(value)) or _DATABASE_URL.search(str(value)):
+            raise ValueError("model input URL must not contain a sensitive value")
+        return value
+
     @field_validator("page_title", "visible_summary", "anchor_text")
     @classmethod
     def reject_sensitive_text(cls, value: str) -> str:
