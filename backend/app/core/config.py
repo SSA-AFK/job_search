@@ -1,3 +1,6 @@
+from decimal import Decimal
+
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -25,6 +28,11 @@ class Settings(BaseSettings):
     gate1_source_registry_path: str = "data/gate1/source_registry.json"
     gate1_zhihu_request_budget: int = 200
     gate1_domain_min_interval_seconds: float = 1.0
+    entry_evidence_model_enabled: bool = False
+    entry_evidence_model_name: str = "qwen-plus"
+    entry_evidence_model_confidence_threshold: Decimal = Field(
+        default=Decimal("0.90"), ge=Decimal(0), le=Decimal(1)
+    )
 
 
 settings = Settings()
