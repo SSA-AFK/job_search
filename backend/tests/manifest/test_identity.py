@@ -10,7 +10,7 @@ from hashlib import sha256
 from pathlib import Path
 from threading import Event, Lock
 from types import SimpleNamespace
-from typing import Literal
+from typing import Literal, Self
 from uuid import UUID, uuid4
 
 import pytest
@@ -69,7 +69,30 @@ def _drop_manifest_identity_race_schema(
         connection.execute(text(statement))
 
 
-def _release_stuck_test_identity_mutex(mutex: Lock) -> None:
+class _AcquireAttemptLock:
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self.acquire_attempted = Event()
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        self.acquire_attempted.set()
+        return self._lock.acquire(blocking, timeout)
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    def __enter__(self) -> Self:
+        self.acquire()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.release()
+
+
+def _release_stuck_test_identity_mutex(mutex: Lock | _AcquireAttemptLock) -> None:
     if not mutex.locked():
         return
     try:
@@ -819,7 +842,7 @@ def _assert_sqlite_manifest_lock_waits_for_caller_root_transaction(
         f"sqlite:///{tmp_path / f'{label}.sqlite3'}",
         connect_args={"check_same_thread": False, "timeout": 10},
     )
-    identity_mutex = Lock()
+    identity_mutex = _AcquireAttemptLock()
     with company_identity_service._LOCAL_LOCKS_GUARD:  # type: ignore[attr-defined]
         company_identity_service._LOCAL_IDENTITY_MUTEXES[engine] = (  # type: ignore[attr-defined]
             identity_mutex
@@ -831,33 +854,32 @@ def _assert_sqlite_manifest_lock_waits_for_caller_root_transaction(
         aliases=(alias,),
         official_website=website,
     )
-    observer_attempting = Event()
     observer_acquired = Event()
     fallback_release = Event()
 
     def observe_after_identity_lock() -> tuple[CandidateDecisionStatus, int, int]:
-        with Session(engine, expire_on_commit=False) as observer:
-            observer_attempting.set()
-            with company_identity_service.serialized_company_identities(
+        with (
+            Session(engine, expire_on_commit=False) as observer,
+            company_identity_service.serialized_company_identities(
                 observer,
                 lock_names,
                 official_websites=lock_websites,
-            ):
-                observer_acquired.set()
-                if not fallback_release.wait(timeout=15):
-                    raise TimeoutError("manifest lock observer was not released")
-                status = observer.scalar(
-                    select(CandidateFact.decision_status).where(
-                        CandidateFact.stable_evidence_id == fact.stable_evidence_id
-                    )
+            ),
+        ):
+            observer_acquired.set()
+            if not fallback_release.wait(timeout=15):
+                raise TimeoutError("manifest lock observer was not released")
+            status = observer.scalar(
+                select(CandidateFact.decision_status).where(
+                    CandidateFact.stable_evidence_id == fact.stable_evidence_id
                 )
-                assert status is not None
-                return (
-                    status,
-                    observer.scalar(select(func.count()).select_from(Company)) or 0,
-                    observer.scalar(select(func.count()).select_from(CandidateReview))
-                    or 0,
-                )
+            )
+            assert status is not None
+            return (
+                status,
+                observer.scalar(select(func.count()).select_from(Company)) or 0,
+                observer.scalar(select(func.count()).select_from(CandidateReview)) or 0,
+            )
 
     pool = ThreadPoolExecutor(max_workers=1)
     observer_future = None
@@ -892,9 +914,10 @@ def _assert_sqlite_manifest_lock_waits_for_caller_root_transaction(
                         ),
                     ) == ReviewSummary(applied=1, replayed=0)
 
+                identity_mutex.acquire_attempted.clear()
                 observer_future = pool.submit(observe_after_identity_lock)
                 try:
-                    assert observer_attempting.wait(timeout=5)
+                    assert identity_mutex.acquire_attempted.wait(timeout=5)
                     assert not observer_acquired.wait(timeout=0.2)
                     if outer_outcome == "commit":
                         outer_transaction.commit()

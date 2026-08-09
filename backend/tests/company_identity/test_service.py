@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from threading import Event, Lock
+from typing import Self
 from uuid import UUID, uuid4
 
 import pytest
@@ -41,7 +42,30 @@ NOW = datetime(2026, 8, 7, 12, tzinfo=UTC)
 COMPANY_A = UUID("00000000-0000-0000-0000-000000000001")
 
 
-def _release_stuck_test_identity_mutex(mutex: Lock) -> None:
+class _AcquireAttemptLock:
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self.acquire_attempted = Event()
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        self.acquire_attempted.set()
+        return self._lock.acquire(blocking, timeout)
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    def __enter__(self) -> Self:
+        self.acquire()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.release()
+
+
+def _release_stuck_test_identity_mutex(mutex: Lock | _AcquireAttemptLock) -> None:
     if not mutex.locked():
         return
     try:
@@ -1016,7 +1040,7 @@ def test_sqlite_root_identity_mutex_prevents_opposite_order_deadlock(
         f"sqlite:///{tmp_path / f'root-identity-{root_a_outcome}.sqlite3'}",
         connect_args={"check_same_thread": False, "timeout": 10},
     )
-    identity_mutex = Lock()
+    identity_mutex = _AcquireAttemptLock()
     with identity_service._LOCAL_LOCKS_GUARD:  # type: ignore[attr-defined]
         identity_service._LOCAL_IDENTITY_MUTEXES[engine] = (  # type: ignore[attr-defined]
             identity_mutex
@@ -1025,7 +1049,6 @@ def test_sqlite_root_identity_mutex_prevents_opposite_order_deadlock(
     root_a_repeat_requested = Event()
     root_a_repeated_call_completed = Event()
     root_a_completion_requested = Event()
-    root_b_attempting = Event()
     root_b_first_acquired = Event()
     fallback_release = Event()
     root_b_should_repeat = Event()
@@ -1061,7 +1084,6 @@ def test_sqlite_root_identity_mutex_prevents_opposite_order_deadlock(
         with Session(engine) as root_b:
             transaction = root_b.begin()
             try:
-                root_b_attempting.set()
                 with identity_service.serialized_company_identities(
                     root_b,
                     ("alpha identity",),
@@ -1085,8 +1107,9 @@ def test_sqlite_root_identity_mutex_prevents_opposite_order_deadlock(
     root_b_future = None
     try:
         assert root_a_first_acquired.wait(timeout=5)
+        identity_mutex.acquire_attempted.clear()
         root_b_future = pool.submit(run_root_b)
-        assert root_b_attempting.wait(timeout=5)
+        assert identity_mutex.acquire_attempted.wait(timeout=5)
         assert not root_b_first_acquired.wait(timeout=0.2)
         root_a_repeat_requested.set()
         assert root_a_repeated_call_completed.wait(timeout=5)
@@ -1124,18 +1147,16 @@ def test_sqlite_nested_end_keeps_root_mutex_and_reused_session_competes_fresh(
         f"sqlite:///{tmp_path / 'root-identity-lifetime.sqlite3'}",
         connect_args={"check_same_thread": False, "timeout": 10},
     )
-    identity_mutex = Lock()
+    identity_mutex = _AcquireAttemptLock()
     with identity_service._LOCAL_LOCKS_GUARD:  # type: ignore[attr-defined]
         identity_service._LOCAL_IDENTITY_MUTEXES[engine] = (  # type: ignore[attr-defined]
             identity_mutex
         )
     nested_ended = Event()
-    root_b_attempting = Event()
     root_b_acquired = Event()
     root_b_release = Event()
     root_a_first_completion_requested = Event()
     root_a_second_attempt_requested = Event()
-    root_a_second_attempting = Event()
     root_a_second_acquired = Event()
 
     def run_reused_root_a() -> None:
@@ -1166,7 +1187,6 @@ def test_sqlite_nested_end_keeps_root_mutex_and_reused_session_competes_fresh(
                 raise TimeoutError("root A second attempt was not requested")
             second_transaction = root_a.begin()
             try:
-                root_a_second_attempting.set()
                 with identity_service.serialized_company_identities(
                     root_a,
                     ("shared identity",),
@@ -1181,7 +1201,6 @@ def test_sqlite_nested_end_keeps_root_mutex_and_reused_session_competes_fresh(
         with Session(engine) as root_b:
             transaction = root_b.begin()
             try:
-                root_b_attempting.set()
                 with identity_service.serialized_company_identities(
                     root_b,
                     ("shared identity",),
@@ -1199,13 +1218,15 @@ def test_sqlite_nested_end_keeps_root_mutex_and_reused_session_competes_fresh(
     root_b_future = None
     try:
         assert nested_ended.wait(timeout=5)
+        identity_mutex.acquire_attempted.clear()
         root_b_future = pool.submit(run_root_b)
-        assert root_b_attempting.wait(timeout=5)
+        assert identity_mutex.acquire_attempted.wait(timeout=5)
         assert not root_b_acquired.wait(timeout=0.2)
         root_a_first_completion_requested.set()
         assert root_b_acquired.wait(timeout=5)
+        identity_mutex.acquire_attempted.clear()
         root_a_second_attempt_requested.set()
-        assert root_a_second_attempting.wait(timeout=5)
+        assert identity_mutex.acquire_attempted.wait(timeout=5)
         assert not root_a_second_acquired.wait(timeout=0.2)
         root_b_release.set()
         assert root_a_second_acquired.wait(timeout=5)
