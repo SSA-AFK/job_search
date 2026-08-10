@@ -34,14 +34,15 @@ The confidence score represents the extraction and identity-match confidence. It
 
 ## Collection pipeline
 
-1. Load the existing companies from the database.
-2. Use the Zhihu Global Search API only to discover candidate official domains, careers pages, ATS URLs, and public source pages.
-3. Validate candidate URLs, official-domain ownership, and robots policy before fetching.
-4. Fetch bounded official pages, official recruitment pages, and approved ATS pages.
-5. Query authoritative ICP and algorithm-filing sources where an approved integration is available.
-6. Pass only fetched source content to the LLM extractor. Require field-level source evidence and confidence.
-7. Persist results directly to the existing company detail records with provenance and verification status.
-8. Produce a batch report showing success, no-result, pending-verification, and failure reasons for each company.
+1. Treat the existing 100-company database list as the fixed batch target; do not clear or rebuild it.
+2. Inventory each company field before collection: retain a current authoritative value, refresh a missing, stale, source-less, or model-derived value, and queue conflicts for review.
+3. Use the Zhihu Global Search API only to discover candidate official domains, careers pages, ATS URLs, and public source pages.
+4. Validate candidate URLs, official-domain ownership, and robots policy before fetching.
+5. Fetch bounded official pages, official recruitment pages, and approved ATS pages.
+6. Query authoritative ICP and algorithm-filing sources where an approved integration is available.
+7. Pass only fetched source content to the LLM extractor. Require field-level source evidence and confidence.
+8. Persist results directly to the existing company detail records with provenance and verification status.
+9. Produce a batch report showing success, no-result, pending-verification, conflict, and failure reasons for each company.
 
 ## Source precedence and conflict handling
 
@@ -54,6 +55,12 @@ The precedence order is:
 5. LLM-derived summaries and classifications.
 
 Lower-precedence data never overwrites higher-precedence verified data. When equivalent-precedence sources conflict, retain the most recently fetched value, preserve the competing source in provenance, mark the field pending verification, and record the conflict in the batch report.
+
+## Incremental refresh policy
+
+The batch refreshes the current 100 companies field by field rather than recollecting blindly. A current, authoritative, traceable value is retained and receives an updated collection timestamp. A missing value, stale value, value without provenance, or model-derived value is queued for refresh. Conflicting values retain the authoritative record while the competing value remains pending verification.
+
+Jobs are always re-fetched from official careers pages or approved ATS endpoints because their freshness is material to users. Existing jobs are updated or marked inactive through the established source lifecycle rules; the batch does not delete historical job records directly.
 
 ## Operational constraints
 
