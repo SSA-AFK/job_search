@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     entry_evidence_model_confidence_threshold: Decimal = Field(
         default=Decimal("0.90"), ge=Decimal(0), le=Decimal(1)
     )
+    ats_provider_enabled: bool = False
+    ats_feishu_enabled: bool = False
+    ats_moka_enabled: bool = False
+    ats_approved_hosts: str = "jobs.feishu.cn,app.mokahr.com"
+    playwright_pool_size: int = 2
+    playwright_page_timeout_seconds: float = 30.0
 
 
 settings = Settings()
