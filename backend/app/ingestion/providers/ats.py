@@ -33,6 +33,7 @@ class AtsProvider:
         self._enabled = enabled_platforms
 
     async def search(self, query: ProviderQuery) -> ProviderResult:
+        # Production invocation of search_with_url is deferred to Stage 3C+ orchestrator wiring.
         return ProviderResult(documents=())
 
     async def search_with_url(self, url: str, query: ProviderQuery) -> ProviderResult:

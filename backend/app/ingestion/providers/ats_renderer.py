@@ -44,8 +44,17 @@ class AtsRenderer:
                 raise ProviderError(
                     code="renderer_unavailable", retryable=False, detail=str(error)
                 ) from error
-            self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(headless=True)
+            try:
+                self._playwright = await async_playwright().start()
+                self._browser = await self._playwright.chromium.launch(headless=True)
+            except Exception as error:
+                if self._playwright is not None:
+                    await self._playwright.stop()
+                self._playwright = None
+                self._browser = None
+                raise ProviderError(
+                    code="renderer_unavailable", retryable=False, detail=str(error)
+                ) from error
 
     async def render(
         self,
