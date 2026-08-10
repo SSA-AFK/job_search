@@ -1,7 +1,7 @@
 # 万级公司职位覆盖设计
 
-> **状态：Stage 3A 已完成；Stage 3B0 manifest 已冻结，entry-evidence smoke 已通过**
-> **修订日期：2026-08-09**
+> **状态：Stage 3A 已完成；Stage 3B0 manifest 已冻结，entry-evidence smoke 已通过；Stage 3B 已完成离线接入，在线 smoke 待 opt-in gate**
+> **修订日期：2026-08-10**
 > **定位：** Stage 3 的产品与技术设计，定义万级公司下职位覆盖、完整性、新鲜度和成本边界。
 > **实施入口：** [migration-master-plan.md](migration-master-plan.md)
 > **当前基线：** Stage 1、Stage 2 已合并到 `main`；Stage 3A 在隔离分支完成实现、最终审阅和当前矩阵，尚未集成；Stage 3B0 已冻结 1,000 家 canonical manifest，并完成 2 条公开证据的受限模型 smoke；Stage 3B 仍等待单独实施计划与审批。

@@ -1,7 +1,7 @@
 # Stage 3 万级职位覆盖迁移总计划
 
-> **状态：Stage 3A 已完成；Company Identity Resolution Hardening 本地 gate 已通过，Task 10 等待最终 whole-branch review**
-> **修订日期：2026-08-08**
+> **状态：Stage 3A 已完成；Company Identity Resolution Hardening 本地 gate 已通过，Task 10 等待最终 whole-branch review；Stage 3B 已完成离线接入，在线 smoke 待 opt-in gate**
+> **修订日期：2026-08-10**
 > **定位：** 基于已完成 Stage 2 的 Stage 3 执行路线；Stage 3A 已按获批详细计划实施，后续阶段仍不是可直接开工的 implementation plan。
 > **设计依据：** [job-coverage-at-scale-plan.md](job-coverage-at-scale-plan.md)
 > **审批规则：** 本文批准后仍需生成详细 implementation plan，并再次获得执行授权。
@@ -222,6 +222,10 @@ Stage 3B0 canonical manifest 已冻结 1,000 家，version 为 `abaad7965cabbaaa
 ### 停止条件
 
 若适配需要绕过访问控制，或无法纳入现有安全 HTTP/运行时契约，不启用该平台。
+
+### 实施状态（2026-08-10）
+
+Tasks 1-7 完成；飞书/Moka 离线样本通过；Playwright 池生命周期受控；未启用在线采集。Stage 3B 实现了确定性 HTML 职位列表解析器（Task 2）、受控 Playwright 渲染池（Task 3）、飞书与 Moka 平台提取器（Tasks 4-5）、ATS Provider 组合与配置注册（Task 6）及离线集成验收（Task 7）。所有新增配置默认关闭（`ats_provider_enabled=False`、`ats_feishu_enabled=False`、`ats_moka_enabled=False`），ATS 失败不影响已有搜索数据读取。在线 smoke test 为 opt-in，不在默认 CI 中运行。完整分页枚举（Stage 3C）、职位详情增强（Stage 3E）和 20/100/1,000 基准运行（Stage 3D）不在 Stage 3B 范围内。
 
 ## 7. Stage 3C：完整列表枚举
 
