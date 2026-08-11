@@ -123,13 +123,24 @@ backend/app/
 - PostgreSQL 增加 `pg_trgm` capability/index DDL，SQLite 保持离线兼容；
 - 所有新增 audit-history 外键使用 `ON DELETE RESTRICT`。
 
-### `0010_job_details`
+### `0010_entry_evidence_rounds`
+
+- 创建具名 discovery round、observation predecessor 链和分层 audit；
+- 保存 Gate 1 entry-evidence 运行与人工审计结果。
+
+### `0011_entry_evidence_integrity`
+
+- 冻结 round company membership，并持久化公共证据、模型判断和决策指纹；
+- 严重审计错误追加 quarantine 事实，报表排除已隔离 observation；
+- SQLite/PostgreSQL 在数据库层阻止 round-backed evidence 的 UPDATE/DELETE，并限制 manifest 级联删除。
+
+### `0012_job_details`
 
 - 创建一对一 `job_details`；
 - 存储部门、学历、经验、要求、福利、标签和增强时间；
 - 长文本和标签设置明确长度/数量上限。
 
-### `0011_coverage_query_indexes`
+### `0013_coverage_query_indexes`
 
 - 根据 Gate 1 的真实查询计划增加必要索引；
 - PostgreSQL 使用经过 `EXPLAIN` 证明的部分索引；
@@ -194,7 +205,7 @@ all-tracked secret pattern scan 只包含以下六项 tracked baseline synthetic
 
 Stage 3B0 canonical manifest 已冻结 1,000 家，version 为 `abaad7965cabbaaa09e2dab6013be11c8b26d112e1444c18c36a8bb68bf584c4`。tracked manifest SHA-256 为 `8ba503a77a37c18d2c1ddf8792fc161e423597d0b1e38e4630cddb9bdef52c81`，tracked quota SHA-256 为 `343b3cf9ce5849d88b158f252953d1ad38273f99058e91693f09a552d2bc54e8`；两项均与三个独立 external replay byte-identical。5,111 家公司的 city 均未提供、scale 均为 `unknown`。
 
-`0010_entry_evidence_rounds` 增加不可变 discovery round、追加式 observation predecessor 链与分层 audit。2026-08-09 的 `evidence-smoke-20260809` 对 2 条已核验公开招聘入口执行 2 次 DashScope `qwen-plus` 调用：accepted 2、self-hosted 2、抽检 2/2、严重误判 0、暂停分层 0，aggregate entry coverage 为 0.2%。legacy 1,000 条 `not_found` 保留且未被覆盖；Zhihu 请求为 0。本 gate 未运行 Playwright、job-list enumeration 或 Stage 3B。原 `job_details` 与 coverage indexes 迁移顺延为 `0011`、`0012`；Stage 3B 继续等待单独 implementation plan 与明确审批。剩余 Minor 包括 advisory lock key 未排序去重的理论 hash-collision deadlock、seed importer direct `RegulatoryFiling` writer 不在 Task 3 locking 内、audit chunk display capacity、POSIX runtime 未实测、Windows symlink privilege skip，以及人工接受的 POSIX 同权限竞态风险。
+`0010_entry_evidence_rounds` 增加 discovery round、observation predecessor 链与分层 audit；`0011_entry_evidence_integrity` 冻结完整 round membership，持久化可重放证据/模型判断/策略指纹，以 quarantine 排除严重误判，并在 SQLite/PostgreSQL 强制 append-only。2026-08-09 的 `evidence-smoke-20260809` 对 2 条已核验公开招聘入口执行 2 次 DashScope `qwen-plus` 调用：accepted 2、self-hosted 2、抽检 2/2、严重误判 0、暂停分层 0，aggregate entry coverage 为 0.2%。legacy 1,000 条 `not_found` 保留且未被覆盖；Zhihu 请求为 0。安全加固后的新外部证据若缺少进程内 robots 与 ownership 验证，只能进入 `review_required`，不能依靠外部 JSON 自断言自动接受。本 gate 未运行 Playwright、job-list enumeration 或 Stage 3B。原 `job_details` 与 coverage indexes 迁移顺延为 `0012`、`0013`；Stage 3B 继续等待单独 implementation plan 与明确审批。剩余 Minor 包括 advisory lock key 未排序去重的理论 hash-collision deadlock、seed importer direct `RegulatoryFiling` writer 不在 Task 3 locking 内、audit chunk display capacity、POSIX runtime 未实测、Windows symlink privilege skip，以及人工接受的 POSIX 同权限竞态风险。
 
 ## 6. Stage 3B：ATS 正式接入
 

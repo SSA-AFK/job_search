@@ -10,7 +10,10 @@ from app.core.normalization import normalize_name
 from app.models import (
     Company,
     CompanyAlias,
+    CompanyProfileField,
     CompanySource,
+    FundingEvent,
+    FundingInvestor,
     JobPosting,
     JobSource,
     RegulatoryFiling,
@@ -107,6 +110,30 @@ class CompanyRepository:
         company._loaded_aliases = aliases  # type: ignore[attr-defined]
         company._loaded_filings = filings  # type: ignore[attr-defined]
         company._loaded_sources = source_rows  # type: ignore[attr-defined]
+        company._loaded_profile_fields = list(
+            self.session.scalars(
+                select(CompanyProfileField)
+                .where(CompanyProfileField.company_id == company_id)
+                .order_by(CompanyProfileField.field_key)
+            )
+        )  # type: ignore[attr-defined]
+        company._loaded_funding_events = list(
+            self.session.scalars(
+                select(FundingEvent)
+                .where(FundingEvent.company_id == company_id)
+                .order_by(FundingEvent.announced_at.desc(), FundingEvent.id)
+            )
+        )  # type: ignore[attr-defined]
+        company._loaded_funding_investors = {
+            event.id: list(
+                self.session.scalars(
+                    select(FundingInvestor.name)
+                    .where(FundingInvestor.funding_event_id == event.id)
+                    .order_by(FundingInvestor.name)
+                )
+            )
+            for event in company._loaded_funding_events  # type: ignore[attr-defined]
+        }  # type: ignore[attr-defined]
         company._loaded_job_count = job_count or 0  # type: ignore[attr-defined]
         return company
 

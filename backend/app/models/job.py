@@ -17,7 +17,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import GUID, Base, TimestampMixin, UTCDateTime, utc_now
-from app.models.enums import JobType
+from app.models.enums import JobType, VerificationStatus
 
 
 class JobPosting(Base, TimestampMixin):
@@ -81,6 +81,18 @@ class JobSource(Base):
         UTCDateTime(), default=utc_now, nullable=False
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    verification_status: Mapped[VerificationStatus] = mapped_column(
+        Enum(
+            VerificationStatus,
+            values_callable=lambda enum: [member.value for member in enum],
+            native_enum=False,
+            create_constraint=True,
+            name="verification_status",
+            length=50,
+        ),
+        default=VerificationStatus.PENDING_VERIFICATION,
+        nullable=False,
+    )
     missing_complete_snapshots: Mapped[int] = mapped_column(
         Integer, default=0, server_default="0", nullable=False
     )

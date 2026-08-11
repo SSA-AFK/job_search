@@ -53,6 +53,8 @@ class SeedImporter:
             "funding_stage": seed.funding_stage,
             "scale": seed.scale,
             "city": seed.city,
+            "headquarters": seed.headquarters,
+            "founded_year": seed.founded_year,
             "logo_url": seed.logo_url,
             "website": seed.website,
             "description": seed.description,

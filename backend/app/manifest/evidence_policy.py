@@ -4,12 +4,18 @@ from collections import defaultdict
 from collections.abc import Iterable
 from decimal import ROUND_CEILING, Decimal
 from hashlib import sha256
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator
 
-from app.manifest.contracts import CandidateDecisionStatus, FrozenManifestDTO
+from app.ingestion.contracts import DocumentUrl
+from app.manifest.contracts import (
+    AtsClassification,
+    CandidateDecisionStatus,
+    FrozenManifestDTO,
+    SourceRole,
+)
 from app.manifest.evidence import ModelEvidenceAssessment, PublicEvidence
 
 
@@ -20,15 +26,53 @@ class AuditStratum(FrozenManifestDTO):
     platform: str = Field(min_length=1, max_length=50, pattern=r"^[a-z][a-z0-9_]*$")
 
 
+class RegisteredSourceValidation(FrozenManifestDTO):
+    """Registry fact produced locally from the loaded, fingerprinted snapshot."""
+
+    source_id: str = Field(pattern=r"^[a-z][a-z0-9_]{2,49}$")
+    exact_source_url: DocumentUrl
+    role: Literal[SourceRole.CANDIDATE_POOL]
+    registry_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class RobotsValidation(FrozenManifestDTO):
+    """Successful in-process robots evaluation for the exact candidate URL."""
+
+    exact_candidate_url: DocumentUrl
+    allowed: Literal[True]
+    evaluator: Literal["robots_policy_v1"] = "robots_policy_v1"
+
+
+class OwnershipValidation(FrozenManifestDTO):
+    """Structured navigation evidence produced by an in-process discoverer."""
+
+    exact_source_url: DocumentUrl
+    exact_candidate_url: DocumentUrl
+    basis: Literal["official_navigation_anchor", "evidenced_recruitment_url"]
+    detail: str = Field(min_length=1, max_length=500)
+
+
+class IndependentEvidenceValidation(FrozenManifestDTO):
+    """Trusted local checks kept separate from every external JSON assertion."""
+
+    registered_source: RegisteredSourceValidation | None = None
+    robots: RobotsValidation | None = None
+    ownership: OwnershipValidation | None = None
+    classification: AtsClassification = Field(
+        default_factory=lambda: AtsClassification(platform="unknown")
+    )
+
+
 class EntryEvidenceCandidate(FrozenManifestDTO):
     """Public evidence and completed deterministic checks for one entry candidate."""
 
     source_id: str = Field(pattern=r"^[a-z][a-z0-9_]{2,49}$")
     platform: str = Field(min_length=1, max_length=50, pattern=r"^[a-z][a-z0-9_]*$")
     evidence: PublicEvidence
-    source_registered: bool
-    robots_approved: bool
+    source_registered: bool = False
+    robots_approved: bool = False
     ownership_evidence: str | None = Field(default=None, min_length=1, max_length=2_000)
+    independent_validation: IndependentEvidenceValidation | None = None
 
     @property
     def stratum(self) -> AuditStratum:
@@ -116,6 +160,26 @@ class EvidenceAcceptancePolicy(FrozenManifestDTO):
             return EvidencePolicyDecision(
                 status=CandidateDecisionStatus.REJECTED, reason_code=hard_failure
             )
+        validation = candidate.independent_validation
+        if validation is None:
+            return EvidencePolicyDecision(
+                status=CandidateDecisionStatus.REVIEW_REQUIRED,
+                reason_code="independent_validation_required",
+            )
+        robots = validation.robots
+        ownership = validation.ownership
+        if (
+            robots is None
+            or str(robots.exact_candidate_url) != str(candidate.evidence.candidate_url)
+            or ownership is None
+            or str(ownership.exact_source_url) != str(candidate.evidence.source_url)
+            or str(ownership.exact_candidate_url) != str(candidate.evidence.candidate_url)
+            or validation.classification.platform == "unknown"
+        ):
+            return EvidencePolicyDecision(
+                status=CandidateDecisionStatus.REVIEW_REQUIRED,
+                reason_code="independent_validation_required",
+            )
         if candidate.stratum in self.paused_strata:
             return EvidencePolicyDecision(
                 status=CandidateDecisionStatus.REVIEW_REQUIRED,
@@ -137,14 +201,18 @@ class EvidenceAcceptancePolicy(FrozenManifestDTO):
 
     @staticmethod
     def _hard_failure(candidate: EntryEvidenceCandidate) -> str | None:
-        if not candidate.source_registered:
+        validation = candidate.independent_validation
+        if validation is None:
+            return None
+        registered = validation.registered_source
+        if registered is None:
             return "unregistered_source"
-        if not candidate.robots_approved:
-            return "robots_disallowed"
+        if registered.source_id != candidate.source_id:
+            return "unregistered_source"
+        if str(registered.exact_source_url) != str(candidate.evidence.source_url):
+            return "unregistered_source"
         if urlsplit(str(candidate.evidence.source_url)).scheme != "https":
             return "source_not_https"
         if urlsplit(str(candidate.evidence.candidate_url)).scheme != "https":
             return "candidate_not_https"
-        if candidate.ownership_evidence is None:
-            return "ownership_unverified"
         return None

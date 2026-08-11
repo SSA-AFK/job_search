@@ -58,3 +58,61 @@ async def test_ats_provider_returns_warning_when_platform_disabled() -> None:
     result = await provider.search_with_url("https://jobs.feishu.cn/x", query)
     assert result.documents == ()
     assert "platform_disabled" in result.warnings
+
+
+@ pytest.mark.asyncio
+async def test_ats_provider_search_routes_to_search_with_url_when_website_provided() -> None:
+    feishu = AsyncMock()
+    feishu.fetch_list.return_value = (
+        _doc("ats_feishu"),
+        AtsListResult(candidates=(), status=AtsParseStatus.SUCCEEDED, error_code=None),
+    )
+    moka = AsyncMock()
+    renderer = AsyncMock()
+    provider = AtsProvider(
+        http_client=None,  # type: ignore[arg-type]
+        robots_policy=AsyncMock(),
+        renderer=renderer,
+        feishu_extractor=feishu,
+        moka_extractor=moka,
+        enabled_platforms=frozenset({"feishu"}),
+    )
+    query = ProviderQuery(
+        query="ai",
+        website=HttpUrl("https://jobs.feishu.cn/x"),
+        allowed_hosts=frozenset({"jobs.feishu.cn"}),
+        max_results=5,
+    )
+    result = await provider.search(query)
+    assert feishu.fetch_list.await_count == 1
+    assert moka.fetch_list.await_count == 0
+    assert len(result.documents) == 1
+
+
+@ pytest.mark.asyncio
+async def test_ats_provider_search_returns_empty_without_website() -> None:
+    provider = AtsProvider(
+        http_client=None,  # type: ignore[arg-type]
+        robots_policy=AsyncMock(),
+        renderer=AsyncMock(),
+        feishu_extractor=AsyncMock(),
+        moka_extractor=AsyncMock(),
+        enabled_platforms=frozenset({"feishu"}),
+    )
+    query = ProviderQuery(query="ai", website=None, allowed_hosts=frozenset(), max_results=5)
+    result = await provider.search(query)
+    assert result.documents == ()
+
+
+@ pytest.mark.asyncio
+async def test_ats_provider_has_website_dependent_properties() -> None:
+    provider = AtsProvider(
+        http_client=None,  # type: ignore[arg-type]
+        robots_policy=AsyncMock(),
+        renderer=AsyncMock(),
+        feishu_extractor=AsyncMock(),
+        moka_extractor=AsyncMock(),
+        enabled_platforms=frozenset({"feishu", "moka"}),
+    )
+    assert provider.requires_website is True
+    assert provider.approved_hosts == frozenset({"jobs.feishu.cn", "app.mokahr.com"})

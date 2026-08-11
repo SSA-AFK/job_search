@@ -25,8 +25,20 @@ def test_checked_in_runtime_factory_composes_a_worker_without_operator_code() ->
         zhihu_access_secret="zhihu-secret",
         company_site_provider_enabled=False,
         company_site_approved_hosts="",
+        ats_provider_enabled=False,
+        ats_feishu_enabled=False,
+        ats_moka_enabled=False,
+        ats_approved_hosts="jobs.feishu.cn,app.mokahr.com",
+        playwright_pool_size=2,
+        playwright_page_timeout_seconds=30.0,
         provider_max_concurrency=2,
         provider_min_interval_seconds=0.0,
+        ymicp_provider_enabled=False,
+        ymicp_base_url="http://127.0.0.1:16181",
+        ymicp_timeout_seconds=30.0,
+        tianyancha_provider_enabled=False,
+        tianyancha_cli_executable="npx",
+        tianyancha_call_budget=100,
     )
 
     components = create_runtime_components(config)
@@ -53,8 +65,20 @@ def test_checked_in_runtime_factory_fails_fast_without_llm_configuration() -> No
         zhihu_access_secret=None,
         company_site_provider_enabled=False,
         company_site_approved_hosts="",
+        ats_provider_enabled=False,
+        ats_feishu_enabled=False,
+        ats_moka_enabled=False,
+        ats_approved_hosts="jobs.feishu.cn,app.mokahr.com",
+        playwright_pool_size=2,
+        playwright_page_timeout_seconds=30.0,
         provider_max_concurrency=2,
         provider_min_interval_seconds=0.0,
+        ymicp_provider_enabled=False,
+        ymicp_base_url="http://127.0.0.1:16181",
+        ymicp_timeout_seconds=30.0,
+        tianyancha_provider_enabled=False,
+        tianyancha_cli_executable="npx",
+        tianyancha_call_budget=100,
     )
 
     with pytest.raises(ProductionRuntimeConfigurationError, match="OPENAI"):

@@ -1,10 +1,11 @@
 from decimal import Decimal
 
 from pydantic import Field
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     database_url: str = "sqlite:///./company_search.db"
     collection_enabled: bool = False
     celery_broker_url: str = "redis://localhost:6379/0"
@@ -39,6 +40,12 @@ class Settings(BaseSettings):
     ats_approved_hosts: str = "jobs.feishu.cn,app.mokahr.com"
     playwright_pool_size: int = 2
     playwright_page_timeout_seconds: float = 30.0
+    tianyancha_provider_enabled: bool = False
+    tianyancha_cli_executable: str = "npx"
+    tianyancha_call_budget: int = 100
+    ymicp_provider_enabled: bool = True
+    ymicp_base_url: str = "http://127.0.0.1:16181"
+    ymicp_timeout_seconds: float = 30.0
 
 
 settings = Settings()

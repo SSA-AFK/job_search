@@ -26,7 +26,6 @@ from app.ingestion.contracts import (
     Provider,
     ProviderQuery,
     RawDocument,
-    WebsiteDependentProvider,
 )
 from app.ingestion.deduplication.job import JobDeduplicator
 from app.ingestion.errors import (
@@ -198,8 +197,6 @@ class NormalizedBatchBuilder:
             raise _PipelineError("invalid_evidence")
         profile_description = _plain_text(profile_candidate.description)
         discovery_description = _plain_text(discovery.description)
-        if profile_description is not None and discovery_description is not None and profile_description != discovery_description:
-            raise _PipelineError("invalid_evidence")
         company_candidate = CompanyCandidate(
             name=discovery.name,
             aliases=discovery.aliases,
@@ -207,9 +204,17 @@ class NormalizedBatchBuilder:
             description=profile_description or discovery_description,
             evidence_ids=discovery.evidence_ids,
             confidence=discovery.confidence,
+            city=profile_candidate.city or discovery.city,
+            industry=profile_candidate.industry or discovery.industry,
+            sub_industry=profile_candidate.sub_industry or discovery.sub_industry,
+            funding_stage=profile_candidate.funding_stage,
+            scale=profile_candidate.scale,
+            career_page_url=discovery.career_page_url,
         )
         normalized_filings: list[NormalizedFilingRecord] = []
         for filing in profile.filings:
+            if not filing.filing_number:
+                continue
             self._require_known_evidence(filing.evidence_ids, document_by_evidence)
             normalized_filings.append(
                 NormalizedFilingRecord.from_candidate(
@@ -335,7 +340,7 @@ class NormalizedBatchBuilder:
                 else str(company_candidate.website)
             ),
             legal_identifiers=tuple(
-                filing.filing_number for filing in filings
+                filing.filing_number for filing in filings if filing.filing_number
             ),
             evidence=tuple(
                 PublicEvidenceReference(
@@ -499,22 +504,37 @@ class IngestionOrchestrator:
             company = CompanyRef(name=selected.name, website=selected.website)
             if selected.website is not None and website_providers:
                 website_host = _normalized_website_host(selected.website)
-                approved_website_providers = tuple(
-                    entry
-                    for entry in website_providers
-                    if website_host is not None
-                    and _provider_approves_host(entry[1], website_host)
-                )
-                if website_host is not None and approved_website_providers:
-                    outcomes.update(
+                if website_host is not None:
+                    outcomes = self._merge_outcome_dicts(
+                        outcomes,
                         await self._collect_providers(
-                            approved_website_providers,
+                            website_providers,
                             ProviderQuery(
                                 query=request.query,
                                 website=selected.website,
                                 allowed_hosts=frozenset({website_host}),
                             ),
-                        )
+                        ),
+                    )
+                    (
+                        providers_attempted,
+                        documents,
+                        provider_error,
+                        diagnostics,
+                    ) = self._merge_outcomes(outcomes)
+            if selected.career_page_url is not None and website_providers:
+                career_host = _normalized_website_host(selected.career_page_url)
+                if career_host is not None:
+                    outcomes = self._merge_outcome_dicts(
+                        outcomes,
+                        await self._collect_providers(
+                            website_providers,
+                            ProviderQuery(
+                                query=request.query,
+                                website=selected.career_page_url,
+                                allowed_hosts=frozenset({career_host}),
+                            ),
+                        ),
                     )
                     (
                         providers_attempted,
@@ -634,6 +654,25 @@ class IngestionOrchestrator:
         return outcomes
 
     @staticmethod
+    def _merge_outcome_dicts(
+        existing: dict[int, _ProviderOutcome],
+        new: dict[int, _ProviderOutcome],
+    ) -> dict[int, _ProviderOutcome]:
+        """Merge new outcomes into existing, combining documents from the same provider."""
+        result = dict(existing)
+        for index, outcome in new.items():
+            if index in result:
+                prev = result[index]
+                result[index] = _ProviderOutcome(
+                    name=prev.name,
+                    documents=prev.documents + outcome.documents,
+                    issue=prev.issue or outcome.issue,
+                )
+            else:
+                result[index] = outcome
+        return result
+
+    @staticmethod
     def _merge_outcomes(
         outcomes: dict[int, _ProviderOutcome],
     ) -> tuple[
@@ -730,10 +769,6 @@ def _normalized_website_host(website: HttpUrl) -> str | None:
         return None
     normalized = host.lower().rstrip(".")
     return normalized or None
-
-
-def _provider_approves_host(provider: Provider, host: str) -> bool:
-    return isinstance(provider, WebsiteDependentProvider) and host in provider.approved_hosts
 
 
 def _public_code(error: Exception, fallback: str) -> str:

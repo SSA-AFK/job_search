@@ -63,3 +63,8 @@ class FilingType(StrEnum):
     ICP = "icp"
     ALGORITHM = "algorithm"
     BUSINESS_LICENSE = "business_license"
+
+
+class VerificationStatus(StrEnum):
+    VERIFIED = "verified"
+    PENDING_VERIFICATION = "pending_verification"

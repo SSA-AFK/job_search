@@ -639,6 +639,71 @@ async def test_website_provider_failure_is_partial_with_original_provider_preced
 
 
 @pytest.mark.asyncio
+async def test_career_page_url_triggers_website_provider_after_discovery() -> None:
+    """When LLM discovers a career_page_url, website providers (ATS) are called with it."""
+    run = FakeRun(uuid4())
+    discovery = FakeProvider("discovery", ProviderResult(documents=(document(),)))
+    ats = FakeProvider(
+        "ats",
+        ProviderResult(documents=(website_document(),)),
+        requires_website=True,
+        approved_hosts=frozenset({"jobs.feishu.cn"}),
+    )
+    selected = CompanyCandidate(
+        name="Acme",
+        website="https://acme.example",
+        career_page_url="https://jobs.feishu.cn/acme",
+        evidence_ids=("acme-home",),
+        confidence=1,
+    )
+    orchestrator, _runs, persistence = orchestrator_for(
+        run,
+        providers=[discovery, ats],
+        discovered=(selected,),
+    )
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.SUCCEEDED
+    assert result.providers_attempted == ("discovery", "ats")
+    assert result.documents_found == 3
+    assert discovery.calls == 1
+    assert ats.calls == 2
+    assert str(ats.queries[0].website) == "https://acme.example/"
+    assert ats.queries[0].allowed_hosts == frozenset({"acme.example"})
+    assert str(ats.queries[1].website) == "https://jobs.feishu.cn/acme"
+    assert ats.queries[1].allowed_hosts == frozenset({"jobs.feishu.cn"})
+    assert persistence.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_career_page_url_not_used_when_website_providers_absent() -> None:
+    """Without website providers, career_page_url is ignored."""
+    run = FakeRun(uuid4())
+    discovery = FakeProvider("discovery", ProviderResult(documents=(document(),)))
+    selected = CompanyCandidate(
+        name="Acme",
+        website="https://acme.example",
+        career_page_url="https://jobs.feishu.cn/acme",
+        evidence_ids=("acme-home",),
+        confidence=1,
+    )
+    orchestrator, _runs, persistence = orchestrator_for(
+        run,
+        providers=[discovery],
+        discovered=(selected,),
+    )
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.SUCCEEDED
+    assert result.providers_attempted == ("discovery",)
+    assert result.documents_found == 1
+    assert discovery.calls == 1
+    assert persistence.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_website_provider_is_not_attempted_without_discovered_website() -> None:
     run = FakeRun(uuid4())
     discovery = FakeProvider("discovery", ProviderResult(documents=(document(),)))
@@ -669,7 +734,8 @@ async def test_website_provider_is_not_attempted_without_discovered_website() ->
 
 
 @pytest.mark.asyncio
-async def test_unapproved_discovered_website_does_not_attempt_website_provider() -> None:
+async def test_unapproved_discovered_website_still_attempts_website_provider() -> None:
+    """Website provider is always attempted after discovery; it filters itself internally."""
     run = FakeRun(uuid4())
     discovery = FakeProvider("discovery", ProviderResult(documents=(document(),)))
     company_site = FakeProvider(
@@ -693,10 +759,10 @@ async def test_unapproved_discovered_website_does_not_attempt_website_provider()
     result = await orchestrator.run(run.id)
 
     assert result.status is CollectionStatus.SUCCEEDED
-    assert result.providers_attempted == ("discovery",)
-    assert result.documents_found == 1
+    assert result.providers_attempted == ("discovery", "company_site")
+    assert result.documents_found == 2
     assert discovery.calls == 1
-    assert company_site.calls == 0
+    assert company_site.calls == 1
     assert persistence.calls == 1
 
 

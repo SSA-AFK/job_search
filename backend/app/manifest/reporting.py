@@ -18,6 +18,7 @@ from app.manifest.models import (
     EntryDiscoveryRound,
     EntryEvidenceAuditFinding,
     EntryEvidenceAuditSample,
+    EntryEvidenceQuarantine,
 )
 
 _RATE_QUANTUM = Decimal("0.0001")
@@ -125,25 +126,24 @@ class ManifestReportService:
         if manifest_companies != manifest.member_count:
             raise ManifestReportError("manifest member count is inconsistent")
 
-        observations = tuple(
+        stored_observations = tuple(
             self.session.scalars(
                 select(EntryDiscoveryObservation)
-                .where(
-                    EntryDiscoveryObservation.manifest_version == manifest_version
-                )
+                .where(EntryDiscoveryObservation.manifest_version == manifest_version)
                 .order_by(EntryDiscoveryObservation.id)
             )
         )
-        observed_status_counts = Counter(
-            observation.status for observation in observations
+        quarantined_ids = _quarantined_observation_ids(self.session, stored_observations)
+        observations = tuple(
+            observation
+            for observation in stored_observations
+            if observation.id not in quarantined_ids
         )
+        observed_status_counts = Counter(observation.status for observation in observations)
         status_counts = {
-            status: observed_status_counts.get(status, 0)
-            for status in DiscoveryStatus
+            status: observed_status_counts.get(status, 0) for status in DiscoveryStatus
         }
-        discovered_companies = len(
-            {observation.company_id for observation in observations}
-        )
+        discovered_companies = len({observation.company_id for observation in observations})
 
         accepted_observations = tuple(
             observation
@@ -152,14 +152,11 @@ class ManifestReportService:
             and observation.job_entry_id is not None
         )
         platform_counts = Counter(
-            observation.platform or "unknown"
-            for observation in accepted_observations
+            observation.platform or "unknown" for observation in accepted_observations
         )
         platform_entry_counts = dict(sorted(platform_counts.items()))
         accepted_entries = len(accepted_observations)
-        entry_companies = len(
-            {observation.company_id for observation in accepted_observations}
-        )
+        entry_companies = len({observation.company_id for observation in accepted_observations})
         self_hosted_entries = platform_entry_counts.get("self_hosted", 0)
 
         return ManifestCoverageReport(
@@ -213,6 +210,10 @@ class ManifestReportService:
                 .where(EntryDiscoveryObservation.discovery_round_id.in_(round_ids))
                 .order_by(EntryDiscoveryObservation.id)
             )
+        )
+        quarantined_ids = _quarantined_observation_ids(self.session, observations)
+        observations = tuple(
+            observation for observation in observations if observation.id not in quarantined_ids
         )
         observations_by_round: defaultdict[UUID, list[EntryDiscoveryObservation]] = defaultdict(
             list
@@ -306,3 +307,19 @@ def _rate(numerator: int, denominator: int) -> Decimal | None:
     if denominator == 0:
         return None
     return Decimal(numerator) / Decimal(denominator)
+
+
+def _quarantined_observation_ids(
+    session: Session,
+    observations: tuple[EntryDiscoveryObservation, ...],
+) -> frozenset[UUID]:
+    observation_ids = tuple(observation.id for observation in observations)
+    if not observation_ids:
+        return frozenset()
+    return frozenset(
+        session.scalars(
+            select(EntryEvidenceQuarantine.observation_id).where(
+                EntryEvidenceQuarantine.observation_id.in_(observation_ids)
+            )
+        )
+    )

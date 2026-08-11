@@ -51,7 +51,6 @@ from app.manifest.candidates import (
     import_candidate_facts,
 )
 from app.manifest.contracts import (
-    AtsClassification,
     CandidateDecisionStatus,
     CandidateFactInput,
     DiscoveryStatus,
@@ -62,6 +61,7 @@ from app.manifest.contracts import (
     SourceRegistry,
     SourceRole,
 )
+from app.manifest.discovery import classify_recruitment_url
 from app.manifest.evidence_live import (
     MAX_LIVE_EVIDENCE_ITEMS,
     EvidenceBatchGate,
@@ -72,9 +72,10 @@ from app.manifest.evidence_live import (
     parse_evidence_candidates,
 )
 from app.manifest.evidence_policy import (
-    AuditSampleSelector,
     AuditStratum,
     EvidenceAcceptancePolicy,
+    IndependentEvidenceValidation,
+    RegisteredSourceValidation,
 )
 from app.manifest.identity import (
     ReviewDecisionConflict,
@@ -96,12 +97,13 @@ from app.manifest.service import (
     DiscoveryRecordConflict,
     ManifestFreezeError,
     create_discovery_round,
+    discovery_membership_fingerprint,
     freeze_manifest,
     is_retryable_discovery_observation,
+    reconcile_evidence_audit_samples,
     record_discovery_result,
     record_discovery_result_in_round,
     record_evidence_audit_finding,
-    record_evidence_audit_sample,
     transition_retryable_discovery_result,
 )
 
@@ -936,15 +938,10 @@ def _require_external_identity_output(path: Path) -> _ExternalOutputPath:
 def _candidate_facts(path: Path) -> tuple[CandidateFactInput, ...]:
     content = _read_bounded(path, error_message="candidate input is invalid")
     try:
-        lines = tuple(
-            line for line in content.decode("utf-8").splitlines() if line.strip()
-        )
+        lines = tuple(line for line in content.decode("utf-8").splitlines() if line.strip())
         if not lines:
             raise ValueError("empty candidate input")
-        return tuple(
-            CandidateFactInput.model_validate_json(line)
-            for line in lines
-        )
+        return tuple(CandidateFactInput.model_validate_json(line) for line in lines)
     except (UnicodeError, ValueError, ValidationError) as error:
         raise ManifestCommandError("candidate input is invalid") from error
 
@@ -966,14 +963,10 @@ def _identity_review_decisions(path: Path) -> tuple[IdentityReviewDecisionInput,
             opened_identity = _file_identity_from_handle(input_file)
             opened_path = _opened_file_path(input_file)
             if _is_repository_path(opened_path):
-                raise ManifestCommandError(
-                    "identity work path must be outside repository"
-                )
+                raise ManifestCommandError("identity work path must be outside repository")
             current_path = path.resolve(strict=True)
             if _is_repository_path(current_path):
-                raise ManifestCommandError(
-                    "identity work path must be outside repository"
-                )
+                raise ManifestCommandError("identity work path must be outside repository")
             if (
                 current_path != opened_path
                 or _file_identity_from_path(current_path) != opened_identity
@@ -985,9 +978,7 @@ def _identity_review_decisions(path: Path) -> tuple[IdentityReviewDecisionInput,
         payload = json.loads(content.decode("utf-8"))
         if not isinstance(payload, list):
             raise TypeError("identity review input must be an array")
-        return tuple(
-            IdentityReviewDecisionInput.model_validate(value) for value in payload
-        )
+        return tuple(IdentityReviewDecisionInput.model_validate(value) for value in payload)
     except ManifestCommandError:
         raise
     except (OSError, TypeError, UnicodeError, ValueError, ValidationError) as error:
@@ -1109,9 +1100,7 @@ def _manifest_file_identity(path: Path) -> tuple[str, str]:
         raise ManifestCommandError("manifest file is invalid") from error
 
 
-def _selected_manifest(
-    args: argparse.Namespace, SessionLocal: Any
-) -> tuple[str, str]:
+def _selected_manifest(args: argparse.Namespace, SessionLocal: Any) -> tuple[str, str]:
     if args.manifest_file is not None:
         version, file_fingerprint = _manifest_file_identity(args.manifest_file)
     else:
@@ -1120,7 +1109,9 @@ def _selected_manifest(
 
     with SessionLocal() as session:
         if version is None:
-            manifests = tuple(session.scalars(select(CompanyManifest).order_by(CompanyManifest.version)))
+            manifests = tuple(
+                session.scalars(select(CompanyManifest).order_by(CompanyManifest.version))
+            )
             if len(manifests) != 1:
                 raise ManifestCommandError("exactly one frozen manifest is required")
             manifest = manifests[0]
@@ -1154,13 +1145,8 @@ def _report(args: argparse.Namespace) -> dict[str, object]:
     _load_settings()
     SessionLocal = _session_factory()
     version, stored_fingerprint = _selected_manifest(args, SessionLocal)
-    if (
-        args.config_fingerprint is not None
-        and args.config_fingerprint != stored_fingerprint
-    ):
-        raise ManifestCommandError(
-            "report fingerprint conflicts with frozen manifest"
-        )
+    if args.config_fingerprint is not None and args.config_fingerprint != stored_fingerprint:
+        raise ManifestCommandError("report fingerprint conflicts with frozen manifest")
     with SessionLocal() as session:
         service = ManifestReportService(session)
         report = (
@@ -1246,34 +1232,68 @@ def _evidence_inputs(path: Path, *, limit: int) -> tuple[EvidenceCandidateInput,
     return candidates[:limit]
 
 
-def _source_is_registered(candidate: EvidenceCandidateInput, registry: SourceRegistry) -> bool:
+def _registry_fingerprint(registry: SourceRegistry) -> str:
+    return sha256(_json_bytes(registry.model_dump(mode="json"))).hexdigest()
+
+
+def _registered_source_validation(
+    candidate: EvidenceCandidateInput,
+    registry: SourceRegistry,
+    *,
+    registry_fingerprint: str,
+) -> RegisteredSourceValidation | None:
     try:
         registered = registry.require(candidate.source_id)
     except KeyError:
-        return False
-    return bool(
-        candidate.source_registered
-        and SourceRole.CANDIDATE_POOL in registered.roles
-        and normalize_url(str(registered.base_url)) == normalize_url(candidate.source_url)
+        return None
+    source_url = candidate._public_evidence().source_url
+    if SourceRole.CANDIDATE_POOL not in registered.roles or str(registered.base_url) != str(
+        source_url
+    ):
+        return None
+    return RegisteredSourceValidation(
+        source_id=registered.id,
+        exact_source_url=source_url,
+        role=SourceRole.CANDIDATE_POOL,
+        registry_fingerprint=registry_fingerprint,
     )
 
 
-def _validated_evidence_inputs(
+def _independent_evidence_validations(
     candidates: tuple[EvidenceCandidateInput, ...],
     *,
     registry: SourceRegistry,
-) -> tuple[EvidenceCandidateInput, ...]:
-    return tuple(
-        candidate.model_copy(
-            update={"source_registered": _source_is_registered(candidate, registry)}
+    members: dict[UUID, CompanyManifestMember],
+) -> dict[UUID, IndependentEvidenceValidation]:
+    fingerprint = _registry_fingerprint(registry)
+    validations: dict[UUID, IndependentEvidenceValidation] = {}
+    for candidate in candidates:
+        member = members[candidate.company_id]
+        official_host = (
+            ""
+            if member.official_website is None
+            else (urlsplit(member.official_website).hostname or "").lower().rstrip(".")
         )
-        for candidate in candidates
-    )
+        validations[candidate.company_id] = IndependentEvidenceValidation(
+            registered_source=_registered_source_validation(
+                candidate,
+                registry,
+                registry_fingerprint=fingerprint,
+            ),
+            classification=classify_recruitment_url(
+                candidate.candidate_url,
+                official_host,
+            ),
+        )
+    return validations
 
 
 def _evidence_result(evaluation: EvidenceEvaluation) -> EntryDiscoveryResult:
     item = evaluation.input
     decision = evaluation.decision
+    validation = evaluation.validation
+    classification = None if validation is None else validation.classification
+    ownership = None if validation is None else validation.ownership
     if decision.status is CandidateDecisionStatus.ACCEPTED:
         status = DiscoveryStatus.ACCEPTED
         error_code = None
@@ -1295,8 +1315,10 @@ def _evidence_result(evaluation: EvidenceEvaluation) -> EntryDiscoveryResult:
             "candidate_url": item.candidate_url,
             "normalized_url": normalize_url(item.candidate_url),
             "source_id": item.source_id,
-            "ownership_evidence": item.ownership_evidence,
-            "classification": AtsClassification(platform=item.platform),
+            "ownership_evidence": (
+                None if ownership is None else f"{ownership.basis}:{ownership.detail}"
+            ),
+            "classification": classification,
             "error_code": error_code,
         }
     )
@@ -1308,19 +1330,32 @@ def _record_evidence_evaluations(
     manifest_version: str,
     discovery_round: EntryDiscoveryRound,
     evaluations: tuple[EvidenceEvaluation, ...],
+    registry_fingerprint: str,
 ) -> tuple[dict[UUID, UUID], Counter[DiscoveryStatus]]:
     predecessor_observations: dict[UUID, EntryDiscoveryObservation] = {}
-    if discovery_round.predecessor_round_id is not None:
+    company_ids = {evaluation.input.company_id for evaluation in evaluations}
+    if company_ids:
         with SessionLocal() as session:
-            predecessor_observations = {
-                observation.company_id: observation
-                for observation in session.scalars(
-                    select(EntryDiscoveryObservation).where(
-                        EntryDiscoveryObservation.discovery_round_id
-                        == discovery_round.predecessor_round_id
+            prior = tuple(
+                session.scalars(
+                    select(EntryDiscoveryObservation)
+                    .where(
+                        EntryDiscoveryObservation.manifest_version == manifest_version,
+                        EntryDiscoveryObservation.company_id.in_(company_ids),
+                        (
+                            EntryDiscoveryObservation.discovery_round_id.is_(None)
+                            | (EntryDiscoveryObservation.discovery_round_id != discovery_round.id)
+                        ),
+                        EntryDiscoveryObservation.observed_at < discovery_round.started_at,
+                    )
+                    .order_by(
+                        EntryDiscoveryObservation.observed_at.desc(),
+                        EntryDiscoveryObservation.id.desc(),
                     )
                 )
-            }
+            )
+        for observation in prior:
+            predecessor_observations.setdefault(observation.company_id, observation)
     observation_ids: dict[UUID, UUID] = {}
     status_counts: Counter[DiscoveryStatus] = Counter()
     for evaluation in evaluations:
@@ -1335,55 +1370,33 @@ def _record_evidence_evaluations(
             observed_at=observed_at,
         )
         with SessionLocal() as session:
+            trace = {
+                "public_evidence": evaluation.input._public_evidence().model_dump(mode="json"),
+                "model_assessment": (
+                    None
+                    if evaluation.assessment is None
+                    else evaluation.assessment.model_dump(mode="json")
+                ),
+                "independent_validation": (
+                    None
+                    if evaluation.validation is None
+                    else evaluation.validation.model_dump(mode="json")
+                ),
+                "prompt_fingerprint": evaluation.prompt_fingerprint,
+                "schema_fingerprint": evaluation.schema_fingerprint,
+                "policy_fingerprint": evaluation.policy_fingerprint,
+                "registry_fingerprint": registry_fingerprint,
+            }
             summary = record_discovery_result_in_round(
                 session,
                 round_id=discovery_round.id,
                 command=command,
                 predecessor_observation_id=None if predecessor is None else predecessor.id,
+                evidence_trace=trace,
             )
         observation_ids[evaluation.input.company_id] = summary.observation_id
         status_counts[command.result.status] += 1
     return observation_ids, status_counts
-
-
-def _record_evidence_audit_samples(
-    *,
-    SessionLocal: Any,
-    round_id: UUID,
-    evaluations: tuple[EvidenceEvaluation, ...],
-    observation_ids: dict[UUID, UUID],
-) -> int:
-    accepted = tuple(
-        evaluation
-        for evaluation in evaluations
-        if evaluation.decision.status is CandidateDecisionStatus.ACCEPTED
-    )
-    selected = AuditSampleSelector().select(
-        evaluation.input.to_policy_candidate() for evaluation in accepted
-    )
-    evaluations_by_key = {
-        (
-            evaluation.input.source_id,
-            evaluation.input.platform,
-            evaluation.input.candidate_url,
-        ): evaluation
-        for evaluation in accepted
-    }
-    selected_at = datetime.now(UTC)
-    for sample in selected:
-        evaluation = evaluations_by_key[
-            (sample.stratum.source_id, sample.stratum.platform, sample.candidate_url)
-        ]
-        with SessionLocal() as session:
-            record_evidence_audit_sample(
-                session,
-                round_id=round_id,
-                observation_id=observation_ids[evaluation.input.company_id],
-                source_id=sample.stratum.source_id,
-                platform=sample.stratum.platform,
-                selected_at=selected_at,
-            )
-    return len(selected)
 
 
 def _evidence_regenerate(args: argparse.Namespace) -> dict[str, object]:
@@ -1450,6 +1463,9 @@ def _evidence_regenerate(args: argparse.Namespace) -> dict[str, object]:
             }
 
     candidates: tuple[EvidenceCandidateInput, ...] | None = None
+    validations: dict[UUID, IndependentEvidenceValidation] = {}
+    registry_fingerprint: str | None = None
+    membership_fingerprint: str | None = None
     llm_client: Any | None = None
     if args.evidence_input is not None:
         if not settings.gate1_live_discovery_enabled or not args.live:
@@ -1458,20 +1474,34 @@ def _evidence_regenerate(args: argparse.Namespace) -> dict[str, object]:
             raise ManifestCommandError("evidence item limit is required")
         candidates = _evidence_inputs(args.evidence_input, limit=args.limit)
         registry = _load_registry(_registry_path(args, settings))
-        candidates = _validated_evidence_inputs(candidates, registry=registry)
+        registry_fingerprint = _registry_fingerprint(registry)
         company_ids = {candidate.company_id for candidate in candidates}
+        membership_fingerprint = discovery_membership_fingerprint(tuple(company_ids))
         with SessionLocal() as session:
-            member_ids = set(
+            member_rows = tuple(
                 session.scalars(
-                    select(CompanyManifestMember.company_id).where(
+                    select(CompanyManifestMember).where(
                         CompanyManifestMember.manifest_version == version,
                         CompanyManifestMember.company_id.in_(company_ids),
                     )
                 )
             )
+        members = {member.company_id: member for member in member_rows}
+        member_ids = set(members)
         if member_ids != company_ids:
             raise ManifestCommandError("evidence input contains a non-member company")
+        validations = _independent_evidence_validations(
+            candidates,
+            registry=registry,
+            members=members,
+        )
         llm_client = _evidence_llm_client(settings)
+
+        if existing is not None and (
+            existing.membership_fingerprint != membership_fingerprint
+            or existing.intended_member_count != len(company_ids)
+        ):
+            raise ManifestCommandError("named evidence round conflicts with frozen membership")
 
     if existing is None:
         with SessionLocal() as session:
@@ -1482,6 +1512,8 @@ def _evidence_regenerate(args: argparse.Namespace) -> dict[str, object]:
                 config_fingerprint=stored_fingerprint,
                 model_fingerprint=model_fingerprint,
                 predecessor_round_id=None if latest is None else latest.id,
+                membership_fingerprint=membership_fingerprint,
+                intended_member_count=(None if candidates is None else len(candidates)),
                 started_at=datetime.now(UTC),
             )
         with SessionLocal() as session:
@@ -1501,6 +1533,7 @@ def _evidence_regenerate(args: argparse.Namespace) -> dict[str, object]:
         }
     assert candidates is not None
     assert llm_client is not None
+    assert registry_fingerprint is not None
     company_ids = {candidate.company_id for candidate in candidates}
     with SessionLocal() as session:
         existing_company_ids = set(
@@ -1529,23 +1562,24 @@ def _evidence_regenerate(args: argparse.Namespace) -> dict[str, object]:
                 config_live=bool(settings.gate1_live_discovery_enabled),
                 config_model=bool(settings.entry_evidence_model_enabled),
             ),
+            validations=validations,
         )
     )
-    observation_ids, status_counts = _record_evidence_evaluations(
+    _observation_ids, status_counts = _record_evidence_evaluations(
         SessionLocal=SessionLocal,
         manifest_version=version,
         discovery_round=discovery_round,
         evaluations=evaluations,
+        registry_fingerprint=registry_fingerprint,
     )
-    sample_count = _record_evidence_audit_samples(
-        SessionLocal=SessionLocal,
-        round_id=discovery_round.id,
-        evaluations=evaluations,
-        observation_ids=observation_ids,
-    )
+    with SessionLocal() as session:
+        audit_reconciliation = reconcile_evidence_audit_samples(
+            session,
+            round_id=discovery_round.id,
+        )
     return {
         **common,
-        "audit_samples": sample_count,
+        "audit_samples": audit_reconciliation.total,
         "model_calls": sum(evaluation.model_called for evaluation in evaluations),
         "processed": len(evaluations),
         "round_created": summary is not None and summary.created,
@@ -1785,6 +1819,7 @@ def _discovery_composition(
             budget = min(budget, registered_budget)
         if budget < 1:
             raise ManifestCommandError("Zhihu request budget is invalid")
+
         async def wait_before_request() -> None:
             await limiter.wait(ZhihuGlobalSearchProvider.endpoint)
 
@@ -1859,9 +1894,9 @@ def _load_discovery_members(
         )
         observations = tuple(
             session.scalars(
-                select(EntryDiscoveryObservation).where(
-                    EntryDiscoveryObservation.manifest_version == manifest_version
-                ).order_by(
+                select(EntryDiscoveryObservation)
+                .where(EntryDiscoveryObservation.manifest_version == manifest_version)
+                .order_by(
                     EntryDiscoveryObservation.observed_at,
                     EntryDiscoveryObservation.id,
                 )
@@ -1879,9 +1914,7 @@ def _load_discovery_members(
     )
     companies_by_id = {company.company_id: company for company in companies}
     state = _DiscoveryState(
-        observed_company_ids=frozenset(
-            observation.company_id for observation in observations
-        ),
+        observed_company_ids=frozenset(observation.company_id for observation in observations),
         terminal_company_ids=set(),
         retryable_observation_ids={},
         stopped_domains=set(),

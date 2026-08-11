@@ -1,6 +1,7 @@
 """Transactional, idempotent persistence for normalized ingestion batches."""
 
 from collections import defaultdict
+from datetime import datetime
 from decimal import Decimal
 from hashlib import sha256
 from html.parser import HTMLParser
@@ -23,6 +24,7 @@ from app.ingestion.persistence.contracts import (
     NormalizedDocument,
     NormalizedFilingRecord,
     NormalizedJobRecord,
+    NormalizedProfileFieldRecord,
 )
 from app.ingestion.persistence.result import PersistenceResult
 from app.models import (
@@ -30,6 +32,7 @@ from app.models import (
     CollectionStatus,
     Company,
     CompanyAlias,
+    CompanyProfileField,
     CompanySource,
     CrawlRun,
     JobPosting,
@@ -151,6 +154,12 @@ class PersistenceService:
                     )
                     self._upsert_filings(
                         company.id, batch.filings, documents, run_id
+                    )
+                    self._upsert_profile_fields(
+                        company.id,
+                        batch.profile_fields,
+                        documents,
+                        batch.collected_at,
                     )
                     company.last_collected_at = batch.collected_at
                     result = PersistenceResult(
@@ -411,6 +420,13 @@ class PersistenceService:
                 normalized_name=normalized.normalized_name,
                 website=str(candidate.website) if candidate.website is not None else None,
                 description=candidate.description,
+                headquarters=getattr(candidate, "headquarters", None),
+                founded_year=getattr(candidate, "founded_year", None),
+                city=candidate.city,
+                industry=candidate.industry,
+                sub_industry=candidate.sub_industry,
+                funding_stage=candidate.funding_stage.value if candidate.funding_stage else "unknown",
+                scale=candidate.scale.value if candidate.scale else "unknown",
             )
             inserted_company, _created = self._insert_or_reselect(
                 candidate_company,
@@ -425,6 +441,20 @@ class PersistenceService:
             company.website = str(candidate.website)
         if candidate.description is not None:
             company.description = candidate.description
+        headquarters = getattr(candidate, "headquarters", None)
+        if headquarters is not None:
+            company.headquarters = headquarters
+        founded_year = getattr(candidate, "founded_year", None)
+        if founded_year is not None:
+            company.founded_year = founded_year
+        if candidate.city is not None:
+            company.city = candidate.city
+        if candidate.industry is not None:
+            company.industry = candidate.industry
+        if candidate.sub_industry is not None:
+            company.sub_industry = candidate.sub_industry
+        company.funding_stage = candidate.funding_stage.value if candidate.funding_stage else "unknown"
+        company.scale = candidate.scale.value if candidate.scale else "unknown"
         self._upsert_company_aliases(company, candidate, run_id)
         return company
 
@@ -647,6 +677,33 @@ class PersistenceService:
             )
             job.is_active = any(statuses)
         return job_ids, tuple(dict.fromkeys(warnings))
+
+    def _upsert_profile_fields(
+        self,
+        company_id: UUID,
+        records: tuple[NormalizedProfileFieldRecord, ...],
+        documents: dict[str, SourceDocument],
+        collected_at: datetime,
+    ) -> None:
+        for record in records:
+            field = self.session.get(CompanyProfileField, (company_id, record.field_key))
+            values = {
+                "value": record.value,
+                "source_document_id": documents[record.source_evidence_id].id,
+                "verification_status": record.verification_status,
+                "collected_at": collected_at,
+            }
+            if field is None:
+                self.session.add(
+                    CompanyProfileField(
+                        company_id=company_id,
+                        field_key=record.field_key,
+                        **values,
+                    )
+                )
+                continue
+            for name, value in values.items():
+                setattr(field, name, value)
 
     def _resolve_job(
         self,

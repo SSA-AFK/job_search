@@ -11,6 +11,7 @@ from app.models import (
     CollectionStatus,
     Company,
     CompanyAlias,
+    CompanyProfileField,
     CompanySource,
     CrawlRun,
     FilingType,
@@ -18,6 +19,7 @@ from app.models import (
     JobSource,
     RegulatoryFiling,
     SourceDocument,
+    VerificationStatus,
 )
 
 
@@ -267,6 +269,49 @@ def test_collection_status_values_match_persisted_contract() -> None:
         "failed",
     ]
 
+
+def test_enrichment_records_default_to_pending_verification(
+    session: Session, company: Company, job: JobPosting
+) -> None:
+    filing = RegulatoryFiling(
+        company_id=company.id,
+        filing_type=FilingType.ICP,
+        filing_number="京ICP备123号",
+        filing_name="Example ICP filing",
+    )
+    job_source = JobSource(
+        job_posting_id=job.id,
+        provider="official",
+        source_raw_id="role-1",
+        apply_url="https://example.com/jobs/1",
+    )
+    session.add_all((filing, job_source))
+    session.commit()
+
+    assert filing.verification_status is VerificationStatus.PENDING_VERIFICATION
+    assert job_source.verification_status is VerificationStatus.PENDING_VERIFICATION
+
+
+def test_profile_field_preserves_source_and_verification_status(
+    session: Session, company: Company
+) -> None:
+    collected_at = datetime(2026, 8, 10, tzinfo=UTC)
+    field = CompanyProfileField(
+        company_id=company.id,
+        field_key="technology.github.stars_total",
+        value=1234,
+        verification_status=VerificationStatus.PENDING_VERIFICATION,
+        collected_at=collected_at,
+    )
+    session.add(field)
+    session.commit()
+
+    stored = session.scalar(select(CompanyProfileField))
+
+    assert stored is not None
+    assert stored.value == 1234
+    assert stored.verification_status is VerificationStatus.PENDING_VERIFICATION
+    assert stored.collected_at == collected_at
 
 def test_enum_columns_keep_documented_storage_widths() -> None:
     assert JobPosting.__table__.c.job_type.type.length == 50

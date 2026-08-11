@@ -1,7 +1,7 @@
 import { ArrowLeft, ArrowRight, ExternalLink, RotateCw } from "lucide-react";
 
 import { safeHttpUrl } from "../api/http-url";
-import type { JobListItem, Page } from "../api/types";
+import type { JobListItem, Page, VerificationStatus } from "../api/types";
 
 const jobTypeLabels: Record<JobListItem["job_type"], string> = {
   full_time: "全职",
@@ -19,6 +19,11 @@ const providerLabels: Record<string, string> = {
   boss: "BOSS 直聘投递",
   liepin: "猎聘投递",
   lagou: "拉勾投递",
+};
+
+const verificationLabels: Record<VerificationStatus, string> = {
+  verified: "已核验",
+  pending_verification: "待核验",
 };
 
 function salaryLabel(job: JobListItem) {
@@ -51,10 +56,13 @@ function JobRow({ job }: { job: JobListItem }) {
           const href = safeHttpUrl(source.apply_url);
           if (!href) return null;
           return (
-            <a key={`${source.provider}:${source.apply_url}`} href={href} target="_blank" rel="noreferrer">
-              {providerLabels[source.provider] ?? `${source.provider}投递`}
-              <ExternalLink aria-hidden="true" size={14} />
-            </a>
+            <span className="application-source" key={`${source.provider}:${source.apply_url}`}>
+              <a href={href} target="_blank" rel="noreferrer">
+                {providerLabels[source.provider] ?? `${source.provider}投递`}
+                <ExternalLink aria-hidden="true" size={14} />
+              </a>
+              <span className={`verification-badge verification-badge--${source.verification_status ?? "pending_verification"}`}>{verificationLabels[source.verification_status ?? "pending_verification"]}</span>
+            </span>
           );
         })}
       </div>

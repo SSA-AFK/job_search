@@ -70,6 +70,8 @@ class SeedCompany(StrictSeedModel):
     funding_stage: FundingStage = FundingStage.UNKNOWN
     scale: CompanyScale = CompanyScale.UNKNOWN
     city: str | None = None
+    headquarters: str | None = Field(default=None, max_length=300)
+    founded_year: int | None = Field(default=None, ge=1000, le=9999)
     logo_url: CompanyUrl | None = None
     website: CompanyUrl | None = None
     description: str | None = None

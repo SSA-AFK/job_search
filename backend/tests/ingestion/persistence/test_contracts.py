@@ -19,6 +19,7 @@ from app.ingestion.persistence.contracts import (
     NormalizedDocument,
     NormalizedFilingRecord,
     NormalizedJobRecord,
+    NormalizedProfileFieldRecord,
 )
 from app.models.enums import FilingType
 
@@ -81,6 +82,24 @@ def test_batch_rejects_unresolved_company_field_evidence() -> None:
             ),
             jobs=(),
             filings=(),
+            collected_at=NOW,
+        )
+
+
+def test_batch_rejects_unresolved_profile_field_evidence() -> None:
+    with pytest.raises(ValidationError, match="unknown evidence_id"):
+        NormalizedBatch(
+            documents=(document(),),
+            company=company_record(),
+            jobs=(),
+            filings=(),
+            profile_fields=(
+                NormalizedProfileFieldRecord(
+                    field_key="technology.github.stars_total",
+                    value=123,
+                    source_evidence_id="missing",
+                ),
+            ),
             collected_at=NOW,
         )
 

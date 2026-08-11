@@ -11,6 +11,7 @@ from pydantic import (
     ConfigDict,
     Field,
     HttpUrl,
+    JsonValue,
     field_validator,
     model_validator,
 )
@@ -21,9 +22,18 @@ from app.ingestion.contracts import RawDocument, require_statically_public_url
 from app.ingestion.extraction.schemas import FilingCandidate
 from app.ingestion.normalization.company import NormalizedCompanyCandidate
 from app.ingestion.normalization.job import NormalizedJobCandidate
-from app.models.enums import FilingType
+from app.models.enums import FilingType, VerificationStatus
+from app.profiles.catalog import PROFILE_FIELDS_BY_KEY
 
 EvidenceId = Annotated[str, Field(min_length=1, max_length=255)]
+ProfileFieldKey = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=100,
+        pattern=r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$",
+    ),
+]
 
 
 def _bounded_external_url(value: HttpUrl) -> HttpUrl:
@@ -154,11 +164,26 @@ class NormalizedFilingRecord(FrozenDTO):
         )
 
 
+class NormalizedProfileFieldRecord(FrozenDTO):
+    field_key: ProfileFieldKey
+    value: JsonValue
+    source_evidence_id: EvidenceId
+    verification_status: VerificationStatus = VerificationStatus.PENDING_VERIFICATION
+
+    @field_validator("field_key")
+    @classmethod
+    def require_catalogued_field(cls, value: str) -> str:
+        if value not in PROFILE_FIELDS_BY_KEY:
+            raise ValueError("profile field is not in the catalog")
+        return value
+
+
 class NormalizedBatch(FrozenDTO):
     documents: tuple[NormalizedDocument, ...]
     company: NormalizedCompanyRecord
     jobs: tuple[NormalizedJobRecord, ...] = ()
     filings: tuple[NormalizedFilingRecord, ...] = ()
+    profile_fields: tuple[NormalizedProfileFieldRecord, ...] = ()
     collected_at: AwareDatetime
 
     @model_validator(mode="after")
@@ -178,6 +203,7 @@ class NormalizedBatch(FrozenDTO):
                 for filing in self.filings
                 if filing.source_evidence_id is not None
             ),
+            *(field.source_evidence_id for field in self.profile_fields),
         ]
         unknown = sorted(set(references) - known_evidence)
         if unknown:
@@ -213,6 +239,7 @@ class NormalizedBatch(FrozenDTO):
                 for item in self.jobs
             ),
             filings=self.filings,
+            profile_fields=self.profile_fields,
             collected_at=fetched_at,
         )
 

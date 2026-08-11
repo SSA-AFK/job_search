@@ -30,6 +30,7 @@ from app.ingestion.persistence.contracts import (
     NormalizedDocument,
     NormalizedFilingRecord,
     NormalizedJobRecord,
+    NormalizedProfileFieldRecord,
 )
 from app.ingestion.persistence.service import PersistenceError, PersistenceService
 from app.models import (
@@ -37,6 +38,7 @@ from app.models import (
     CollectionStatus,
     Company,
     CompanyAlias,
+    CompanyProfileField,
     CompanySource,
     FilingType,
     JobPosting,
@@ -227,6 +229,7 @@ def normalized_batch(
     company: NormalizedCompanyRecord | None = None,
     jobs: tuple[NormalizedJobRecord, ...] | None = None,
     filings: tuple[NormalizedFilingRecord, ...] | None = None,
+    profile_fields: tuple[NormalizedProfileFieldRecord, ...] | None = None,
     collected_at: datetime = NOW,
 ) -> NormalizedBatch:
     return NormalizedBatch(
@@ -234,8 +237,60 @@ def normalized_batch(
         company=company or normalized_company(),
         jobs=jobs if jobs is not None else (normalized_job("job-1"),),
         filings=filings if filings is not None else (normalized_filing(),),
+        profile_fields=profile_fields or (),
         collected_at=collected_at,
     )
+
+
+def test_persistence_upserts_evidence_backed_profile_fields(session: Session) -> None:
+    batch = normalized_batch(
+        jobs=(),
+        filings=(),
+        profile_fields=(
+            NormalizedProfileFieldRecord(
+                field_key="technology.github.stars_total",
+                value=123,
+                source_evidence_id="doc-1",
+            ),
+        ),
+    )
+
+    result = PersistenceService(session).persist(batch, run_id=uuid4())
+
+    stored = session.get(
+        CompanyProfileField, (result.company_id, "technology.github.stars_total")
+    )
+    assert stored is not None
+    assert stored.value == 123
+    assert stored.source_document_id is not None
+    assert stored.collected_at == NOW
+    session.rollback()
+
+    replacement = normalized_batch(
+        jobs=(),
+        filings=(),
+        company=NormalizedCompanyRecord(
+            candidate=batch.company.candidate,
+            company_id=result.company_id,
+            field_evidence=batch.company.field_evidence,
+        ),
+        profile_fields=(
+            NormalizedProfileFieldRecord(
+                field_key="technology.github.stars_total",
+                value=456,
+                source_evidence_id="doc-1",
+            ),
+        ),
+        collected_at=LATER,
+    )
+    PersistenceService(session).persist(replacement, run_id=uuid4())
+
+    updated = session.get(
+        CompanyProfileField, (result.company_id, "technology.github.stars_total")
+    )
+    assert updated is not None
+    assert updated.value == 456
+    assert updated.collected_at == LATER
 
 
 def test_persistence_rejects_old_claim_after_requeue_and_reclaim(session: Session) -> None:

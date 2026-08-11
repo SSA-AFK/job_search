@@ -29,6 +29,8 @@ class Company(Base, TimestampMixin):
     funding_stage: Mapped[str] = mapped_column(String(50), default="unknown")
     scale: Mapped[str] = mapped_column(String(50), default="unknown")
     city: Mapped[str | None] = mapped_column(String(50))
+    headquarters: Mapped[str | None] = mapped_column(String(300))
+    founded_year: Mapped[int | None] = mapped_column()
     logo_url: Mapped[str | None] = mapped_column(String(1000))
     website: Mapped[str | None] = mapped_column(String(1000))
     normalized_website: Mapped[str] = mapped_column(

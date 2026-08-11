@@ -363,6 +363,7 @@ def test_company_detail_includes_aliases_filings_sources_and_job_count(
             "filing_authority": "Ministry of Industry and Information Technology",
             "filing_date": "2023-08-01",
             "filing_status": "active",
+            "verification_status": "pending_verification",
             "detail_url": "https://beian.miit.gov.cn/",
         }
     ]
@@ -372,6 +373,7 @@ def test_company_detail_includes_aliases_filings_sources_and_job_count(
             "url": "https://registry.example.com/deepseek",
             "title": "DeepSeek registry record",
             "covered_fields": ["canonical_name", "website"],
+            "field_verification": {},
             "confidence": "0.975",
             "published_at": "2026-06-01T00:00:00Z",
             "fetched_at": "2026-07-31T00:00:00Z",
@@ -385,8 +387,16 @@ def test_job_sources_keep_provider_url_pairing(
     body = client.get(f"/api/v1/companies/{deepseek_id}/jobs").json()
     sources = body["items"][0]["sources"]
     assert sources == [
-        {"provider": "company_site", "apply_url": "https://example.com/jobs/1"},
-        {"provider": "zhihu", "apply_url": "https://jobs.example.com/1"},
+        {
+            "provider": "company_site",
+            "apply_url": "https://example.com/jobs/1",
+            "verification_status": "pending_verification",
+        },
+        {
+            "provider": "zhihu",
+            "apply_url": "https://jobs.example.com/1",
+            "verification_status": "pending_verification",
+        },
     ]
 
 

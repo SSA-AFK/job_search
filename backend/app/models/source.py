@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     JSON,
+    Enum,
     ForeignKey,
     Index,
     Numeric,
@@ -16,6 +17,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import GUID, Base, UTCDateTime
+from app.models.enums import VerificationStatus
 
 
 class SourceDocument(Base):
@@ -57,4 +59,31 @@ class CompanySource(Base):
         ForeignKey("source_documents.id", ondelete="CASCADE"), primary_key=True
     )
     covered_fields: Mapped[list[str]] = mapped_column(JSON)
+    field_verification: Mapped[dict[str, str]] = mapped_column(JSON, default=dict, nullable=False)
     confidence: Mapped[Decimal] = mapped_column(Numeric(4, 3))
+
+
+class CompanyProfileField(Base):
+    __tablename__ = "company_profile_fields"
+
+    company_id: Mapped[UUID] = mapped_column(
+        ForeignKey("companies.id", ondelete="CASCADE"), primary_key=True
+    )
+    field_key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[object] = mapped_column(JSON, nullable=False)
+    source_document_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("source_documents.id", ondelete="SET NULL")
+    )
+    verification_status: Mapped[VerificationStatus] = mapped_column(
+        Enum(
+            VerificationStatus,
+            values_callable=lambda enum: [member.value for member in enum],
+            native_enum=False,
+            create_constraint=True,
+            name="profile_field_verification_status",
+            length=50,
+        ),
+        default=VerificationStatus.PENDING_VERIFICATION,
+        nullable=False,
+    )
+    collected_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)

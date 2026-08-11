@@ -6,7 +6,7 @@ from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from app.core.normalization import normalize_name
 from app.models.base import GUID, Base, TimestampMixin
-from app.models.enums import FilingType
+from app.models.enums import FilingType, VerificationStatus
 
 
 class RegulatoryFiling(Base, TimestampMixin):
@@ -46,6 +46,19 @@ class RegulatoryFiling(Base, TimestampMixin):
     filing_authority: Mapped[str | None] = mapped_column(String(255))
     filing_date: Mapped[date | None] = mapped_column(Date)
     filing_status: Mapped[str | None] = mapped_column(String(50))
+    verification_status: Mapped[VerificationStatus] = mapped_column(
+        Enum(
+            VerificationStatus,
+            values_callable=lambda enum: [member.value for member in enum],
+            native_enum=False,
+            create_constraint=True,
+            name="verification_status",
+            length=50,
+        ),
+        default=VerificationStatus.PENDING_VERIFICATION,
+        server_default=VerificationStatus.PENDING_VERIFICATION.value,
+        nullable=False,
+    )
     detail_url: Mapped[str | None] = mapped_column(String(2000))
 
     @validates("filing_number")

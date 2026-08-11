@@ -28,10 +28,15 @@ EXPECTED_TABLES = {
     "company_identity_review_items",
     "source_documents",
     "company_sources",
+    "company_profile_fields",
+    "funding_events",
+    "funding_event_sources",
+    "funding_investors",
     "entry_discovery_observations",
     "entry_discovery_rounds",
     "entry_evidence_audit_findings",
     "entry_evidence_audit_samples",
+    "entry_evidence_quarantines",
     "job_postings",
     "job_sources",
     "regulatory_filings",
@@ -50,6 +55,7 @@ ENTRY_EVIDENCE_ROUND_TABLES = {
     "entry_discovery_rounds",
     "entry_evidence_audit_findings",
     "entry_evidence_audit_samples",
+    "entry_evidence_quarantines",
 }
 
 
@@ -807,7 +813,11 @@ def test_gate1_manifest_discovery_round_trip_preserves_stage3a_rows(
     command.upgrade(config, "0008_gate1_manifest_discovery")
     inspector = inspect(engine)
     assert set(inspector.get_table_names()) >= (
-        EXPECTED_TABLES - REVIEW_TABLES - ENTRY_EVIDENCE_ROUND_TABLES
+        EXPECTED_TABLES
+        - REVIEW_TABLES
+        - ENTRY_EVIDENCE_ROUND_TABLES
+        - {"company_profile_fields"}
+        - {"funding_events", "funding_event_sources", "funding_investors"}
     )
     assert {
         index["name"]
@@ -1606,8 +1616,34 @@ def test_0009_rejects_normalized_filing_collisions_without_deleting_rows(
     command.upgrade(config, "head")
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0010_entry_evidence_rounds"
+            "0015_funding_events"
         )
+        assert {
+            "verification_status",
+        } <= {
+            column["name"] for column in inspect(connection).get_columns("regulatory_filings")
+        }
+        assert {
+            "verification_status",
+        } <= {column["name"] for column in inspect(connection).get_columns("job_sources")}
+        assert {
+            "field_verification",
+        } <= {column["name"] for column in inspect(connection).get_columns("company_sources")}
+        assert {
+            "headquarters",
+            "founded_year",
+        } <= {column["name"] for column in inspect(connection).get_columns("companies")}
+        assert {
+            "company_id",
+            "field_key",
+            "value",
+            "source_document_id",
+            "verification_status",
+            "collected_at",
+        } <= {
+            column["name"]
+            for column in inspect(connection).get_columns("company_profile_fields")
+        }
         assert connection.scalar(
             text("SELECT count(*) FROM regulatory_filings")
         ) == 2

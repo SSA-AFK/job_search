@@ -25,6 +25,7 @@ class CompanySiteProvider:
         http_client: SafeHttpClient,
         robots_policy: RobotsPolicy,
         approved_hosts: frozenset[str],
+        seed_paths: tuple[str, ...] = _SEED_PATHS,
     ) -> None:
         self._http_client = http_client
         self._robots_policy = robots_policy
@@ -33,6 +34,7 @@ class CompanySiteProvider:
             for host in approved_hosts
             if (normalized := host.strip().lower().rstrip("."))
         )
+        self._seed_paths = seed_paths
 
     async def search(self, query: ProviderQuery) -> ProviderResult:
         if query.website is None:
@@ -51,7 +53,7 @@ class CompanySiteProvider:
             or normalized_host not in query_allowed_hosts
         ):
             return ProviderResult(documents=())
-        seeds = tuple(urljoin(origin, path) for path in _SEED_PATHS)
+        seeds = tuple(urljoin(origin, path) for path in self._seed_paths)
 
         for seed in seeds:
             if not await self._robots_policy.can_fetch(seed):
@@ -148,8 +150,7 @@ class CompanySiteProvider:
         netloc = display_host if port is None or port == default_port else f"{display_host}:{port}"
         return urlunsplit((scheme, netloc, "/", "", "")), normalized_host
 
-    @classmethod
-    def _normalize_link(cls, base_url: str, link: str, host: str) -> str | None:
+    def _normalize_link(self, base_url: str, link: str, host: str) -> str | None:
         try:
             parsed = urlsplit(urljoin(base_url, link))
             port = parsed.port
@@ -160,7 +161,7 @@ class CompanySiteProvider:
             or parsed.hostname is None
             or parsed.hostname.lower().rstrip(".") != host
             or parsed.username is not None
-            or not cls._eligible_path(parsed.path)
+            or not self._eligible_path(parsed.path)
         ):
             return None
 
@@ -172,10 +173,12 @@ class CompanySiteProvider:
         path = parsed.path.rstrip("/") or "/"
         return urlunsplit((scheme, netloc, path, parsed.query, ""))
 
-    @staticmethod
-    def _eligible_path(path: str) -> bool:
+    def _eligible_path(self, path: str) -> bool:
         normalized = path.rstrip("/") or "/"
-        return any(normalized == seed or normalized.startswith(f"{seed}/") for seed in _SEED_PATHS)
+        return any(
+            normalized == seed or normalized.startswith(f"{seed}/")
+            for seed in self._seed_paths
+        )
 
     @staticmethod
     def _access_challenge(document: HttpDocument) -> str | None:

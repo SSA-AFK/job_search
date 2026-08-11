@@ -71,7 +71,7 @@ def _observation_table(*, with_rounds: bool) -> sa.Table:
                 ["manifest_version"],
                 ["company_manifests.version"],
                 name="fk_discovery_observations_manifest_version",
-                ondelete="CASCADE",
+                ondelete="RESTRICT",
             ),
             sa.ForeignKeyConstraint(
                 ["company_id"],
@@ -209,7 +209,7 @@ def upgrade() -> None:
             ["manifest_version"],
             ["company_manifests.version"],
             name="fk_discovery_round_manifest_version",
-            ondelete="CASCADE",
+            ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
             ["predecessor_round_id", "manifest_version"],

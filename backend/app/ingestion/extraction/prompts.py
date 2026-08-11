@@ -16,13 +16,26 @@ _ROLE_INSTRUCTIONS = {
 
 _SCHEMA_INSTRUCTIONS = {
     "discover": (
-        "Root object: companies (array). Required company fields: name, evidence_ids, "
-        "confidence. Optional company fields: aliases (array), website, description."
+        "Root object: companies (array, at most 30 items sorted by confidence). "
+        "Required company fields: name, evidence_ids, confidence. Optional company "
+        "fields: aliases (array), website, description, career_page_url. "
+        "career_page_url is the URL to the company's recruitment or career page, "
+        "especially if hosted on an ATS platform such as jobs.feishu.cn or "
+        "app.mokahr.com. Extract this when the evidence contains a link to the "
+        "company's job listing page."
     ),
     "profile": (
         "Root arrays: profiles, filings. Required profile fields: name, evidence_ids, "
         "confidence. Optional profile fields: website, description, headquarters, "
-        "founded_year. Required filing fields: title, filing_type, filing_number, "
+        "founded_year, city, industry, sub_industry, funding_stage, scale. city is the "
+        "company's primary office city (e.g. \"Hangzhou\"). industry and sub_industry are "
+        "short Chinese or English labels for the company's industry and sub-industry. "
+        "funding_stage must be one of: seed, angel, pre_a, series_a, series_b, "
+        "series_c_plus, public, unfunded, unknown. scale must be one of: one_to_49, "
+        "50_to_199, 200_to_499, 500_plus, unknown. Prefer extracting city, industry, "
+        "sub_industry, funding_stage and scale whenever the evidence mentions them; use "
+        "null for city/industry/sub_industry and \"unknown\" for funding_stage/scale when "
+        "absent. Required filing fields: title, filing_type, filing_number, "
         "evidence_ids, confidence. filing_type must be one of: icp, algorithm, "
         "business_license. Optional filing fields: filing_authority, filing_date, "
         "filing_status, url, description."
@@ -78,5 +91,8 @@ def build_prompt(
             break
         evidence_ids.add(evidence_id)
         prompt += separator + block
+
+    if evidence_ids:
+        prompt += "\n\nAllowed evidence_ids (use these exact strings): " + ", ".join(evidence_ids)
 
     return evidence_ids, prompt

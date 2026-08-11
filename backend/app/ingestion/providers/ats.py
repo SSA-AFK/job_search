@@ -12,6 +12,7 @@ _PLATFORM_HOSTS = {"feishu": "jobs.feishu.cn", "moka": "app.mokahr.com"}
 
 class AtsProvider:
     name = "ats"
+    requires_website = True
 
     def __init__(
         self,
@@ -31,9 +32,19 @@ class AtsProvider:
             "moka": moka_extractor,
         }
         self._enabled = enabled_platforms
+        self._approved_hosts = frozenset(
+            host
+            for platform, host in _PLATFORM_HOSTS.items()
+            if platform in enabled_platforms
+        )
+
+    @property
+    def approved_hosts(self) -> frozenset[str]:
+        return self._approved_hosts
 
     async def search(self, query: ProviderQuery) -> ProviderResult:
-        # Production invocation of search_with_url is deferred to Stage 3C+ orchestrator wiring.
+        if query.website is not None:
+            return await self.search_with_url(str(query.website), query)
         return ProviderResult(documents=())
 
     async def search_with_url(self, url: str, query: ProviderQuery) -> ProviderResult:

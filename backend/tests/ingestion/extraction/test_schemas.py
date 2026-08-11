@@ -215,17 +215,22 @@ def test_filing_candidate_rejects_oversized_persistence_fields(
         FilingCandidate.model_validate(payload)
 
 
-def test_filing_candidate_rejects_non_persisted_filing_type() -> None:
-    with pytest.raises(ValidationError):
-        FilingCandidate.model_validate(
-            {
-                "title": "Press release",
-                "filing_type": "press_release",
-                "filing_number": "PRESS-42",
-                "evidence_ids": ["doc-1"],
-                "confidence": 0.9,
-            }
-        )
+def test_filing_candidate_coerces_unsupported_filing_type() -> None:
+    """LLM may emit filing types outside the persisted enum (e.g. patent).
+
+    Coercing them to the generic ``business_license`` keeps the pipeline
+    running instead of failing the whole extraction batch.
+    """
+    candidate = FilingCandidate.model_validate(
+        {
+            "title": "Press release",
+            "filing_type": "press_release",
+            "filing_number": "PRESS-42",
+            "evidence_ids": ["doc-1"],
+            "confidence": 0.9,
+        }
+    )
+    assert candidate.filing_type is FilingType.BUSINESS_LICENSE
 
 
 def test_filing_candidate_rejects_name_too_long_for_persistence() -> None:
@@ -272,6 +277,53 @@ def test_company_candidate_rejects_values_too_long_for_database(
                 "evidence_ids": ["doc-1"],
                 "confidence": 0.9,
                 field: value,
+            }
+        )
+
+
+def test_company_candidate_normalizes_career_page_url() -> None:
+    candidate = CompanyCandidate.model_validate(
+        {
+            "name": "Example",
+            "career_page_url": "jobs.feishu.cn/example",
+            "evidence_ids": ["doc-1"],
+            "confidence": 0.9,
+        }
+    )
+    assert str(candidate.career_page_url) == "https://jobs.feishu.cn/example"
+
+
+def test_company_candidate_rejects_oversized_career_page_url() -> None:
+    with pytest.raises(ValidationError):
+        CompanyCandidate.model_validate(
+            {
+                "name": "Example",
+                "career_page_url": "https://jobs.feishu.cn/" + "x" * 2_000,
+                "evidence_ids": ["doc-1"],
+                "confidence": 0.9,
+            }
+        )
+
+
+@ pytest.mark.parametrize(
+    "career_url",
+    [
+        "http://127.0.0.1/private",
+        "http://10.0.0.1/private",
+        "http://[::1]/private",
+        "https://localhost/jobs",
+        "https://service.internal/jobs",
+        "https://service.lan/jobs",
+    ],
+)
+def test_company_candidate_rejects_statically_unsafe_career_url(career_url: str) -> None:
+    with pytest.raises(ValidationError, match="public URL"):
+        CompanyCandidate.model_validate(
+            {
+                "name": "Example",
+                "career_page_url": career_url,
+                "evidence_ids": ["doc-1"],
+                "confidence": 0.9,
             }
         )
 

@@ -15,6 +15,7 @@ export type CompanyScale =
   | "200_to_499"
   | "500_plus"
   | "unknown";
+export type VerificationStatus = "verified" | "pending_verification";
 
 export type CompanySearchParams = {
   q?: string;
@@ -71,6 +72,7 @@ export type FilingItem = {
   filing_authority: string | null;
   filing_date: string | null;
   filing_status: string | null;
+  verification_status: VerificationStatus;
   detail_url: string | null;
 };
 
@@ -79,21 +81,43 @@ export type CompanySourceSummary = {
   url: string;
   title: string | null;
   covered_fields: string[];
+  field_verification: Record<string, VerificationStatus>;
   confidence: string;
   published_at: string | null;
   fetched_at: string;
 };
 
+export type CompanyProfileFieldItem = {
+  field_key: string;
+  value: unknown;
+  verification_status: VerificationStatus;
+  collected_at: string;
+};
+
+export type FundingEventItem = {
+  round_label: string;
+  announced_at: string | null;
+  amount: string | null;
+  currency: string | null;
+  investors: string[];
+  verification_status: VerificationStatus;
+};
+
 export type CompanyDetail = CompanyListItem & {
   aliases: string[];
+  headquarters: string | null;
+  founded_year: number | null;
   filings: FilingItem[];
   sources: CompanySourceSummary[];
+  profile_fields: CompanyProfileFieldItem[];
+  funding_events: FundingEventItem[];
   job_count: number;
 };
 
 export type JobSourceItem = {
   provider: string;
   apply_url: string;
+  verification_status: VerificationStatus;
 };
 
 export type JobListItem = {
@@ -118,4 +142,23 @@ export type JobListItem = {
   sources: JobSourceItem[];
   created_at: string;
   updated_at: string;
+};
+
+export type NameCount = {
+  name: string;
+  count: number;
+};
+
+export type OverviewStats = {
+  companies_total: number;
+  companies_with_description: number;
+  companies_with_website: number;
+  jobs_total: number;
+  jobs_with_city: number;
+  crawl_runs_total: number;
+  crawl_runs_by_status: NameCount[];
+  jobs_by_city: NameCount[];
+  jobs_by_type: NameCount[];
+  companies_by_funding_stage: NameCount[];
+  companies_by_scale: NameCount[];
 };

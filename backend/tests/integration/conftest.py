@@ -28,7 +28,9 @@ class FakeLlm:
         self.responses: list[str] = []
         self.prompts: list[str] = []
 
-    async def complete(self, prompt: str) -> str:
+    async def complete(
+        self, prompt: str, *, response_schema: object = None
+    ) -> str:
         self.prompts.append(prompt)
         if not self.responses:
             raise AssertionError("unexpected LLM request")

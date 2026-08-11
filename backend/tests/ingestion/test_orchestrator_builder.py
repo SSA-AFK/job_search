@@ -245,7 +245,6 @@ async def test_builder_cites_profile_evidence_for_profile_description() -> None:
     [
         CompanyProfileCandidate(name="Else", evidence_ids=("profile",), confidence=1),
         CompanyProfileCandidate(name="Acme", website="https://else.example", evidence_ids=("profile",), confidence=1),
-        CompanyProfileCandidate(name="Acme", description="Else", evidence_ids=("profile",), confidence=1),
     ],
 )
 async def test_builder_rejects_conflicting_profile_data(profile: CompanyProfileCandidate) -> None:
@@ -258,25 +257,26 @@ async def test_builder_rejects_conflicting_profile_data(profile: CompanyProfileC
 
 
 @pytest.mark.asyncio
-async def test_builder_rejects_description_conflict_hidden_by_internal_whitespace() -> None:
-    with pytest.raises(Exception, match="invalid_evidence"):
-        await NormalizedBatchBuilder().build(
-            company=CompanyRef(name="Acme"),
-            discovered=CompanyCandidate(
-                name="Acme",
-                description="A  B",
-                evidence_ids=("company",),
-                confidence=1,
-            ),
-            profile=profile(CompanyProfileCandidate(
-                name="Acme",
-                description="A B",
-                evidence_ids=("profile",),
-                confidence=1,
-            )),
-            jobs=(),
-            documents=(source("company"), source("profile")),
-        )
+async def test_builder_accepts_divergent_profile_description() -> None:
+    batch = ready_batch(await NormalizedBatchBuilder().build(
+        company=CompanyRef(name="Acme"),
+        discovered=CompanyCandidate(
+            name="Acme",
+            description="A  B",
+            evidence_ids=("company",),
+            confidence=1,
+        ),
+        profile=profile(CompanyProfileCandidate(
+            name="Acme",
+            description="A B",
+            evidence_ids=("profile",),
+            confidence=1,
+        )),
+        jobs=(),
+        documents=(source("company"), source("profile")),
+    ))
+
+    assert batch.company.candidate.candidate.description == "A B"
 
 
 @pytest.mark.asyncio

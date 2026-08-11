@@ -13,11 +13,13 @@ from app.models.enums import (
     JobSnapshotStatus,
     JobType,
     RunType,
+    VerificationStatus,
 )
 from app.models.filing import RegulatoryFiling
+from app.models.financing import FundingEvent, FundingEventSource, FundingInvestor
 from app.models.job import JobPosting, JobSource
 from app.models.job_entry import JobCollectionSnapshot, JobEntry
-from app.models.source import CompanySource, SourceDocument
+from app.models.source import CompanyProfileField, CompanySource, SourceDocument
 
 if TYPE_CHECKING:
     from app.company_identity.models import (
@@ -99,6 +101,7 @@ __all__ = [
     "CompanyIdentityReviewItem",
     "CompanyManifest",
     "CompanyManifestMember",
+    "CompanyProfileField",
     "CompanyScale",
     "CompanySource",
     "CrawlRun",
@@ -107,6 +110,9 @@ __all__ = [
     "EntryEvidenceAuditFinding",
     "EntryEvidenceAuditSample",
     "FilingType",
+    "FundingEvent",
+    "FundingEventSource",
+    "FundingInvestor",
     "FundingStage",
     "JobCollectionSnapshot",
     "JobEntry",
@@ -120,4 +126,5 @@ __all__ = [
     "SourceDocument",
     "TimestampMixin",
     "UTCDateTime",
+    "VerificationStatus",
 ]

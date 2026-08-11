@@ -10,7 +10,9 @@ from app.ingestion.errors import ExtractionError
 
 
 class LlmClient(Protocol):
-    async def complete(self, prompt: str) -> str: ...
+    async def complete(
+        self, prompt: str, *, response_schema: Mapping[str, Any] | None = None
+    ) -> str: ...
 
 
 class OpenAICompatibleLlmClient:
@@ -31,7 +33,18 @@ class OpenAICompatibleLlmClient:
         self._timeout_seconds = timeout_seconds
         self._max_response_bytes = max_response_bytes
 
-    async def complete(self, prompt: str) -> str:
+    async def complete(
+        self, prompt: str, *, response_schema: Mapping[str, Any] | None = None
+    ) -> str:
+        response_format: dict[str, Any] = {"type": "json_object"}
+        if response_schema is not None:
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "extraction_batch",
+                    "schema": dict(response_schema),
+                },
+            }
         try:
             async with httpx.AsyncClient(
                 timeout=self._timeout_seconds, trust_env=False
@@ -45,7 +58,7 @@ class OpenAICompatibleLlmClient:
                 json={
                     "model": self._model,
                     "messages": [{"role": "user", "content": prompt}],
-                    "response_format": {"type": "json_object"},
+                    "response_format": response_format,
                 },
             ) as response:
                 response.raise_for_status()

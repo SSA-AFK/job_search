@@ -6,7 +6,13 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.enums import CompanyScale, FilingType, FundingStage, JobType
+from app.models.enums import (
+    CompanyScale,
+    FilingType,
+    FundingStage,
+    JobType,
+    VerificationStatus,
+)
 
 
 class CompanySort(StrEnum):
@@ -67,6 +73,7 @@ class FilingItem(BaseModel):
     filing_authority: str | None
     filing_date: date | None
     filing_status: str | None
+    verification_status: VerificationStatus
     detail_url: str | None
 
 
@@ -75,21 +82,43 @@ class CompanySourceSummary(BaseModel):
     url: str
     title: str | None
     covered_fields: list[str]
+    field_verification: dict[str, VerificationStatus]
     confidence: Decimal
     published_at: datetime | None
     fetched_at: datetime
 
 
+class CompanyProfileFieldItem(BaseModel):
+    field_key: str
+    value: object
+    verification_status: VerificationStatus
+    collected_at: datetime
+
+
+class FundingEventItem(BaseModel):
+    round_label: str
+    announced_at: date | None
+    amount: Decimal | None
+    currency: str | None
+    investors: list[str]
+    verification_status: VerificationStatus
+
+
 class CompanyDetail(CompanyListItem):
     aliases: list[str]
+    headquarters: str | None
+    founded_year: int | None
     filings: list[FilingItem]
     sources: list[CompanySourceSummary]
+    profile_fields: list[CompanyProfileFieldItem]
+    funding_events: list[FundingEventItem]
     job_count: int
 
 
 class JobSourceItem(BaseModel):
     provider: str
     apply_url: str
+    verification_status: VerificationStatus
 
 
 class JobListItem(BaseModel):

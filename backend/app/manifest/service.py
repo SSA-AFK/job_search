@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import ROUND_CEILING, Decimal
 from hashlib import sha256
 from typing import NoReturn
 from uuid import UUID
@@ -41,6 +42,7 @@ from app.manifest.models import (
     EntryDiscoveryRound,
     EntryEvidenceAuditFinding,
     EntryEvidenceAuditSample,
+    EntryEvidenceQuarantine,
 )
 from app.models.company import Company
 from app.models.enums import JobEntryStatus
@@ -97,10 +99,28 @@ class EvidenceAuditFindingSummary:
     created: bool
 
 
+@dataclass(frozen=True)
+class EvidenceAuditReconciliationSummary:
+    complete: bool
+    created: int
+    total: int
+
+
 _FINGERPRINT_PATTERN = re.compile(r"[0-9a-f]{64}")
 _ROUND_NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{2,99}")
 _SOURCE_ID_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,49}")
 _PLATFORM_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,49}")
+_EVIDENCE_TRACE_KEYS = frozenset(
+    {
+        "public_evidence",
+        "model_assessment",
+        "independent_validation",
+        "prompt_fingerprint",
+        "schema_fingerprint",
+        "policy_fingerprint",
+        "registry_fingerprint",
+    }
+)
 _CONFIDENCE_ORDER = {
     ConfidenceTier.HIGH: 0,
     ConfidenceTier.MEDIUM: 1,
@@ -117,6 +137,44 @@ _RETRYABLE_BLOCKED_ERROR_CODES = frozenset(
         "total_timeout",
     }
 )
+
+
+def _validated_evidence_trace(
+    trace: Mapping[str, object] | None,
+) -> dict[str, object | None]:
+    if trace is None:
+        return {key: None for key in _EVIDENCE_TRACE_KEYS}
+    if frozenset(trace) != _EVIDENCE_TRACE_KEYS:
+        raise DiscoveryRecordConflict("evidence trace is incomplete")
+    for key in ("prompt_fingerprint", "schema_fingerprint", "policy_fingerprint"):
+        value = trace[key]
+        if not isinstance(value, str) or _FINGERPRINT_PATTERN.fullmatch(value) is None:
+            raise DiscoveryRecordConflict("evidence trace fingerprint is invalid")
+    registry_fingerprint = trace["registry_fingerprint"]
+    if registry_fingerprint is not None and (
+        not isinstance(registry_fingerprint, str)
+        or _FINGERPRINT_PATTERN.fullmatch(registry_fingerprint) is None
+    ):
+        raise DiscoveryRecordConflict("evidence trace fingerprint is invalid")
+    try:
+        normalized = json.loads(json.dumps(dict(trace), sort_keys=True))
+    except (TypeError, ValueError) as error:
+        raise DiscoveryRecordConflict("evidence trace is not JSON serializable") from error
+    return normalized
+
+
+def _stored_evidence_trace(
+    observation: EntryDiscoveryObservation,
+) -> dict[str, object | None]:
+    return {
+        "public_evidence": observation.public_evidence,
+        "model_assessment": observation.model_assessment,
+        "independent_validation": observation.independent_validation,
+        "prompt_fingerprint": observation.prompt_fingerprint,
+        "schema_fingerprint": observation.schema_fingerprint,
+        "policy_fingerprint": observation.policy_fingerprint,
+        "registry_fingerprint": observation.registry_fingerprint,
+    }
 
 
 def _result_values(result: EntryDiscoveryResult) -> tuple[object, ...]:
@@ -255,6 +313,8 @@ def create_discovery_round(
     model_fingerprint: str,
     started_at: datetime,
     predecessor_round_id: UUID | None = None,
+    membership_fingerprint: str | None = None,
+    intended_member_count: int | None = None,
 ) -> DiscoveryRoundSummary:
     """Create or exactly replay one named immutable discovery round."""
 
@@ -267,6 +327,14 @@ def create_discovery_round(
         for value in (manifest_version, config_fingerprint, model_fingerprint)
     ):
         raise DiscoveryRecordConflict("discovery round fingerprint is invalid")
+    if (membership_fingerprint is None) != (intended_member_count is None):
+        raise DiscoveryRecordConflict("discovery round membership is incomplete")
+    if membership_fingerprint is not None and (
+        _FINGERPRINT_PATTERN.fullmatch(membership_fingerprint) is None
+        or intended_member_count is None
+        or intended_member_count < 1
+    ):
+        raise DiscoveryRecordConflict("discovery round membership is invalid")
     if started_at.tzinfo is None or started_at.utcoffset() is None:
         raise DiscoveryRecordConflict("discovery round start time must be timezone-aware")
     normalized_started_at = started_at.astimezone(UTC)
@@ -289,6 +357,13 @@ def create_discovery_round(
             .with_for_update()
         )
         if existing is not None:
+            if (
+                existing.membership_fingerprint != membership_fingerprint
+                or existing.intended_member_count != intended_member_count
+            ):
+                raise DiscoveryRecordConflict(
+                    "named discovery round conflicts with frozen membership"
+                )
             matches = (
                 existing.config_fingerprint == config_fingerprint
                 and existing.model_fingerprint == model_fingerprint
@@ -309,15 +384,15 @@ def create_discovery_round(
             if predecessor is None or predecessor.manifest_version != manifest_version:
                 raise DiscoveryRecordConflict("predecessor discovery round does not exist")
             if normalized_started_at <= predecessor.started_at:
-                raise DiscoveryRecordConflict(
-                    "discovery round must start after its predecessor"
-                )
+                raise DiscoveryRecordConflict("discovery round must start after its predecessor")
 
         discovery_round = EntryDiscoveryRound(
             manifest_version=manifest_version,
             name=name,
             config_fingerprint=config_fingerprint,
             model_fingerprint=model_fingerprint,
+            membership_fingerprint=membership_fingerprint,
+            intended_member_count=intended_member_count,
             predecessor_round_id=None if predecessor is None else predecessor.id,
             started_at=normalized_started_at,
         )
@@ -326,12 +401,139 @@ def create_discovery_round(
         return DiscoveryRoundSummary(round_id=discovery_round.id, created=True)
 
 
+def _audit_observation_rank(observation: EntryDiscoveryObservation) -> str:
+    material = f"{observation.source_id}\0{observation.platform}\0{observation.candidate_url}"
+    return sha256(material.encode("utf-8")).hexdigest()
+
+
+def discovery_membership_fingerprint(company_ids: Sequence[UUID]) -> str:
+    """Fingerprint an exact, order-independent round company set."""
+
+    normalized = tuple(sorted(str(company_id) for company_id in company_ids))
+    if not normalized or len(set(normalized)) != len(normalized):
+        raise DiscoveryRecordConflict("discovery round membership is invalid")
+    return sha256("\n".join(normalized).encode("utf-8")).hexdigest()
+
+
+def reconcile_evidence_audit_samples(
+    session: Session,
+    *,
+    round_id: UUID,
+) -> EvidenceAuditReconciliationSummary:
+    """Backfill the final round-global sample in one idempotent transaction."""
+
+    if session.in_transaction():
+        raise DiscoveryRecordConflict("audit reconciliation requires a clean session")
+    with session.begin():
+        _lock_sqlite_writer(session)
+        discovery_round = session.scalar(
+            select(EntryDiscoveryRound).where(EntryDiscoveryRound.id == round_id).with_for_update()
+        )
+        if discovery_round is None:
+            raise DiscoveryRecordConflict("discovery round does not exist")
+        if (
+            discovery_round.membership_fingerprint is None
+            or discovery_round.intended_member_count is None
+        ):
+            raise DiscoveryRecordConflict("discovery round membership is not frozen")
+
+        observations = tuple(
+            session.scalars(
+                select(EntryDiscoveryObservation)
+                .where(EntryDiscoveryObservation.discovery_round_id == round_id)
+                .order_by(EntryDiscoveryObservation.id)
+                .with_for_update()
+            )
+        )
+        if len(observations) > discovery_round.intended_member_count:
+            raise DiscoveryRecordConflict("discovery round exceeds frozen membership")
+        existing = tuple(
+            session.scalars(
+                select(EntryEvidenceAuditSample)
+                .where(EntryEvidenceAuditSample.discovery_round_id == round_id)
+                .order_by(EntryEvidenceAuditSample.id)
+                .with_for_update()
+            )
+        )
+        if len(observations) < discovery_round.intended_member_count:
+            if existing:
+                raise DiscoveryRecordConflict(
+                    "audit samples exist before frozen membership is complete"
+                )
+            return EvidenceAuditReconciliationSummary(
+                complete=False,
+                created=0,
+                total=0,
+            )
+
+        observed_membership = discovery_membership_fingerprint(
+            tuple(observation.company_id for observation in observations)
+        )
+        if observed_membership != discovery_round.membership_fingerprint:
+            raise DiscoveryRecordConflict("discovery observations conflict with frozen membership")
+
+        grouped: defaultdict[tuple[str, str], list[EntryDiscoveryObservation]] = defaultdict(list)
+        for observation in observations:
+            if observation.status is not DiscoveryStatus.ACCEPTED:
+                continue
+            if (
+                observation.source_id is None
+                or observation.platform is None
+                or observation.candidate_url is None
+            ):
+                raise DiscoveryRecordConflict(
+                    "accepted observation lacks an auditable sample identity"
+                )
+            grouped[(observation.source_id, observation.platform)].append(observation)
+
+        desired: list[EntryDiscoveryObservation] = []
+        for stratum in sorted(grouped):
+            group = grouped[stratum]
+            sample_size = max(
+                1,
+                int((Decimal(len(group)) * Decimal("0.05")).to_integral_value(ROUND_CEILING)),
+            )
+            desired.extend(sorted(group, key=_audit_observation_rank)[:sample_size])
+        desired_ids = {observation.id for observation in desired}
+        existing_ids = {sample.observation_id for sample in existing}
+        if not existing_ids <= desired_ids:
+            raise DiscoveryRecordConflict("stored audit sample conflicts with frozen round")
+
+        selected_at = max(
+            (observation.observed_at for observation in observations),
+            default=discovery_round.started_at,
+        )
+        created = 0
+        for observation in desired:
+            if observation.id in existing_ids:
+                continue
+            assert observation.source_id is not None
+            assert observation.platform is not None
+            session.add(
+                EntryEvidenceAuditSample(
+                    discovery_round_id=round_id,
+                    observation_id=observation.id,
+                    source_id=observation.source_id,
+                    platform=observation.platform,
+                    selected_at=selected_at,
+                )
+            )
+            created += 1
+        session.flush()
+        return EvidenceAuditReconciliationSummary(
+            complete=True,
+            created=created,
+            total=len(desired_ids),
+        )
+
+
 def record_discovery_result_in_round(
     session: Session,
     *,
     round_id: UUID,
     command: RecordDiscoveryCommand,
     predecessor_observation_id: UUID | None = None,
+    evidence_trace: Mapping[str, object] | None = None,
 ) -> DiscoveryRecordSummary:
     """Append one immutable result to a named round, optionally linking prior evidence."""
 
@@ -342,18 +544,14 @@ def record_discovery_result_in_round(
         if command.result.status is DiscoveryStatus.ACCEPTED
         else command.result.classification
     )
+    trace = _validated_evidence_trace(evidence_trace)
 
     with session.begin():
         _lock_sqlite_writer(session)
         discovery_round = session.scalar(
-            select(EntryDiscoveryRound)
-            .where(EntryDiscoveryRound.id == round_id)
-            .with_for_update()
+            select(EntryDiscoveryRound).where(EntryDiscoveryRound.id == round_id).with_for_update()
         )
-        if (
-            discovery_round is None
-            or discovery_round.manifest_version != command.manifest_version
-        ):
+        if discovery_round is None or discovery_round.manifest_version != command.manifest_version:
             raise DiscoveryRecordConflict("discovery round does not exist for manifest")
         member = session.scalar(
             select(CompanyManifestMember)
@@ -381,6 +579,7 @@ def record_discovery_result_in_round(
                 _observation_values(existing) == _result_values(command.result)
                 and existing.observed_at == command.observed_at
                 and existing.predecessor_observation_id == predecessor_observation_id
+                and _stored_evidence_trace(existing) == trace
             ):
                 return DiscoveryRecordSummary(
                     observation_id=existing.id,
@@ -404,13 +603,15 @@ def record_discovery_result_in_round(
                 or predecessor.discovery_round_id == round_id
             ):
                 raise DiscoveryRecordConflict("predecessor observation does not exist")
-            if (
-                discovery_round.predecessor_round_id is not None
-                and predecessor.discovery_round_id != discovery_round.predecessor_round_id
-            ):
-                raise DiscoveryRecordConflict(
-                    "predecessor observation is not from the predecessor round"
-                )
+            if predecessor.discovery_round_id is not None:
+                predecessor_round = session.get(EntryDiscoveryRound, predecessor.discovery_round_id)
+                if (
+                    predecessor_round is None
+                    or predecessor_round.started_at >= discovery_round.started_at
+                ):
+                    raise DiscoveryRecordConflict(
+                        "predecessor observation is not from a prior round"
+                    )
             if command.observed_at <= predecessor.observed_at:
                 raise DiscoveryRecordConflict(
                     "round observation must be newer than predecessor evidence"
@@ -430,18 +631,12 @@ def record_discovery_result_in_round(
         observation = EntryDiscoveryObservation(
             manifest_version=command.manifest_version,
             discovery_round_id=round_id,
-            predecessor_observation_id=(
-                None if predecessor is None else predecessor.id
-            ),
+            predecessor_observation_id=(None if predecessor is None else predecessor.id),
             company_id=command.company_id,
             method=result.method,
             status=result.status,
-            candidate_url=(
-                None if result.candidate_url is None else str(result.candidate_url)
-            ),
-            normalized_url=(
-                None if result.normalized_url is None else str(result.normalized_url)
-            ),
+            candidate_url=(None if result.candidate_url is None else str(result.candidate_url)),
+            normalized_url=(None if result.normalized_url is None else str(result.normalized_url)),
             source_id=result.source_id,
             ownership_evidence=result.ownership_evidence,
             platform=None if classification is None else classification.platform,
@@ -450,6 +645,13 @@ def record_discovery_result_in_round(
             ),
             error_code=result.error_code,
             job_entry_id=None if entry is None else entry.id,
+            public_evidence=trace["public_evidence"],
+            model_assessment=trace["model_assessment"],
+            independent_validation=trace["independent_validation"],
+            prompt_fingerprint=trace["prompt_fingerprint"],
+            schema_fingerprint=trace["schema_fingerprint"],
+            policy_fingerprint=trace["policy_fingerprint"],
+            registry_fingerprint=trace["registry_fingerprint"],
             observed_at=command.observed_at,
         )
         session.add(observation)
@@ -531,6 +733,31 @@ def record_evidence_audit_sample(
         return EvidenceAuditSampleSummary(audit_sample_id=sample.id, created=True)
 
 
+def _ensure_evidence_quarantine(
+    session: Session,
+    *,
+    finding: EntryEvidenceAuditFinding,
+    sample: EntryEvidenceAuditSample,
+) -> EntryEvidenceQuarantine:
+    quarantine = session.scalar(
+        select(EntryEvidenceQuarantine)
+        .where(EntryEvidenceQuarantine.observation_id == sample.observation_id)
+        .with_for_update()
+    )
+    if quarantine is not None:
+        if quarantine.audit_finding_id != finding.id:
+            raise DiscoveryRecordConflict("observation quarantine conflicts with audit finding")
+        return quarantine
+    quarantine = EntryEvidenceQuarantine(
+        observation_id=sample.observation_id,
+        audit_finding_id=finding.id,
+        quarantined_at=finding.audited_at,
+    )
+    session.add(quarantine)
+    session.flush()
+    return quarantine
+
+
 def record_evidence_audit_finding(
     session: Session,
     *,
@@ -573,6 +800,12 @@ def record_evidence_audit_finding(
                 or existing.audited_at != normalized_audited_at
             ):
                 raise DiscoveryRecordConflict("audit finding conflicts with stored finding")
+            if existing.severe_error:
+                _ensure_evidence_quarantine(
+                    session,
+                    finding=existing,
+                    sample=sample,
+                )
             return EvidenceAuditFindingSummary(audit_finding_id=existing.id, created=False)
 
         finding = EntryEvidenceAuditFinding(
@@ -583,6 +816,8 @@ def record_evidence_audit_finding(
         )
         session.add(finding)
         session.flush()
+        if finding.severe_error:
+            _ensure_evidence_quarantine(session, finding=finding, sample=sample)
         return EvidenceAuditFindingSummary(audit_finding_id=finding.id, created=True)
 
 
@@ -603,17 +838,11 @@ def record_discovery_result(
     with session.begin():
         manifests = tuple(
             session.scalars(
-                select(CompanyManifest)
-                .order_by(CompanyManifest.version)
-                .with_for_update()
+                select(CompanyManifest).order_by(CompanyManifest.version).with_for_update()
             )
         )
         manifest = next(
-            (
-                persisted
-                for persisted in manifests
-                if persisted.version == command.manifest_version
-            ),
+            (persisted for persisted in manifests if persisted.version == command.manifest_version),
             None,
         )
         if manifest is None:
@@ -635,8 +864,7 @@ def record_discovery_result(
             session.scalars(
                 select(EntryDiscoveryObservation)
                 .where(
-                    EntryDiscoveryObservation.manifest_version
-                    == command.manifest_version,
+                    EntryDiscoveryObservation.manifest_version == command.manifest_version,
                     EntryDiscoveryObservation.company_id == command.company_id,
                     EntryDiscoveryObservation.discovery_round_id.is_(None),
                 )
@@ -669,12 +897,8 @@ def record_discovery_result(
             company_id=command.company_id,
             method=result.method,
             status=result.status,
-            candidate_url=(
-                None if result.candidate_url is None else str(result.candidate_url)
-            ),
-            normalized_url=(
-                None if result.normalized_url is None else str(result.normalized_url)
-            ),
+            candidate_url=(None if result.candidate_url is None else str(result.candidate_url)),
+            normalized_url=(None if result.normalized_url is None else str(result.normalized_url)),
             source_id=result.source_id,
             ownership_evidence=result.ownership_evidence,
             platform=None if classification is None else classification.platform,
@@ -723,17 +947,11 @@ def transition_retryable_discovery_result(
     with session.begin():
         manifests = tuple(
             session.scalars(
-                select(CompanyManifest)
-                .order_by(CompanyManifest.version)
-                .with_for_update()
+                select(CompanyManifest).order_by(CompanyManifest.version).with_for_update()
             )
         )
         manifest = next(
-            (
-                persisted
-                for persisted in manifests
-                if persisted.version == command.manifest_version
-            ),
+            (persisted for persisted in manifests if persisted.version == command.manifest_version),
             None,
         )
         if manifest is None:
@@ -747,16 +965,13 @@ def transition_retryable_discovery_result(
             .with_for_update()
         )
         if member is None:
-            raise DiscoveryRecordConflict(
-                "retry transition company is not a manifest member"
-            )
+            raise DiscoveryRecordConflict("retry transition company is not a manifest member")
 
         observations = tuple(
             session.scalars(
                 select(EntryDiscoveryObservation)
                 .where(
-                    EntryDiscoveryObservation.manifest_version
-                    == command.manifest_version,
+                    EntryDiscoveryObservation.manifest_version == command.manifest_version,
                     EntryDiscoveryObservation.company_id == command.company_id,
                     EntryDiscoveryObservation.discovery_round_id.is_(None),
                 )
@@ -765,30 +980,20 @@ def transition_retryable_discovery_result(
             )
         )
         if not observations:
-            raise DiscoveryRecordConflict(
-                "retry transition legacy observation does not exist"
-            )
+            raise DiscoveryRecordConflict("retry transition legacy observation does not exist")
         if len(observations) != 1:
-            raise DiscoveryRecordConflict(
-                "retry transition observation state is ambiguous"
-            )
+            raise DiscoveryRecordConflict("retry transition observation state is ambiguous")
         observation = observations[0]
         if observation.id != observation_id:
-            raise DiscoveryRecordConflict(
-                "retry transition legacy observation does not exist"
-            )
+            raise DiscoveryRecordConflict("retry transition legacy observation does not exist")
         if not is_retryable_discovery_observation(observation):
             raise DiscoveryRecordConflict(
                 "retry transition requires a retryable current observation"
             )
         if observation.job_entry_id is not None:
-            raise DiscoveryRecordConflict(
-                "retry transition current observation is invalid"
-            )
+            raise DiscoveryRecordConflict("retry transition current observation is invalid")
         if command.observed_at <= observation.observed_at:
-            raise DiscoveryRecordConflict(
-                "retry transition requires a newer observation time"
-            )
+            raise DiscoveryRecordConflict("retry transition requires a newer observation time")
 
         entry: JobEntry | None = None
         entry_created = False
@@ -900,14 +1105,18 @@ def _load_resolved_candidates(session: Session) -> tuple[ResolvedCandidate, ...]
         raise ManifestFreezeError("accepted candidate is unresolved")
 
     company_ids = {fact.company_id for fact in accepted_facts if fact.company_id is not None}
-    companies = tuple(
-        session.scalars(
-            select(Company)
-            .where(Company.id.in_(company_ids))
-            .order_by(Company.normalized_name, Company.id)
-            .with_for_update()
+    companies = (
+        tuple(
+            session.scalars(
+                select(Company)
+                .where(Company.id.in_(company_ids))
+                .order_by(Company.normalized_name, Company.id)
+                .with_for_update()
+            )
         )
-    ) if company_ids else ()
+        if company_ids
+        else ()
+    )
     companies_by_id = {company.id: company for company in companies}
     if len(companies_by_id) != len(company_ids):
         raise ManifestFreezeError("accepted candidate references a missing company identity")
@@ -924,7 +1133,9 @@ def _load_resolved_candidates(session: Session) -> tuple[ResolvedCandidate, ...]
         facts = facts_by_company[company_id]
         categories = {fact.primary_category for fact in facts}
         if len(categories) != 1:
-            raise ManifestFreezeError("accepted company identity has conflicting primary categories")
+            raise ManifestFreezeError(
+                "accepted company identity has conflicting primary categories"
+            )
         representative = min(
             facts,
             key=lambda fact: (
@@ -955,9 +1166,7 @@ def _build_current_freeze_data(
 ) -> tuple[QuotaAllocation, tuple[ManifestMemberData, ...], bytes, str]:
     candidates = _load_resolved_candidates(session)
     counts = {
-        category: sum(
-            candidate.primary_category is category for candidate in candidates
-        )
+        category: sum(candidate.primary_category is category for candidate in candidates)
         for category in AiCategory
     }
     try:
@@ -972,9 +1181,7 @@ def _build_current_freeze_data(
     return allocation, members, canonical_bytes, manifest_version
 
 
-def _persisted_members(
-    session: Session, manifest_version: str
-) -> tuple[ManifestMemberData, ...]:
+def _persisted_members(session: Session, manifest_version: str) -> tuple[ManifestMemberData, ...]:
     rows = tuple(
         session.scalars(
             select(CompanyManifestMember)
@@ -1002,11 +1209,7 @@ def _persisted_members(
 
 def _existing_manifest(session: Session) -> CompanyManifest | None:
     manifests = tuple(
-        session.scalars(
-            select(CompanyManifest)
-            .order_by(CompanyManifest.version)
-            .with_for_update()
-        )
+        session.scalars(select(CompanyManifest).order_by(CompanyManifest.version).with_for_update())
     )
     if len(manifests) > 1:
         _conflict("multiple persisted manifests violate the singleton freeze contract")

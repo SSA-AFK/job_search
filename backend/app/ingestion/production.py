@@ -14,6 +14,8 @@ from app.ingestion.providers.company_site import CompanySiteProvider
 from app.ingestion.providers.http import SafeHttpClient
 from app.ingestion.providers.limits import ControlledProvider
 from app.ingestion.providers.robots import RobotsPolicy
+from app.ingestion.providers.tianyancha import TianyanchaProvider
+from app.ingestion.providers.ymicp import YmicpProvider
 from app.ingestion.providers.zhihu import ZhihuGlobalSearchProvider
 from app.ingestion.runtime import RuntimeComponents
 
@@ -40,6 +42,12 @@ class RuntimeSettings(Protocol):
     ats_approved_hosts: str
     playwright_pool_size: int
     playwright_page_timeout_seconds: float
+    tianyancha_provider_enabled: bool
+    tianyancha_cli_executable: str
+    tianyancha_call_budget: int
+    ymicp_provider_enabled: bool
+    ymicp_base_url: str
+    ymicp_timeout_seconds: float
 
 
 class ProductionRuntimeConfigurationError(Exception):
@@ -68,6 +76,26 @@ def create_runtime_components(config: RuntimeSettings) -> RuntimeComponents:
         timeout_seconds=config.openai_request_timeout_seconds,
     )
     providers: list[object] = []
+    if config.ymicp_provider_enabled:
+        providers.append(
+            YmicpProvider(
+                enabled=True,
+                base_url=config.ymicp_base_url,
+                timeout_seconds=config.ymicp_timeout_seconds,
+            )
+        )
+    if config.tianyancha_provider_enabled:
+        if config.tianyancha_call_budget < 1:
+            raise ProductionRuntimeConfigurationError(
+                "TIANYANCHA_CALL_BUDGET must be positive when Tianyancha is enabled"
+            )
+        providers.append(
+            TianyanchaProvider(
+                enabled=True,
+                cli_executable=config.tianyancha_cli_executable,
+                call_budget=config.tianyancha_call_budget,
+            )
+        )
     if config.zhihu_provider_enabled:
         if not config.zhihu_access_secret:
             raise ProductionRuntimeConfigurationError(

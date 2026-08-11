@@ -14,6 +14,9 @@ from app.manifest.models import (
     CompanyManifestMember,
     EntryDiscoveryObservation,
     EntryDiscoveryRound,
+    EntryEvidenceAuditFinding,
+    EntryEvidenceAuditSample,
+    EntryEvidenceQuarantine,
 )
 from app.manifest.reporting import ManifestReportService
 from app.models import Company, JobEntry
@@ -158,3 +161,47 @@ def test_round_aware_report_keeps_aggregate_and_round_denominators_separate(
     assert payload["rounds"][1]["company_denominator"] == 2
     assert payload["rounds"][0]["predecessor_round_id"] is None
     assert payload["rounds"][1]["predecessor_round_id"] == str(first_round.id)
+
+    sample = EntryEvidenceAuditSample(
+        id=UUID(int=93_401),
+        discovery_round_id=first_round.id,
+        observation_id=UUID(int=93_302),
+        source_id="public_registry",
+        platform="moka",
+        selected_at=STARTED_AT + timedelta(minutes=2),
+    )
+    finding = EntryEvidenceAuditFinding(
+        id=UUID(int=93_402),
+        audit_sample_id=sample.id,
+        severe_error=True,
+        reason="Wrong legal entity.",
+        audited_at=STARTED_AT + timedelta(minutes=2),
+    )
+    session.add_all(
+        (
+            sample,
+            finding,
+            EntryEvidenceQuarantine(
+                id=UUID(int=93_403),
+                observation_id=UUID(int=93_302),
+                audit_finding_id=finding.id,
+                quarantined_at=STARTED_AT + timedelta(minutes=2),
+            ),
+        )
+    )
+    session.commit()
+
+    quarantined = (
+        ManifestReportService(session)
+        .build_round_aware(
+            MANIFEST_VERSION,
+            code_commit="abc1234",
+            config_fingerprint="a" * 64,
+        )
+        .model_dump(mode="json")
+    )
+    assert quarantined["aggregate"]["accepted_entries"] == 0
+    assert quarantined["aggregate"]["status_counts"]["accepted"] == 0
+    assert quarantined["rounds"][0]["accepted_entries"] == 0
+    assert quarantined["rounds"][0]["status_counts"]["accepted"] == 0
+    assert quarantined["rounds"][0]["severe_errors"] == 1

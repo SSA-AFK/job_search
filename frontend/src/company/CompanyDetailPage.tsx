@@ -10,6 +10,7 @@ import type {
   FundingStage,
   JobListItem,
   Page,
+  VerificationStatus,
 } from "../api/types";
 import { JobList } from "./JobList";
 
@@ -44,6 +45,32 @@ const providerLabels: Record<string, string> = {
   company_site: "公司官网",
 };
 
+const verificationLabels: Record<VerificationStatus, string> = {
+  verified: "已核验",
+  pending_verification: "待核验",
+};
+
+function VerificationBadge({ status }: { status: VerificationStatus | undefined }) {
+  const resolvedStatus = status ?? "pending_verification";
+  return <span className={`verification-badge verification-badge--${resolvedStatus}`}>{verificationLabels[resolvedStatus]}</span>;
+}
+
+function pendingVerificationFields(fieldVerification: Record<string, VerificationStatus> | undefined) {
+  return Object.entries(fieldVerification ?? {})
+    .filter(([, status]) => status === "pending_verification")
+    .map(([field]) => field);
+}
+
+function businessRegistrationNumber(filings: CompanyDetail["filings"]) {
+  return filings.find((filing) => filing.filing_type === "business_license")?.filing_number ?? null;
+}
+
+function profileFieldValue(value: unknown) {
+  if (value === null) return "—";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
+}
+
 function CompanyLogo({ company }: { company: CompanyDetail }) {
   const [failed, setFailed] = useState(false);
   const logoUrl = safeHttpUrl(company.logo_url);
@@ -61,6 +88,11 @@ function ExternalTextLink({ href, children }: { href: string | null; children: R
 
 function DetailContent({ company, activeJobCount }: { company: CompanyDetail; activeJobCount: number | null }) {
   const website = safeHttpUrl(company.website);
+  const aliases = company.aliases ?? [];
+  const filings = company.filings ?? [];
+  const profileFields = company.profile_fields ?? [];
+  const sources = company.sources ?? [];
+  const registrationNumber = businessRegistrationNumber(filings);
   return (
     <>
       <div className="detail-identity">
@@ -76,19 +108,33 @@ function DetailContent({ company, activeJobCount }: { company: CompanyDetail; ac
       </div>
       {company.description ? <p className="detail-description">{company.description}</p> : null}
       <dl className="company-facts">
-        <div><dt>别名</dt><dd>{company.aliases.length ? company.aliases.join("、") : "暂无别名"}</dd></div>
-        <div><dt>职位记录</dt><dd>{company.job_count} 个</dd></div>
+        <div><dt>别名</dt><dd>{aliases.length ? aliases.join("、") : "暂无别名"}</dd></div>
+        <div><dt>职位记录</dt><dd>{company.job_count ?? 0} 个</dd></div>
         <div><dt>当前在招</dt><dd>{activeJobCount === null ? "加载中" : `${activeJobCount} 个`}</dd></div>
         <div><dt>资料更新</dt><dd>{company.updated_at.slice(0, 10)}</dd></div>
       </dl>
 
+      <section className="detail-section" aria-labelledby="profile-heading">
+        <h2 id="profile-heading">基本信息</h2>
+        <dl className="company-profile">
+          <div><dt>所属行业</dt><dd>{[company.industry, company.sub_industry].filter(Boolean).join(" · ") || "待补充"}</dd></div>
+          <div><dt>融资阶段</dt><dd>{fundingLabels[company.funding_stage]}</dd></div>
+          <div><dt>团队规模</dt><dd>{scaleLabels[company.scale]}</dd></div>
+          <div><dt>主要城市</dt><dd>{company.city ?? "待补充"}</dd></div>
+          <div><dt>公司总部</dt><dd>{company.headquarters ?? "待补充"}</dd></div>
+          <div><dt>成立年份</dt><dd>{company.founded_year ? `${company.founded_year} 年` : "待补充"}</dd></div>
+          <div><dt>统一社会信用代码</dt><dd>{registrationNumber ?? "待补充"}</dd></div>
+          <div><dt>公司官网</dt><dd>{website ? <a href={website} target="_blank" rel="noreferrer">访问官网<ExternalLink aria-hidden="true" size={14} /></a> : "待补充"}</dd></div>
+        </dl>
+      </section>
+
       <section className="detail-section" aria-labelledby="filings-heading">
         <h2 id="filings-heading">备案与登记</h2>
-        {company.filings.length ? (
+        {filings.length ? (
           <ul className="record-list">
-            {company.filings.map((filing) => (
+            {filings.map((filing) => (
               <li key={`${filing.filing_type}:${filing.filing_number}`}>
-                <div><strong>{filingLabels[filing.filing_type] ?? filing.filing_type}</strong><span>{filing.filing_status ?? "状态待确认"}</span></div>
+                <div><strong>{filingLabels[filing.filing_type] ?? filing.filing_type}</strong><VerificationBadge status={filing.verification_status} /><span>{filing.filing_status ?? "状态待确认"}</span></div>
                 <ExternalTextLink href={filing.detail_url}>{filing.filing_number}</ExternalTextLink>
                 <p>{[filing.filing_name, filing.filing_authority, filing.filing_date].filter(Boolean).join(" · ")}</p>
               </li>
@@ -97,21 +143,45 @@ function DetailContent({ company, activeJobCount }: { company: CompanyDetail; ac
         ) : <p className="section-empty">暂无公开备案资料</p>}
       </section>
 
+      {profileFields.length ? (
+        <section className="detail-section" aria-labelledby="profile-fields-heading">
+          <h2 id="profile-fields-heading">公司画像补充</h2>
+          <ul className="record-list">
+            {profileFields.map((field) => (
+              <li key={field.field_key}>
+                <div><strong>{field.field_key}</strong><VerificationBadge status={field.verification_status} /></div>
+                <span>{profileFieldValue(field.value)}</span>
+                <p>采集于 {field.collected_at.slice(0, 10)}</p>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
       <section className="detail-section" aria-labelledby="evidence-heading">
         <h2 id="evidence-heading">资料依据</h2>
-        {company.sources.length ? (
+        {sources.length ? (
           <ul className="record-list">
-            {company.sources.map((source) => (
-              <li key={`${source.provider}:${source.url}`}>
-                <div><strong>{providerLabels[source.provider] ?? source.provider}</strong><span>置信度 {source.confidence}</span></div>
-                <ExternalTextLink href={source.url}>{source.title ?? source.url}</ExternalTextLink>
-                <p>覆盖字段：{source.covered_fields.join("、") || "未标注"} · 获取于 {source.fetched_at.slice(0, 10)}</p>
-              </li>
+            {sources.map((source) => (
+              <SourceRow key={`${source.provider}:${source.url}`} source={source} />
             ))}
           </ul>
         ) : <p className="section-empty">暂无可展示的资料依据</p>}
       </section>
     </>
+  );
+}
+
+function SourceRow({ source }: { source: CompanyDetail["sources"][number] }) {
+  const pendingFields = pendingVerificationFields(source.field_verification);
+  const coveredFields = source.covered_fields ?? [];
+  const fetchedDate = source.fetched_at?.slice(0, 10) ?? "时间未知";
+  return (
+    <li>
+      <div><strong>{providerLabels[source.provider] ?? source.provider}</strong><span>置信度 {source.confidence}</span></div>
+      <ExternalTextLink href={source.url}>{source.title ?? source.url}</ExternalTextLink>
+      <p>覆盖字段：{coveredFields.join("、") || "未标注"} · 获取于 {fetchedDate}{pendingFields.length ? ` · 待核验：${pendingFields.join("、")}` : ""}</p>
+    </li>
   );
 }
 

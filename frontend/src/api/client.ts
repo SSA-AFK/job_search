@@ -4,6 +4,7 @@ import type {
   CompanySearchParams,
   CollectionRequest,
   JobListItem,
+  OverviewStats,
   Page,
 } from "./types";
 
@@ -88,5 +89,10 @@ export const api = {
     const response = await fetch(`/api/v1/collection-requests/${encodeURIComponent(requestId)}`, { signal });
     if (!response.ok) throw await apiError(response);
     return (await response.json()) as CollectionRequest;
+  },
+  async getStatsOverview(signal?: AbortSignal): Promise<OverviewStats> {
+    const response = await fetch("/api/v1/stats/overview", { signal });
+    if (!response.ok) throw await apiError(response);
+    return (await response.json()) as OverviewStats;
   },
 };

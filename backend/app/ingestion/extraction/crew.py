@@ -19,6 +19,8 @@ from app.ingestion.extraction.schemas import (
     ProfileExtraction,
 )
 
+_EXTRACTION_SCHEMA = ExtractionBatch.model_json_schema()
+
 
 class Extractor(Protocol):
     async def discover(
@@ -71,7 +73,9 @@ class CrewExtractor:
         company: CompanyRef | None = None,
     ) -> ExtractionBatch:
         evidence_ids, prompt = build_prompt(role, documents, company)
-        response = await self._llm.complete(prompt)
+        response = await self._llm.complete(
+            prompt, response_schema=_EXTRACTION_SCHEMA
+        )
         try:
             payload = json.loads(response)
             return ExtractionBatch.model_validate(

@@ -16,6 +16,8 @@ const company: CompanyDetail = {
   funding_stage: "unknown",
   scale: "200_to_499",
   city: "Hangzhou",
+  headquarters: "Hangzhou",
+  founded_year: 2023,
   logo_url: null,
   website: "https://www.deepseek.com/",
   description: "专注于通用人工智能基础模型研发。",
@@ -32,6 +34,7 @@ const company: CompanyDetail = {
       filing_authority: "Ministry of Industry and Information Technology",
       filing_date: "2023-08-01",
       filing_status: "active",
+      verification_status: "verified",
       detail_url: "https://beian.miit.gov.cn/",
     },
   ],
@@ -41,11 +44,21 @@ const company: CompanyDetail = {
       url: "https://registry.example.com/deepseek",
       title: "DeepSeek registry record",
       covered_fields: ["canonical_name", "website"],
+      field_verification: { website: "pending_verification" },
       confidence: "0.975",
       published_at: "2026-06-01T00:00:00Z",
       fetched_at: "2026-07-31T00:00:00Z",
     },
   ],
+  profile_fields: [
+    {
+      field_key: "technology.github.stars_total",
+      value: 1234,
+      verification_status: "pending_verification",
+      collected_at: "2026-08-10T00:00:00Z",
+    },
+  ],
+  funding_events: [],
 };
 
 const job: JobListItem = {
@@ -61,9 +74,9 @@ const job: JobListItem = {
   posted_at: "2026-07-20",
   is_active: true,
   sources: [
-    { provider: "company_site", apply_url: "https://example.com/jobs/1" },
-    { provider: "zhihu", apply_url: "https://jobs.example.com/1" },
-    { provider: "unsafe", apply_url: "javascript:alert(document.domain)" },
+    { provider: "company_site", apply_url: "https://example.com/jobs/1", verification_status: "verified" },
+    { provider: "zhihu", apply_url: "https://jobs.example.com/1", verification_status: "pending_verification" },
+    { provider: "unsafe", apply_url: "javascript:alert(document.domain)", verification_status: "pending_verification" },
   ],
   created_at: "2026-07-20T00:00:00Z",
   updated_at: "2026-07-21T00:00:00Z",
@@ -141,6 +154,13 @@ describe("CompanyDetailPage", () => {
     expect(screen.getByText("深度求索")).toBeInTheDocument();
     expect(screen.getByText("浙ICP备2023025841号")).toBeInTheDocument();
     expect(screen.getByText("DeepSeek registry record")).toBeInTheDocument();
+    expect(screen.getByText("统一社会信用代码").nextElementSibling).toHaveTextContent("待补充");
+    expect(screen.getByText("成立年份").nextElementSibling).toHaveTextContent("2023 年");
+    expect(screen.getByText(/待核验：website/)).toBeInTheDocument();
+    expect(screen.getAllByText("已核验")).toHaveLength(2);
+    expect(screen.getAllByText("待核验")).toHaveLength(2);
+    expect(screen.getByRole("heading", { name: "公司画像补充" })).toBeInTheDocument();
+    expect(screen.getByText("technology.github.stars_total")).toBeInTheDocument();
     expect(screen.getByText("Large Model Algorithm Engineer")).toBeInTheDocument();
     expect(screen.getByText(/30,000-60,000 元\/月 · 16 薪/)).toBeInTheDocument();
   });

@@ -8,9 +8,11 @@ from app.companies.repository import CompanyRepository
 from app.companies.schemas import (
     CompanyDetail,
     CompanyListItem,
+    CompanyProfileFieldItem,
     CompanyQuery,
     CompanySourceSummary,
     FilingItem,
+    FundingEventItem,
     JobListItem,
     JobQuery,
     JobSourceItem,
@@ -63,6 +65,8 @@ class CompanyService:
                 alias.alias
                 for alias in company._loaded_aliases  # type: ignore[attr-defined]
             ],
+            headquarters=company.headquarters,
+            founded_year=company.founded_year,
             filings=[
                 FilingItem(
                     filing_type=filing.filing_type,
@@ -71,11 +75,32 @@ class CompanyService:
                     filing_authority=filing.filing_authority,
                     filing_date=filing.filing_date,
                     filing_status=filing.filing_status,
+                    verification_status=filing.verification_status,
                     detail_url=filing.detail_url,
                 )
                 for filing in company._loaded_filings  # type: ignore[attr-defined]
             ],
             sources=sources,
+            profile_fields=[
+                CompanyProfileFieldItem(
+                    field_key=field.field_key,
+                    value=field.value,
+                    verification_status=field.verification_status,
+                    collected_at=field.collected_at,
+                )
+                for field in company._loaded_profile_fields  # type: ignore[attr-defined]
+            ],
+            funding_events=[
+                FundingEventItem(
+                    round_label=event.round_label,
+                    announced_at=event.announced_at,
+                    amount=event.amount,
+                    currency=event.currency,
+                    investors=company._loaded_funding_investors[event.id],  # type: ignore[attr-defined]
+                    verification_status=event.verification_status,
+                )
+                for event in company._loaded_funding_events  # type: ignore[attr-defined]
+            ],
             job_count=company._loaded_job_count,  # type: ignore[attr-defined]
         )
         if self.cache is not None:
@@ -145,6 +170,7 @@ class CompanyService:
             url=document.url,
             title=document.title,
             covered_fields=company_source.covered_fields,
+            field_verification=company_source.field_verification,
             confidence=company_source.confidence,
             published_at=document.published_at,
             fetched_at=document.fetched_at,
@@ -165,7 +191,11 @@ class CompanyService:
             posted_at=job.posted_at,
             is_active=job.is_active,
             sources=[
-                JobSourceItem(provider=source.provider, apply_url=source.apply_url)
+                JobSourceItem(
+                    provider=source.provider,
+                    apply_url=source.apply_url,
+                    verification_status=source.verification_status,
+                )
                 for source in job._loaded_sources  # type: ignore[attr-defined]
             ],
             created_at=job.created_at,

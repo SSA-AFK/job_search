@@ -71,14 +71,14 @@ class CandidateFact(Base, TimestampMixin):
         server_default=CandidateDecisionStatus.REVIEW_REQUIRED.value,
         nullable=False,
     )
-    company_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("companies.id", ondelete="SET NULL")
-    )
+    company_id: Mapped[UUID | None] = mapped_column(ForeignKey("companies.id", ondelete="SET NULL"))
 
 
 class CandidateReview(Base):
     __tablename__ = "candidate_reviews"
-    __table_args__ = (Index("ix_candidate_reviews_candidate_decided", "candidate_fact_id", "decided_at"),)
+    __table_args__ = (
+        Index("ix_candidate_reviews_candidate_decided", "candidate_fact_id", "decided_at"),
+    )
 
     id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
     candidate_fact_id: Mapped[UUID] = mapped_column(
@@ -146,19 +146,19 @@ class EntryDiscoveryRound(Base):
             ondelete="RESTRICT",
         ),
         UniqueConstraint("id", "manifest_version", name="uq_discovery_round_id_manifest"),
-        UniqueConstraint(
-            "manifest_version", "name", name="uq_discovery_round_manifest_name"
-        ),
+        UniqueConstraint("manifest_version", "name", name="uq_discovery_round_manifest_name"),
         Index("ix_discovery_rounds_manifest_started", "manifest_version", "started_at"),
     )
 
     id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
     manifest_version: Mapped[str] = mapped_column(
-        ForeignKey("company_manifests.version", ondelete="CASCADE"), nullable=False
+        ForeignKey("company_manifests.version", ondelete="RESTRICT"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     config_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     model_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    membership_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    intended_member_count: Mapped[int | None] = mapped_column(Integer)
     predecessor_round_id: Mapped[UUID | None] = mapped_column(GUID())
     started_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
@@ -191,9 +191,7 @@ class EntryDiscoveryObservation(Base):
         UniqueConstraint(
             "id", "manifest_version", "company_id", name="uq_discovery_observation_identity"
         ),
-        UniqueConstraint(
-            "id", "discovery_round_id", name="uq_discovery_observation_id_round"
-        ),
+        UniqueConstraint("id", "discovery_round_id", name="uq_discovery_observation_id_round"),
         UniqueConstraint(
             "discovery_round_id", "company_id", name="uq_discovery_observation_round_company"
         ),
@@ -205,7 +203,7 @@ class EntryDiscoveryObservation(Base):
 
     id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
     manifest_version: Mapped[str] = mapped_column(
-        ForeignKey("company_manifests.version", ondelete="CASCADE"), nullable=False
+        ForeignKey("company_manifests.version", ondelete="RESTRICT"), nullable=False
     )
     discovery_round_id: Mapped[UUID | None] = mapped_column(GUID())
     predecessor_observation_id: Mapped[UUID | None] = mapped_column(GUID())
@@ -226,6 +224,13 @@ class EntryDiscoveryObservation(Base):
     )
     error_code: Mapped[str | None] = mapped_column(String(100))
     job_entry_id: Mapped[UUID | None] = mapped_column(GUID())
+    public_evidence: Mapped[dict[str, object] | None] = mapped_column(JSON)
+    model_assessment: Mapped[dict[str, object] | None] = mapped_column(JSON)
+    independent_validation: Mapped[dict[str, object] | None] = mapped_column(JSON)
+    prompt_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    schema_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    policy_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    registry_fingerprint: Mapped[str | None] = mapped_column(String(64))
     observed_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
@@ -276,3 +281,21 @@ class EntryEvidenceAuditFinding(Base):
     severe_error: Mapped[bool] = mapped_column(Boolean, nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     audited_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class EntryEvidenceQuarantine(Base):
+    __tablename__ = "entry_evidence_quarantines"
+    __table_args__ = (
+        UniqueConstraint("observation_id", name="uq_evidence_quarantine_observation"),
+        UniqueConstraint("audit_finding_id", name="uq_evidence_quarantine_finding"),
+        Index("ix_evidence_quarantines_time", "quarantined_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
+    observation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("entry_discovery_observations.id", ondelete="RESTRICT"), nullable=False
+    )
+    audit_finding_id: Mapped[UUID] = mapped_column(
+        ForeignKey("entry_evidence_audit_findings.id", ondelete="RESTRICT"), nullable=False
+    )
+    quarantined_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)

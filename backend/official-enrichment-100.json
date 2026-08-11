@@ -1,0 +1,830 @@
+{
+  "results": [
+    {
+      "company_id": "11111111-2222-3333-4444-555555555576",
+      "company_name": "BOSS直聘",
+      "status": "page_failed:http_status",
+      "documents_found": 0,
+      "error_code": "page_failed:http_status"
+    },
+    {
+      "company_id": "11111111-1111-1111-1111-111111111111",
+      "company_name": "DeepSeek（深度求索）",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "699dc8f1-2338-4db1-9edd-a2b3bd17bef8",
+      "company_name": "DeepSeek（深度求索）",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555594",
+      "company_name": "Keep",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555609",
+      "company_name": "MiniMax",
+      "status": "succeeded",
+      "documents_found": 2,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555579",
+      "company_name": "SHEIN",
+      "status": "page_failed:provider_access_denied",
+      "documents_found": 0,
+      "error_code": "page_failed:provider_access_denied"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555566",
+      "company_name": "三七互娱",
+      "status": "page_failed:http_status",
+      "documents_found": 0,
+      "error_code": "page_failed:http_status"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555573",
+      "company_name": "中兴通讯",
+      "status": "page_failed:unsafe_redirect",
+      "documents_found": 0,
+      "error_code": "page_failed:unsafe_redirect"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555597",
+      "company_name": "丰巢",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "77777777-7777-7777-7777-777777777777",
+      "company_name": "京东",
+      "status": "page_failed:unsafe_redirect",
+      "documents_found": 0,
+      "error_code": "page_failed:unsafe_redirect"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555605",
+      "company_name": "企业微信",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555622",
+      "company_name": "元戎启行",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555584",
+      "company_name": "元气森林",
+      "status": "succeeded",
+      "documents_found": 4,
+      "error_code": null
+    },
+    {
+      "company_id": "76c7d024-0eb6-42a9-a1d9-2400a28f7c13",
+      "company_name": "元气森林",
+      "status": "succeeded",
+      "documents_found": 4,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555623",
+      "company_name": "光年之外",
+      "status": "invalid_website",
+      "documents_found": 0,
+      "error_code": "invalid_website"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555629",
+      "company_name": "医联",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+      "company_name": "华为",
+      "status": "page_failed:http_status",
+      "documents_found": 0,
+      "error_code": "page_failed:http_status"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555565",
+      "company_name": "叠纸游戏",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555555",
+      "company_name": "哔哩哔哩",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555635",
+      "company_name": "唯品会",
+      "status": "page_failed:unsafe_redirect",
+      "documents_found": 0,
+      "error_code": "page_failed:unsafe_redirect"
+    },
+    {
+      "company_id": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+      "company_name": "商汤科技",
+      "status": "page_failed:unsafe_redirect",
+      "documents_found": 0,
+      "error_code": "page_failed:unsafe_redirect"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555585",
+      "company_name": "喜茶",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555630",
+      "company_name": "圆心科技",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555618",
+      "company_name": "地平线",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555591",
+      "company_name": "复星医药",
+      "status": "succeeded",
+      "documents_found": 9,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555572",
+      "company_name": "大华股份",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555559",
+      "company_name": "大疆",
+      "status": "page_failed:unsafe_redirect",
+      "documents_found": 0,
+      "error_code": "page_failed:unsafe_redirect"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555569",
+      "company_name": "奇安信",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "22222222-2222-2222-2222-222222222222",
+      "company_name": "字节跳动",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+      "company_name": "宁德时代",
+      "status": "page_failed:provider_access_denied",
+      "documents_found": 0,
+      "error_code": "page_failed:provider_access_denied"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555567",
+      "company_name": "完美世界",
+      "status": "page_failed:provider_access_denied",
+      "documents_found": 0,
+      "error_code": "page_failed:provider_access_denied"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555570",
+      "company_name": "寒武纪",
+      "status": "page_failed:http_status",
+      "documents_found": 0,
+      "error_code": "page_failed:http_status"
+    },
+    {
+      "company_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "company_name": "小米",
+      "status": "page_failed:connect_timeout",
+      "documents_found": 0,
+      "error_code": "page_failed:connect_timeout"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555553",
+      "company_name": "小红书",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555621",
+      "company_name": "小马智行",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555557",
+      "company_name": "小鹏汽车",
+      "status": "page_failed:http_status",
+      "documents_found": 0,
+      "error_code": "page_failed:http_status"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555593",
+      "company_name": "度小满",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555578",
+      "company_name": "得物",
+      "status": "succeeded",
+      "documents_found": 2,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555592",
+      "company_name": "微众银行",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555628",
+      "company_name": "微医",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555564",
+      "company_name": "心动网络",
+      "status": "succeeded",
+      "documents_found": 1,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555554",
+      "company_name": "快手",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555631",
+      "company_name": "思派健康",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "66666666-6666-6666-6666-666666666666",
+      "company_name": "拼多多",
+      "status": "page_failed:unsafe_redirect",
+      "documents_found": 0,
+      "error_code": "page_failed:unsafe_redirect"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555575",
+      "company_name": "携程",
+      "status": "page_failed:http_status",
+      "documents_found": 0,
+      "error_code": "page_failed:http_status"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555620",
+      "company_name": "文远知行",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555612",
+      "company_name": "无问芯穹",
+      "status": "invalid_website",
+      "documents_found": 0,
+      "error_code": "invalid_website"
+    },
+    {
+      "company_id": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+      "company_name": "旷视科技",
+      "status": "page_failed:unsafe_redirect",
+      "documents_found": 0,
+      "error_code": "page_failed:unsafe_redirect"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555626",
+      "company_name": "晶泰科技",
+      "status": "page_failed:body_too_large",
+      "documents_found": 0,
+      "error_code": "page_failed:body_too_large"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555606",
+      "company_name": "智谱AI",
+      "status": "invalid_output",
+      "documents_found": 3,
+      "error_code": "invalid_output"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555607",
+      "company_name": "月之暗面",
+      "status": "invalid_official_data",
+      "documents_found": 3,
+      "error_code": "invalid_official_data"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555598",
+      "company_name": "极兔速递",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555583",
+      "company_name": "极氪",
+      "status": "invalid_official_data",
+      "documents_found": 3,
+      "error_code": "invalid_official_data"
+    },
+    {
+      "company_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+      "company_name": "比亚迪",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555580",
+      "company_name": "泡泡玛特",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555571",
+      "company_name": "海康威视",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555568",
+      "company_name": "深信服",
+      "status": "page_failed:http_status",
+      "documents_found": 0,
+      "error_code": "page_failed:http_status"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555625",
+      "company_name": "深势科技",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555595",
+      "company_name": "满帮",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555574",
+      "company_name": "滴滴",
+      "status": "page_failed:unsafe_redirect",
+      "documents_found": 0,
+      "error_code": "page_failed:unsafe_redirect"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555613",
+      "company_name": "潞晨科技",
+      "status": "invalid_website",
+      "documents_found": 0,
+      "error_code": "invalid_website"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555615",
+      "company_name": "特斯联",
+      "status": "provider_access_denied",
+      "documents_found": 0,
+      "error_code": "provider_access_denied"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555558",
+      "company_name": "理想汽车",
+      "status": "page_failed:http_status",
+      "documents_found": 0,
+      "error_code": "page_failed:http_status"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555586",
+      "company_name": "瑞幸咖啡",
+      "status": "page_failed:unsupported_content_type",
+      "documents_found": 0,
+      "error_code": "page_failed:unsupported_content_type"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555601",
+      "company_name": "用友",
+      "status": "page_failed:http_status",
+      "documents_found": 0,
+      "error_code": "page_failed:http_status"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555608",
+      "company_name": "百川智能",
+      "status": "page_failed:http_status",
+      "documents_found": 0,
+      "error_code": "page_failed:http_status"
+    },
+    {
+      "company_id": "88888888-8888-8888-8888-888888888888",
+      "company_name": "百度",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555588",
+      "company_name": "百济神州",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555552",
+      "company_name": "知乎",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555581",
+      "company_name": "石头科技",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555614",
+      "company_name": "硅基流动",
+      "status": "invalid_website",
+      "documents_found": 0,
+      "error_code": "invalid_website"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555616",
+      "company_name": "禾赛科技",
+      "status": "page_failed:http_status",
+      "documents_found": 0,
+      "error_code": "page_failed:http_status"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555551",
+      "company_name": "科大讯飞",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555561",
+      "company_name": "米哈游",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "99999999-9999-9999-9999-999999999999",
+      "company_name": "网易",
+      "status": "page_failed:unsafe_redirect",
+      "documents_found": 0,
+      "error_code": "page_failed:unsafe_redirect"
+    },
+    {
+      "company_id": "55555555-5555-5555-5555-555555555555",
+      "company_name": "美团",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555624",
+      "company_name": "聆心智能",
+      "status": "invalid_website",
+      "documents_found": 0,
+      "error_code": "invalid_website"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555589",
+      "company_name": "联影医疗",
+      "status": "succeeded",
+      "documents_found": 1,
+      "error_code": null
+    },
+    {
+      "company_id": "44444444-4444-4444-4444-444444444444",
+      "company_name": "腾讯",
+      "status": "page_failed:unsafe_redirect",
+      "documents_found": 0,
+      "error_code": "page_failed:unsafe_redirect"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555633",
+      "company_name": "自如",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555627",
+      "company_name": "英矽智能",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555587",
+      "company_name": "药明康德",
+      "status": "succeeded",
+      "documents_found": 9,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555562",
+      "company_name": "莉莉丝",
+      "status": "page_failed:http_status",
+      "documents_found": 0,
+      "error_code": "page_failed:http_status"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555556",
+      "company_name": "蔚来",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555560",
+      "company_name": "蚂蚁集团",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555577",
+      "company_name": "贝壳",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555596",
+      "company_name": "货拉拉",
+      "status": "succeeded",
+      "documents_found": 1,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555634",
+      "company_name": "转转",
+      "status": "page_failed:http_status",
+      "documents_found": 0,
+      "error_code": "page_failed:http_status"
+    },
+    {
+      "company_id": "829aca0a-3ec0-427f-935a-a1973bc8c924",
+      "company_name": "复星医药",
+      "status": "model_unavailable",
+      "documents_found": 9,
+      "error_code": "model_unavailable"
+    },
+    {
+      "company_id": "82488fe8-43ef-4fcc-82fc-4e1cf245cd77",
+      "company_name": "字节跳动",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "e539bf28-8918-42ba-ba03-d46183abb558",
+      "company_name": "小马智行",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "fbe06d47-bbb8-4196-9fa6-8d6c15552e7b",
+      "company_name": "得物",
+      "status": "succeeded",
+      "documents_found": 2,
+      "error_code": null
+    },
+    {
+      "company_id": "03939b17-1a13-4c95-994e-cbec7a2c50fd",
+      "company_name": "微众银行",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "0dbd9f14-61c9-4b0b-b405-1e987761e01d",
+      "company_name": "微医",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "9f1f38c1-448c-4a3f-bef7-7e9abd6f798f",
+      "company_name": "心动网络",
+      "status": "succeeded",
+      "documents_found": 1,
+      "error_code": null
+    },
+    {
+      "company_id": "153c4436-5622-4735-b604-53742eefd22f",
+      "company_name": "极兔速递",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "6b9c51ba-c6c8-471c-98bb-2c8ffcce9457",
+      "company_name": "海康威视",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "945241cc-b422-4dd3-826c-98e24b1fa478",
+      "company_name": "石头科技",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "69855750-6c65-4bd8-b475-b53510530c35",
+      "company_name": "科大讯飞",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "3e435f95-b6aa-4e0e-87e4-440b5a4f6174",
+      "company_name": "联影医疗",
+      "status": "succeeded",
+      "documents_found": 1,
+      "error_code": null
+    },
+    {
+      "company_id": "2fbe1574-4578-4150-89ad-a0185c423bcd",
+      "company_name": "自如",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "dd5b72ec-bb50-4f54-96ca-0d00cf228660",
+      "company_name": "药明康德",
+      "status": "succeeded",
+      "documents_found": 9,
+      "error_code": null
+    },
+    {
+      "company_id": "f8e83687-1cb9-41f8-8298-c046a4738107",
+      "company_name": "蚂蚁集团",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "a732648b-3afb-4eb2-8a94-f088a6fd2568",
+      "company_name": "货拉拉",
+      "status": "succeeded",
+      "documents_found": 1,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555590",
+      "company_name": "迈瑞医疗",
+      "status": "page_failed:http_status",
+      "documents_found": 0,
+      "error_code": "page_failed:http_status"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555582",
+      "company_name": "追觅科技",
+      "status": "succeeded",
+      "documents_found": 3,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555617",
+      "company_name": "速腾聚创",
+      "status": "invalid_official_data",
+      "documents_found": 2,
+      "error_code": "invalid_official_data"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555600",
+      "company_name": "金山办公",
+      "status": "page_failed:http_status",
+      "documents_found": 0,
+      "error_code": "page_failed:http_status"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555602",
+      "company_name": "金蝶",
+      "status": "succeeded",
+      "documents_found": 1,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555604",
+      "company_name": "钉钉",
+      "status": "page_failed:unsafe_redirect",
+      "documents_found": 0,
+      "error_code": "page_failed:unsafe_redirect"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555611",
+      "company_name": "阶跃星辰",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "33333333-3333-3333-3333-333333333333",
+      "company_name": "阿里巴巴",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555610",
+      "company_name": "零一万物",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555599",
+      "company_name": "顺丰",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555603",
+      "company_name": "飞书",
+      "status": "succeeded",
+      "documents_found": 1,
+      "error_code": null
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555632",
+      "company_name": "高济健康",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555563",
+      "company_name": "鹰角网络",
+      "status": "page_failed:http_status",
+      "documents_found": 0,
+      "error_code": "page_failed:http_status"
+    },
+    {
+      "company_id": "11111111-2222-3333-4444-555555555619",
+      "company_name": "黑芝麻智能",
+      "status": "robots_disallowed",
+      "documents_found": 0,
+      "error_code": "robots_disallowed"
+    }
+  ]
+}

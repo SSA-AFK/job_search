@@ -1,6 +1,7 @@
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 from threading import Barrier, Lock
 from time import sleep
@@ -23,6 +24,8 @@ from app.manifest.models import (
     CompanyManifest,
     CompanyManifestMember,
     EntryDiscoveryObservation,
+    EntryEvidenceAuditSample,
+    EntryEvidenceQuarantine,
 )
 from app.manifest.service import DiscoveryRecordConflict, record_discovery_result
 from app.models import Base, Company
@@ -97,9 +100,7 @@ def command(
             source_id="public_registry" if accepted else None,
             ownership_evidence="official_navigation_anchor:Careers" if accepted else None,
             classification=(
-                AtsClassification(platform="custom", requires_rendering=False)
-                if accepted
-                else None
+                AtsClassification(platform="custom", requires_rendering=False) if accepted else None
             ),
             error_code=error_code,
         ),
@@ -290,6 +291,137 @@ def test_audit_sample_and_finding_are_append_only_and_exactly_replayable(
     assert stored.severe_error is True
     assert stored.reason == "The sampled entry belongs to another legal entity."
     assert stored.audited_at == audited_at
+    quarantine = session.scalar(
+        select(EntryEvidenceQuarantine).where(
+            EntryEvidenceQuarantine.observation_id == observation.observation_id
+        )
+    )
+    assert quarantine is not None
+    assert quarantine.audit_finding_id == finding.audit_finding_id
+
+
+def test_round_observation_persists_replay_trace_and_rejects_trace_conflict(
+    session: Session,
+) -> None:
+    seed_manifest(session)
+    round_summary = manifest_service.create_discovery_round(
+        session,
+        manifest_version=MANIFEST_VERSION,
+        name="entry-evidence-replay-trace",
+        config_fingerprint="b" * 64,
+        model_fingerprint="c" * 64,
+        started_at=OBSERVED_AT,
+    )
+    trace = {
+        "public_evidence": {
+            "source_url": "https://association.example.test/acme",
+            "candidate_url": "https://jobs.example.test/acme",
+            "page_title": "Acme careers",
+            "visible_summary": "Public careers page.",
+            "anchor_text": "Careers",
+        },
+        "model_assessment": {
+            "confidence": "0.96",
+            "rationale": "The public evidence matches.",
+            "risk_labels": [],
+        },
+        "independent_validation": {"robots": {"allowed": True}},
+        "prompt_fingerprint": "1" * 64,
+        "schema_fingerprint": "2" * 64,
+        "policy_fingerprint": "3" * 64,
+        "registry_fingerprint": "4" * 64,
+    }
+    result_command = command(
+        status=DiscoveryStatus.ACCEPTED,
+        observed_at=OBSERVED_AT + timedelta(minutes=1),
+    )
+
+    created = manifest_service.record_discovery_result_in_round(
+        session,
+        round_id=round_summary.round_id,
+        command=result_command,
+        evidence_trace=trace,
+    )
+    replay = manifest_service.record_discovery_result_in_round(
+        session,
+        round_id=round_summary.round_id,
+        command=result_command,
+        evidence_trace=trace,
+    )
+
+    stored = session.get(EntryDiscoveryObservation, created.observation_id)
+    assert stored is not None
+    assert stored.public_evidence == trace["public_evidence"]
+    assert stored.model_assessment == trace["model_assessment"]
+    assert stored.independent_validation == trace["independent_validation"]
+    assert stored.prompt_fingerprint == "1" * 64
+    assert replay.observation_created is False
+
+    conflicting = dict(trace)
+    conflicting["policy_fingerprint"] = "5" * 64
+    session.rollback()
+    with pytest.raises(DiscoveryRecordConflict, match="different result"):
+        manifest_service.record_discovery_result_in_round(
+            session,
+            round_id=round_summary.round_id,
+            command=result_command,
+            evidence_trace=conflicting,
+        )
+
+
+def test_round_can_link_latest_prior_company_observation_across_sparse_rounds(
+    session: Session,
+) -> None:
+    seed_manifest(session)
+    first = manifest_service.create_discovery_round(
+        session,
+        manifest_version=MANIFEST_VERSION,
+        name="entry-evidence-history-01",
+        config_fingerprint="b" * 64,
+        model_fingerprint="c" * 64,
+        started_at=OBSERVED_AT,
+    )
+    first_observation = manifest_service.record_discovery_result_in_round(
+        session,
+        round_id=first.round_id,
+        command=command(
+            status=DiscoveryStatus.NOT_FOUND,
+            observed_at=OBSERVED_AT + timedelta(minutes=1),
+            error_code="recruitment_entry_not_found",
+        ),
+    )
+    middle = manifest_service.create_discovery_round(
+        session,
+        manifest_version=MANIFEST_VERSION,
+        name="entry-evidence-history-02",
+        config_fingerprint="b" * 64,
+        model_fingerprint="c" * 64,
+        predecessor_round_id=first.round_id,
+        started_at=OBSERVED_AT + timedelta(minutes=2),
+    )
+    latest = manifest_service.create_discovery_round(
+        session,
+        manifest_version=MANIFEST_VERSION,
+        name="entry-evidence-history-03",
+        config_fingerprint="b" * 64,
+        model_fingerprint="c" * 64,
+        predecessor_round_id=middle.round_id,
+        started_at=OBSERVED_AT + timedelta(minutes=3),
+    )
+
+    successor = manifest_service.record_discovery_result_in_round(
+        session,
+        round_id=latest.round_id,
+        command=command(
+            status=DiscoveryStatus.ACCEPTED,
+            observed_at=OBSERVED_AT + timedelta(minutes=4),
+        ),
+        predecessor_observation_id=first_observation.observation_id,
+    )
+
+    stored = session.get(EntryDiscoveryObservation, successor.observation_id)
+    assert stored is not None
+    assert stored.predecessor_observation_id == first_observation.observation_id
 
 
 def test_legacy_retry_cannot_mutate_a_round_observation(session: Session) -> None:
@@ -364,11 +496,110 @@ def test_round_creation_locks_sqlite_writer_before_idempotency_reads(
 
     lock_position = statements.index("BEGIN IMMEDIATE")
     first_read_position = next(
-        index
-        for index, statement in enumerate(statements)
-        if "FROM COMPANY_MANIFESTS" in statement
+        index for index, statement in enumerate(statements) if "FROM COMPANY_MANIFESTS" in statement
     )
     assert lock_position < first_read_position
+
+
+def test_round_membership_is_frozen_and_sampling_reconciles_only_after_completion(
+    session: Session,
+) -> None:
+    seed_manifest(session)
+    second_company_id = UUID(int=92_002)
+    second_company = Company(
+        id=second_company_id,
+        canonical_name="Second Round Company",
+        normalized_name="second-round-company",
+    )
+    manifest = session.get(CompanyManifest, MANIFEST_VERSION)
+    assert manifest is not None
+    manifest.member_count = 2
+    session.add(second_company)
+    session.flush()
+    session.add(
+        CompanyManifestMember(
+            manifest_version=MANIFEST_VERSION,
+            company_id=second_company_id,
+            position=2,
+            canonical_name=second_company.canonical_name,
+            primary_category=AiCategory.FOUNDATION_MODELS,
+        )
+    )
+    session.commit()
+    membership_fingerprint = sha256(
+        "\n".join(sorted((str(COMPANY_ID), str(second_company_id)))).encode()
+    ).hexdigest()
+    round_summary = manifest_service.create_discovery_round(
+        session,
+        manifest_version=MANIFEST_VERSION,
+        name="entry-evidence-frozen-membership",
+        config_fingerprint="b" * 64,
+        model_fingerprint="c" * 64,
+        membership_fingerprint=membership_fingerprint,
+        intended_member_count=2,
+        started_at=OBSERVED_AT,
+    )
+
+    first = manifest_service.record_discovery_result_in_round(
+        session,
+        round_id=round_summary.round_id,
+        command=command(
+            status=DiscoveryStatus.ACCEPTED,
+            observed_at=OBSERVED_AT + timedelta(minutes=1),
+        ),
+    )
+    reconcile = manifest_service.reconcile_evidence_audit_samples
+    partial = reconcile(session, round_id=round_summary.round_id)
+
+    assert partial.complete is False
+    assert partial.created == 0
+    assert session.scalar(select(func.count()).select_from(EntryEvidenceAuditSample)) == 0
+    session.rollback()
+
+    second_command = command(
+        status=DiscoveryStatus.ACCEPTED,
+        observed_at=OBSERVED_AT + timedelta(minutes=2),
+    )
+    second_command = second_command.model_copy(
+        update={
+            "company_id": second_company_id,
+            "result": second_command.result.model_copy(
+                update={
+                    "candidate_url": "https://jobs.example.test/second",
+                    "normalized_url": "https://jobs.example.test/second",
+                }
+            ),
+        }
+    )
+    manifest_service.record_discovery_result_in_round(
+        session,
+        round_id=round_summary.round_id,
+        command=second_command,
+        predecessor_observation_id=None,
+    )
+    completed = reconcile(session, round_id=round_summary.round_id)
+    replay = reconcile(session, round_id=round_summary.round_id)
+
+    assert first.observation_created is True
+    assert completed.complete is True
+    assert completed.created == 1
+    assert completed.total == 1
+    assert replay.created == 0
+    assert replay.total == 1
+    assert session.scalar(select(func.count()).select_from(EntryEvidenceAuditSample)) == 1
+    session.rollback()
+
+    with pytest.raises(DiscoveryRecordConflict, match="membership"):
+        manifest_service.create_discovery_round(
+            session,
+            manifest_version=MANIFEST_VERSION,
+            name="entry-evidence-frozen-membership",
+            config_fingerprint="b" * 64,
+            model_fingerprint="c" * 64,
+            membership_fingerprint="e" * 64,
+            intended_member_count=1,
+            started_at=OBSERVED_AT,
+        )
 
 
 def test_concurrent_sqlite_round_creation_replays_after_single_writer_lock(

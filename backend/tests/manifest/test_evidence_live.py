@@ -16,6 +16,7 @@ from app.manifest import cli as manifest_cli
 from app.manifest import service as manifest_service
 from app.manifest.contracts import (
     AiCategory,
+    AtsClassification,
     CandidateDecisionStatus,
     DiscoveryStatus,
     SourceClass,
@@ -30,7 +31,14 @@ from app.manifest.evidence_live import (
     evaluate_evidence_batch,
     parse_evidence_candidates,
 )
-from app.manifest.evidence_policy import AuditStratum, EvidenceAcceptancePolicy
+from app.manifest.evidence_policy import (
+    AuditStratum,
+    EvidenceAcceptancePolicy,
+    IndependentEvidenceValidation,
+    OwnershipValidation,
+    RegisteredSourceValidation,
+    RobotsValidation,
+)
 from app.manifest.models import (
     CompanyManifest,
     CompanyManifestMember,
@@ -66,13 +74,29 @@ def candidate(**overrides: object) -> EvidenceCandidateInput:
         "summary": "Acme AI builds foundation models.",
         "anchor": "Join Acme",
         "source_id": "public_registry",
-        "platform": "moka",
-        "source_registered": True,
-        "robots_approved": True,
-        "ownership_evidence": "official_navigation_anchor:Careers",
     }
     values.update(overrides)
     return EvidenceCandidateInput(**values)
+
+
+def validation(item: EvidenceCandidateInput | None = None) -> IndependentEvidenceValidation:
+    item = candidate() if item is None else item
+    return IndependentEvidenceValidation(
+        registered_source=RegisteredSourceValidation(
+            source_id=item.source_id,
+            exact_source_url=item.source_url,
+            role=SourceRole.CANDIDATE_POOL,
+            registry_fingerprint="f" * 64,
+        ),
+        robots=RobotsValidation(exact_candidate_url=item.candidate_url, allowed=True),
+        ownership=OwnershipValidation(
+            exact_source_url=item.source_url,
+            exact_candidate_url=item.candidate_url,
+            basis="official_navigation_anchor",
+            detail="Careers",
+        ),
+        classification=AtsClassification(platform="moka"),
+    )
 
 
 def enabled_gate(**overrides: object) -> EvidenceBatchGate:
@@ -109,17 +133,27 @@ def test_evidence_input_is_strict_and_bounded_to_twenty_items() -> None:
         parse_evidence_candidates(json.dumps([serialized] * 21).encode())
 
 
+def test_external_input_cannot_assert_acceptance_checks() -> None:
+    serialized = candidate().model_dump(mode="json")
+    serialized.update(
+        {
+            "platform": "moka",
+            "source_registered": True,
+            "robots_approved": True,
+            "ownership_evidence": "official_navigation_anchor:Careers",
+        }
+    )
+
+    with pytest.raises(EvidenceInputError, match="evidence input is invalid"):
+        parse_evidence_candidates(json.dumps([serialized]).encode())
+
+
 def test_evidence_input_rejects_secret_bearing_public_urls() -> None:
     with pytest.raises(ValueError, match="sensitive"):
         candidate(candidate_url="https://jobs.acme.example/careers?token=super-secret")
 
 
-def test_evidence_input_rejects_sensitive_ownership_unknown_platform_and_duplicate_url() -> None:
-    with pytest.raises(ValueError, match="public diagnostics"):
-        candidate(ownership_evidence="api_key=super-secret")
-    with pytest.raises(ValueError, match="known platform"):
-        candidate(platform="unknown")
-
+def test_evidence_input_rejects_duplicate_url() -> None:
     duplicate_url = candidate(company_id=UUID(int=102)).model_dump(mode="json")
     with pytest.raises(EvidenceInputError, match="evidence input is invalid"):
         parse_evidence_candidates(
@@ -177,6 +211,7 @@ def test_model_receives_only_the_public_projection_and_returns_strict_assessment
             llm_client=llm,
             policy=EvidenceAcceptancePolicy(confidence_threshold=Decimal("0.90")),
             gate=enabled_gate(),
+            validations={candidate().company_id: validation()},
         )
     )
 
@@ -202,20 +237,25 @@ def test_hard_rejection_and_paused_stratum_do_not_call_model() -> None:
         paused_strata=frozenset({AuditStratum(source_id="paused_registry", platform="moka")})
     )
 
+    unregistered = candidate(source_id="unregistered_registry")
+    paused = candidate(source_id="paused_registry", company_id=UUID(int=102))
     evaluations = asyncio.run(
         evaluate_evidence_batch(
-            (
-                candidate(robots_approved=False),
-                candidate(source_id="paused_registry"),
-            ),
+            (unregistered, paused),
             llm_client=llm,
             policy=policy,
             gate=enabled_gate(),
+            validations={
+                unregistered.company_id: validation(unregistered).model_copy(
+                    update={"registered_source": None}
+                ),
+                paused.company_id: validation(paused),
+            },
         )
     )
 
     assert [item.decision.reason_code for item in evaluations] == [
-        "robots_disallowed",
+        "unregistered_source",
         "audit_stratum_paused",
     ]
     assert [item.model_called for item in evaluations] == [False, False]
@@ -246,6 +286,7 @@ def test_model_failures_are_reduced_to_sanitized_reason_codes(
             llm_client=llm,
             policy=EvidenceAcceptancePolicy(),
             gate=enabled_gate(),
+            validations={candidate().company_id: validation()},
         )
     )
 
@@ -319,6 +360,18 @@ def live_operator(
     monkeypatch.setattr(manifest_cli, "_load_settings", lambda: settings)
     monkeypatch.setattr(manifest_cli, "_session_factory", lambda: factory)
     monkeypatch.setattr(manifest_cli, "_load_registry", lambda _path: registry)
+    monkeypatch.setattr(
+        manifest_cli,
+        "_independent_evidence_validations",
+        lambda candidates, **_kwargs: {
+            item.company_id: (
+                validation(item)
+                if item.source_url == "https://association.example.org/members/acme"
+                else validation(item).model_copy(update={"registered_source": None})
+            )
+            for item in candidates
+        },
+    )
     yield factory, evidence_path, settings
     engine.dispose()
 
@@ -393,6 +446,28 @@ def test_live_operator_persists_observation_and_audit_then_honors_pause(
         )
     assert observation.status is DiscoveryStatus.ACCEPTED
     assert observation.method == "entry_evidence_model"
+    assert observation.public_evidence == {
+        "source_url": "https://association.example.org/members/acme",
+        "candidate_url": "https://jobs.acme.example/careers",
+        "page_title": "Acme AI careers",
+        "visible_summary": "Acme AI builds foundation models.",
+        "anchor_text": "Join Acme",
+    }
+    assert observation.model_assessment == {
+        "confidence": "0.96",
+        "rationale": "The public evidence consistently identifies the company entry.",
+        "risk_labels": [],
+    }
+    assert observation.independent_validation is not None
+    assert all(
+        len(value) == 64
+        for value in (
+            observation.prompt_fingerprint,
+            observation.schema_fingerprint,
+            observation.policy_fingerprint,
+            observation.registry_fingerprint,
+        )
+    )
     assert sample.observation_id == observation.id
 
     manifest_service.record_evidence_audit_finding(
@@ -402,12 +477,6 @@ def test_live_operator_persists_observation_and_audit_then_honors_pause(
         reason="The sampled URL belongs to another legal entity.",
         audited_at=sample.selected_at,
     )
-    with factory.begin() as session:
-        stored_predecessor = session.get(EntryDiscoveryObservation, observation.id)
-        assert stored_predecessor is not None
-        stored_predecessor.observed_at = datetime(
-            2030, 1, 1, tzinfo=UTC, microsecond=999_999
-        )
     paused_llm = FakeLlm(assessment_json())
     monkeypatch.setattr(manifest_cli, "_evidence_llm_client", lambda _settings: paused_llm)
 

@@ -1,0 +1,11 @@
+{
+  "results": [
+    {
+      "company_id": "11111111-2222-3333-4444-555555555576",
+      "company_name": "BOSS直聘",
+      "status": "page_failed:http_status",
+      "documents_found": 0,
+      "error_code": "page_failed:http_status"
+    }
+  ]
+}
