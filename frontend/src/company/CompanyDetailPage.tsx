@@ -93,6 +93,7 @@ function DetailContent({ company, activeJobCount }: { company: CompanyDetail; ac
   const profileFields = company.profile_fields ?? [];
   const sources = company.sources ?? [];
   const registrationNumber = businessRegistrationNumber(filings);
+  const coverage = company.recruiting_coverage;
   return (
     <>
       <div className="detail-identity">
@@ -107,6 +108,11 @@ function DetailContent({ company, activeJobCount }: { company: CompanyDetail; ac
         {website ? <a className="secondary-button detail-website" href={website} target="_blank" rel="noreferrer">公司官网<ExternalLink aria-hidden="true" size={15} /></a> : null}
       </div>
       {company.description ? <p className="detail-description">{company.description}</p> : null}
+      <section className="recruiting-coverage" aria-label="Recruiting coverage">
+        <strong>{coverage.status === "active_roles" ? "正在招聘" : coverage.status === "empty_confirmed" ? "已核验暂无职位" : coverage.status === "entry_discovery_pending" ? "招聘入口待发现" : coverage.status === "collection_incomplete" ? "招聘信息待复查" : "招聘信息已过期"}</strong>
+        {coverage.status === "active_roles" && coverage.active_job_count !== null ? <span>{` · ${coverage.active_job_count} 个在招职位`}</span> : null}
+        <span>{coverage.last_checked_at ? ` · 最近核验 ${coverage.last_checked_at.slice(0, 10)}` : " · 尚未核验"}</span>
+      </section>
       <dl className="company-facts">
         <div><dt>别名</dt><dd>{aliases.length ? aliases.join("、") : "暂无别名"}</dd></div>
         <div><dt>职位记录</dt><dd>{company.job_count ?? 0} 个</dd></div>
