@@ -21,6 +21,7 @@ const company: CompanyListItem = {
   last_collected_at: null,
   created_at: "2026-08-04T00:00:00Z",
   updated_at: "2026-08-04T00:00:00Z",
+  recruiting_coverage: { status: "entry_discovery_pending", active_job_count: null, last_checked_at: null, last_successful_at: null, freshness: "unknown", reason_code: null },
 };
 
 function collection(status: CollectionRequest["status"], overrides: Partial<CollectionRequest> = {}): CollectionRequest {

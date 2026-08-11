@@ -20,6 +20,7 @@ const deepSeek: CompanyListItem = {
   last_collected_at: "2026-07-30T08:00:00Z",
   created_at: "2026-07-01T00:00:00Z",
   updated_at: "2026-07-30T08:00:00Z",
+  recruiting_coverage: { status: "active_roles", active_job_count: 2, last_checked_at: "2026-07-30T08:00:00Z", last_successful_at: "2026-07-30T08:00:00Z", freshness: "fresh", reason_code: null },
 };
 
 const moonshot: CompanyListItem = {
@@ -36,6 +37,7 @@ const moonshot: CompanyListItem = {
   last_collected_at: null,
   created_at: "2026-07-02T00:00:00Z",
   updated_at: "2026-07-29T08:00:00Z",
+  recruiting_coverage: { status: "entry_discovery_pending", active_job_count: null, last_checked_at: null, last_successful_at: null, freshness: "unknown", reason_code: null },
 };
 
 const page = (items: CompanyListItem[] = [deepSeek], currentPage = 1, total = items.length) => ({

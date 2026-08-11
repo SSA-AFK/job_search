@@ -9,6 +9,7 @@ import type {
   CompanySort,
   FundingStage,
   Page,
+  RecruitingCoverage,
 } from "../api/types";
 
 type CompanyResultsProps = {
@@ -89,6 +90,7 @@ function CompanyRow({ company }: { company: CompanyListItem }) {
             .filter(Boolean)
             .join(" · ")}
         </p>
+        <RecruitingSummary coverage={company.recruiting_coverage} />
         {company.description ? <p className="company-description">{company.description}</p> : null}
       </div>
       {websiteUrl ? (
@@ -106,6 +108,25 @@ function CompanyRow({ company }: { company: CompanyListItem }) {
         <span className="website-unavailable">官网待确认</span>
       )}
     </li>
+  );
+}
+
+const recruitingLabels: Record<RecruitingCoverage["status"], string> = {
+  active_roles: "正在招聘",
+  empty_confirmed: "已核验暂无职位",
+  entry_discovery_pending: "招聘入口待发现",
+  collection_incomplete: "招聘信息待复查",
+  stale: "招聘信息已过期",
+};
+
+function RecruitingSummary({ coverage }: { coverage: RecruitingCoverage }) {
+  const checked = coverage.last_checked_at?.slice(0, 10);
+  return (
+    <p className={`recruiting-summary recruiting-summary--${coverage.status}`}>
+      <strong>{recruitingLabels[coverage.status]}</strong>
+      {coverage.status === "active_roles" && coverage.active_job_count !== null ? ` · ${coverage.active_job_count} 个职位` : ""}
+      {checked ? ` · 最近核验 ${checked}` : ""}
+    </p>
   );
 }
 

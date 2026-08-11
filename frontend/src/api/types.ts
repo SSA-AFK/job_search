@@ -16,6 +16,15 @@ export type CompanyScale =
   | "500_plus"
   | "unknown";
 export type VerificationStatus = "verified" | "pending_verification";
+export type RecruitingStatus = "active_roles" | "empty_confirmed" | "entry_discovery_pending" | "collection_incomplete" | "stale";
+export type RecruitingCoverage = {
+  status: RecruitingStatus;
+  active_job_count: number | null;
+  last_checked_at: string | null;
+  last_successful_at: string | null;
+  freshness: "fresh" | "stale" | "unknown";
+  reason_code: string | null;
+};
 
 export type CompanySearchParams = {
   q?: string;
@@ -42,6 +51,7 @@ export type CompanyListItem = {
   last_collected_at: string | null;
   created_at: string;
   updated_at: string;
+  recruiting_coverage: RecruitingCoverage;
 };
 
 export type Page<T> = {

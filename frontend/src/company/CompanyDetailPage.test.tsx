@@ -24,6 +24,7 @@ const company: CompanyDetail = {
   last_collected_at: "2026-07-30T08:00:00Z",
   created_at: "2026-07-01T00:00:00Z",
   updated_at: "2026-07-30T08:00:00Z",
+  recruiting_coverage: { status: "active_roles", active_job_count: 1, last_checked_at: "2026-07-30T08:00:00Z", last_successful_at: "2026-07-30T08:00:00Z", freshness: "fresh", reason_code: null },
   aliases: ["深度求索"],
   job_count: 2,
   filings: [

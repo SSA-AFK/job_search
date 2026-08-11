@@ -129,6 +129,10 @@ img.company-logo { border: 1px solid var(--border); padding: 5px; }
 
 .company-tags { margin: 5px 0 0; color: var(--muted); font-size: 0.75rem; line-height: 1.5; overflow-wrap: anywhere; }
 
+.recruiting-summary { margin: 7px 0 0; font-size: 0.75rem; line-height: 1.5; color: var(--muted); }
+.recruiting-summary--active_roles strong { color: oklch(0.36 0.12 150); }
+.recruiting-summary--collection_incomplete strong, .recruiting-summary--stale strong { color: var(--danger); }
+
 .company-description { max-width: 75ch; margin: 7px 0 0; color: var(--ink); font-size: 0.8125rem; line-height: 1.55; text-wrap: pretty; }
 
 .company-website, .website-unavailable { align-self: center; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; font-size: 0.8125rem; }
