@@ -12,6 +12,7 @@ dependencies = [
     "celery[redis]",
     "fastapi",
     "httpx",
+    "openpyxl",
     "pydantic-settings",
     "python-multipart",
     "rapidfuzz",
