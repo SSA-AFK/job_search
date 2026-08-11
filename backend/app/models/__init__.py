@@ -12,11 +12,13 @@ from app.models.enums import (
     JobEntryStatus,
     JobSnapshotStatus,
     JobType,
+    RecruitingStatus,
     RunType,
     VerificationStatus,
 )
 from app.models.filing import RegulatoryFiling
 from app.models.financing import FundingEvent, FundingEventSource, FundingInvestor
+from app.models.import_batch import ImportBatch, ImportItem
 from app.models.job import JobPosting, JobSource
 from app.models.job_entry import JobCollectionSnapshot, JobEntry
 from app.models.source import CompanyProfileField, CompanySource, SourceDocument
@@ -114,6 +116,8 @@ __all__ = [
     "FundingEventSource",
     "FundingInvestor",
     "FundingStage",
+    "ImportBatch",
+    "ImportItem",
     "JobCollectionSnapshot",
     "JobEntry",
     "JobEntryStatus",
@@ -121,6 +125,7 @@ __all__ = [
     "JobSnapshotStatus",
     "JobSource",
     "JobType",
+    "RecruitingStatus",
     "RegulatoryFiling",
     "RunType",
     "SourceDocument",

@@ -3,7 +3,6 @@
 import re
 from typing import Protocol
 
-from app.ingestion.deduplication.semantic import LlmSemanticDuplicateJudge
 from app.ingestion.extraction.client import OpenAICompatibleLlmClient
 from app.ingestion.extraction.crew import CrewExtractor
 from app.ingestion.providers.ats import AtsProvider
@@ -163,5 +162,4 @@ def create_runtime_components(config: RuntimeSettings) -> RuntimeComponents:
     return RuntimeComponents(
         providers=controlled,
         extractor=CrewExtractor(llm),
-        semantic_judge=LlmSemanticDuplicateJudge(llm),
     )

@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 
 from app.collection.repository import CollectionRepository
 from app.ingestion.contracts import ProviderQuery, ProviderResult, RawDocument
-from app.ingestion.deduplication.semantic import DuplicateDecision
 from app.ingestion.extraction.schemas import (
     CompanyCandidate,
     CompanyProfileCandidate,
@@ -37,11 +36,6 @@ class Extractor:
 
     async def extract_jobs(self, _company: CompanyRef, _documents):
         return ()
-
-
-class SemanticJudge:
-    async def jobs_are_duplicates(self, _left, _right) -> DuplicateDecision:
-        return DuplicateDecision(False)
 
 
 class DocumentProvider:
@@ -88,7 +82,7 @@ def test_collection_task_reuses_same_run_and_closes_four_sessions(tmp_path, monk
     monkeypatch.setattr("app.tasks.collection.SessionLocal", session_factory)
     monkeypatch.setattr(
         "app.tasks.collection.load_runtime_components",
-        lambda: RuntimeComponents((Provider(),), Extractor(), SemanticJudge()),
+        lambda: RuntimeComponents((Provider(),), Extractor()),
     )
 
     first = run_ingestion.apply(args=[str(run.id)]).get()
@@ -195,7 +189,6 @@ def test_collection_task_requeues_real_running_run_before_retry(tmp_path, monkey
             persistence_write_session=sessions[3],
             providers=(DocumentProvider(),),
             extractor=Extractor(),
-            semantic_judge=SemanticJudge(),
         )
 
         def fail_persistence(*_args, **_kwargs):
@@ -248,7 +241,6 @@ def test_collection_task_terminalizes_real_running_run_after_retry_exhaustion(
             persistence_write_session=sessions[3],
             providers=(DocumentProvider(),),
             extractor=Extractor(),
-            semantic_judge=SemanticJudge(),
         )
 
         def fail_persistence(*_args, **_kwargs):
@@ -323,7 +315,6 @@ def test_collection_task_retries_real_terminal_write_infrastructure_failure(tmp_
             persistence_write_session=sessions[3],
             providers=(DocumentProvider(),),
             extractor=FailingExtractor(),
-            semantic_judge=SemanticJudge(),
         )
 
         def fail_terminal_write(*_args, **_kwargs):
@@ -379,7 +370,6 @@ def test_collection_task_recovers_real_running_state_with_a_fresh_session(tmp_pa
             persistence_write_session=sessions[3],
             providers=(DocumentProvider(),),
             extractor=Extractor(),
-            semantic_judge=SemanticJudge(),
         )
         orchestrator.runs.requeue_for_retry = lambda _run_id, **_kwargs: pytest.fail(
             "reused failed state session"

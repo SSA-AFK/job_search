@@ -15,7 +15,6 @@ from app.company_identity.contracts import (
 )
 from app.company_identity.resolver import CompanyIdentityResolver
 from app.ingestion.contracts import ProviderQuery, ProviderResult, RawDocument
-from app.ingestion.deduplication.semantic import DuplicateDecision
 from app.ingestion.errors import RetryableInfrastructureError
 from app.ingestion.extraction.schemas import (
     CompanyCandidate,
@@ -109,11 +108,6 @@ class Extractor:
         )
 
 
-class SemanticJudge:
-    async def jobs_are_duplicates(self, _left: object, _right: object) -> DuplicateDecision:
-        return DuplicateDecision(False)
-
-
 class FuzzyIdentityRepository:
     async def find_exact_name_owners(
         self, _names: frozenset[str]
@@ -203,7 +197,6 @@ async def test_review_required_records_once_and_writes_no_business_rows(
             persistence_write_session=write,
             providers=(Provider(),),
             extractor=Extractor(),
-            semantic_judge=SemanticJudge(),
         )
         orchestrator.batch_builder.identity_resolver = CompanyIdentityResolver(
             FuzzyIdentityRepository()
@@ -271,7 +264,6 @@ async def test_review_store_unavailable_is_retryable_and_writes_nothing(
             persistence_write_session=write,
             providers=(Provider(),),
             extractor=Extractor(),
-            semantic_judge=SemanticJudge(),
         )
         orchestrator.batch_builder.identity_resolver = CompanyIdentityResolver(
             FuzzyIdentityRepository()

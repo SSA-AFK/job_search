@@ -28,6 +28,7 @@ from app.ingestion.contracts import (
     RawDocument,
 )
 from app.ingestion.deduplication.job import JobDeduplicator
+from app.ingestion.identity_matching import company_name_mentioned, match_company_name
 from app.ingestion.errors import (
     ProviderError,
     RetryableInfrastructureError,
@@ -87,6 +88,12 @@ class _Diagnostic:
         if self.provider is not None:
             value["provider"] = self.provider
         return value
+
+
+@dataclass(frozen=True)
+class AtsCareerUrl:
+    url: str
+    source_url: str
 
 
 class CrawlRunState(RunResultSource, Protocol):
@@ -485,6 +492,8 @@ class IngestionOrchestrator:
                     error_code=provider_error or "no_documents",
                     diagnostics=diagnostics,
                 )
+            # Scan raw documents for ATS career URLs (regex, no LLM)
+            ats_career_urls = _scan_ats_career_urls(documents, request.query)
             stage = "discovery"
             discovered = await self.extractor.discover(documents)
             selected, discovery_error = _select_company(request.query, discovered)
@@ -533,6 +542,36 @@ class IngestionOrchestrator:
                                 query=request.query,
                                 website=selected.career_page_url,
                                 allowed_hosts=frozenset({career_host}),
+                            ),
+                        ),
+                    )
+                    (
+                        providers_attempted,
+                        documents,
+                        provider_error,
+                        diagnostics,
+                    ) = self._merge_outcomes(outcomes)
+            # Also try ATS URLs found by regex scanning (bypasses LLM entirely)
+            processed_ats_urls: set[str] = set()
+            for ats_candidate in ats_career_urls:
+                url = ats_candidate.url
+                if url in processed_ats_urls:
+                    continue
+                processed_ats_urls.add(url)
+                try:
+                    parsed = HttpUrl(url)
+                except Exception:
+                    continue
+                ats_host = _normalized_website_host(parsed)
+                if ats_host is not None:
+                    outcomes = self._merge_outcome_dicts(
+                        outcomes,
+                        await self._collect_providers(
+                            website_providers,
+                            ProviderQuery(
+                                query=request.query,
+                                website=parsed,
+                                allowed_hosts=frozenset({ats_host}),
                             ),
                         ),
                     )
@@ -752,6 +791,34 @@ class _PipelineError(Exception):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+_ATS_URL_PATTERNS = (
+    re.compile(r"https?://jobs\.feishu\.cn/[a-zA-Z0-9_@./#?&=-]+"),
+    re.compile(r"https?://app\.mokahr\.com/[a-zA-Z0-9_@./#?&=-]+"),
+)
+
+
+def _scan_ats_career_urls(
+    documents: tuple[RawDocument, ...], requested_name: str
+) -> tuple[AtsCareerUrl, ...]:
+    """Return known ATS URLs only when their Zhihu document matches the company."""
+    seen: set[str] = set()
+    results: list[AtsCareerUrl] = []
+    for doc in documents:
+        if not doc.text:
+            continue
+        observed = doc.title or ""
+        exact_mention = company_name_mentioned(requested_name, doc.text)
+        if not exact_mention and not match_company_name(requested_name, observed).accepted:
+            continue
+        for pattern in _ATS_URL_PATTERNS:
+            for match in pattern.finditer(doc.text):
+                url = match.group(0).rstrip("/")
+                if url not in seen:
+                    seen.add(url)
+                    results.append(AtsCareerUrl(url=url, source_url=str(doc.url)))
+    return tuple(sorted(results, key=lambda item: item.url))
 
 
 def _provider_name(provider: Provider) -> str:

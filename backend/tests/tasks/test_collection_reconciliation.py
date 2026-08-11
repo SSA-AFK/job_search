@@ -47,7 +47,6 @@ def test_checked_in_runtime_factory_composes_a_worker_without_operator_code() ->
         "zhihu_global_search"
     ]
     assert type(components.extractor).__name__ == "CrewExtractor"
-    assert type(components.semantic_judge).__name__ == "LlmSemanticDuplicateJudge"
 
 
 def test_checked_in_runtime_factory_fails_fast_without_llm_configuration() -> None:

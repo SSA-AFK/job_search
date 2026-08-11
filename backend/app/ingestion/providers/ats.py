@@ -1,6 +1,6 @@
 from urllib.parse import urlsplit
 
-from app.ingestion.contracts import ProviderQuery, ProviderResult
+from app.ingestion.contracts import ParsedJob, ProviderQuery, ProviderResult
 from app.ingestion.providers.ats_extractors.feishu import FeishuAtsExtractor
 from app.ingestion.providers.ats_extractors.moka import MokaAtsExtractor
 from app.ingestion.providers.ats_renderer import AtsRenderer
@@ -59,4 +59,19 @@ class AtsProvider:
         warnings: list[str] = []
         if result.error_code is not None and result.error_code != "no_candidates":
             warnings.append(result.error_code)
-        return ProviderResult(documents=(document,), warnings=tuple(warnings))
+        return ProviderResult(
+            documents=(document,),
+            warnings=tuple(warnings),
+            parsed_jobs=tuple(
+                ParsedJob(
+                    title=candidate.title,
+                    url=str(candidate.url),
+                    city=candidate.city,
+                    employment_type=candidate.employment_type,
+                    provider=f"ats_{platform}",
+                    source_raw_id=candidate.external_id or str(candidate.url),
+                    external_id=candidate.external_id,
+                )
+                for candidate in result.candidates
+            ),
+        )

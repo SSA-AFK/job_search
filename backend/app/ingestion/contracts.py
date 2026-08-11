@@ -7,6 +7,20 @@ from typing import Annotated, Protocol, runtime_checkable
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, HttpUrl
 
 
+class ParsedJob(BaseModel):
+    """Pre-parsed job from a structured source (e.g. ATS), bypasses LLM extraction."""
+
+    model_config = ConfigDict(frozen=True)
+
+    title: str = Field(min_length=1, max_length=500)
+    url: str = Field(min_length=1, max_length=2_000)
+    city: str | None = Field(default=None, max_length=200)
+    employment_type: str | None = Field(default=None, max_length=50)
+    provider: str | None = Field(default=None, min_length=1, max_length=50)
+    source_raw_id: str | None = Field(default=None, max_length=255)
+    external_id: str | None = Field(default=None, max_length=255)
+
+
 def _bounded_document_url(value: HttpUrl) -> HttpUrl:
     if len(str(value)) > 2_000:
         raise ValueError("URL must not exceed 2000 characters")
@@ -48,6 +62,9 @@ DocumentUrl = Annotated[
 ]
 
 
+from app.ingestion.extraction.schemas import JobCandidate
+
+
 class ProviderQuery(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -75,6 +92,7 @@ class ProviderResult(BaseModel):
     documents: tuple[RawDocument, ...]
     truncated: bool = False
     warnings: tuple[str, ...] = ()
+    parsed_jobs: tuple[ParsedJob, ...] = ()
 
 
 class Provider(Protocol):

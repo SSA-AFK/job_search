@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -11,6 +11,7 @@ from app.models.enums import (
     FilingType,
     FundingStage,
     JobType,
+    RecruitingStatus,
     VerificationStatus,
 )
 
@@ -64,6 +65,16 @@ class CompanyListItem(BaseModel):
     last_collected_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    recruiting_coverage: "RecruitingCoverageItem"
+
+
+class RecruitingCoverageItem(BaseModel):
+    status: RecruitingStatus
+    active_job_count: int | None
+    last_checked_at: datetime | None
+    last_successful_at: datetime | None
+    freshness: Literal["fresh", "stale", "unknown"]
+    reason_code: str | None
 
 
 class FilingItem(BaseModel):

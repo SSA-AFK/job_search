@@ -69,7 +69,6 @@ def build_runtime_orchestrator() -> tuple[
             persistence_write_session=sessions[3],
             providers=components.providers,
             extractor=components.extractor,
-            semantic_judge=components.semantic_judge,
         )
     except Exception:
         for session in sessions:

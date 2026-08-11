@@ -1,0 +1,1 @@
+"""Recruiting-coverage read models."""

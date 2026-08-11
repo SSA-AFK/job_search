@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -17,9 +18,11 @@ from app.companies.schemas import (
     JobQuery,
     JobSourceItem,
     Page,
+    RecruitingCoverageItem,
 )
 from app.core.errors import CompanyNotFoundError
 from app.models import Company, CompanySource, JobPosting, SourceDocument
+from app.recruiting_coverage.service import RecruitingCoverageService
 
 
 class CompanyService:
@@ -102,6 +105,7 @@ class CompanyService:
                 for event in company._loaded_funding_events  # type: ignore[attr-defined]
             ],
             job_count=company._loaded_job_count,  # type: ignore[attr-defined]
+            recruiting_coverage=self._recruiting_coverage_item(company.id),
         )
         if self.cache is not None:
             self.cache.set_detail(company_id, detail.model_dump_json())
@@ -157,9 +161,24 @@ class CompanyService:
             "updated_at": company.updated_at,
         }
 
-    @classmethod
-    def _company_list_item(cls, company: Company) -> CompanyListItem:
-        return CompanyListItem(**cls._company_fields(company))
+    def _company_list_item(self, company: Company) -> CompanyListItem:
+        return CompanyListItem(
+            **self._company_fields(company),
+            recruiting_coverage=self._recruiting_coverage_item(company.id),
+        )
+
+    def _recruiting_coverage_item(self, company_id: object) -> RecruitingCoverageItem:
+        coverage = RecruitingCoverageService(self.repository.session).build(
+            company_id, now=datetime.now(UTC)
+        )
+        return RecruitingCoverageItem(
+            status=coverage.status,
+            active_job_count=coverage.active_job_count,
+            last_checked_at=coverage.last_checked_at,
+            last_successful_at=coverage.last_successful_at,
+            freshness=coverage.freshness,
+            reason_code=coverage.reason_code,
+        )
 
     @staticmethod
     def _source_summary(

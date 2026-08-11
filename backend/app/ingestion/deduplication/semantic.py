@@ -1,11 +1,8 @@
-"""The narrow advisory boundary for ambiguous job matches."""
+"""Rule-based advisory boundary for ambiguous job matches."""
 
-import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
-
-from app.ingestion.errors import ExtractionError
-from app.ingestion.extraction.client import LlmClient
+from difflib import SequenceMatcher
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.ingestion.deduplication.job import JobForComparison
@@ -16,30 +13,12 @@ class DuplicateDecision:
     is_duplicate: bool
 
 
-class SemanticDuplicateJudge(Protocol):
-    async def jobs_are_duplicates(
-        self, left: "JobForComparison", right: "JobForComparison"
-    ) -> DuplicateDecision: ...
-
-
-class LlmSemanticDuplicateJudge:
-    def __init__(self, llm: LlmClient) -> None:
-        self._llm = llm
-
-    async def jobs_are_duplicates(
-        self, left: "JobForComparison", right: "JobForComparison"
-    ) -> DuplicateDecision:
-        prompt = (
-            "Return JSON only as {\"is_duplicate\": true|false}. Compare these "
-            "two jobs as distinct operands:\n"
-            f"left={left!r}\nright={right!r}"
-        )
-        response = await self._llm.complete(prompt)
-        try:
-            payload = json.loads(response)
-            value = payload["is_duplicate"]
-        except (json.JSONDecodeError, KeyError, TypeError) as error:
-            raise ExtractionError(code="invalid_output") from error
-        if type(value) is not bool:
-            raise ExtractionError(code="invalid_output")
-        return DuplicateDecision(value)
+def jobs_are_duplicates(
+    left: "JobForComparison", right: "JobForComparison"
+) -> DuplicateDecision:
+    """Rule-based duplicate judgment: compare title similarity and city match."""
+    similarity = SequenceMatcher(
+        a=left.normalized_title, b=right.normalized_title, autojunk=False
+    ).ratio() * 100
+    city_match = left.city == right.city
+    return DuplicateDecision(is_duplicate=similarity >= 75.0 and city_match)
