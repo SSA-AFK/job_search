@@ -18,7 +18,6 @@ from app.company_identity.service import IdentitySearchUnavailable, record_ident
 from app.core.config import settings
 from app.ingestion.contracts import Provider
 from app.ingestion.deduplication.job import JobDeduplicator
-from app.ingestion.deduplication.semantic import SemanticDuplicateJudge
 from app.ingestion.errors import RetryableInfrastructureError
 from app.ingestion.extraction.crew import Extractor
 from app.ingestion.orchestrator import (
@@ -37,7 +36,6 @@ from app.ingestion.repositories import (
 class RuntimeComponents:
     providers: Sequence[Provider]
     extractor: Extractor
-    semantic_judge: SemanticDuplicateJudge
 
 
 @dataclass(frozen=True)
@@ -65,7 +63,6 @@ def build_ingestion_orchestrator(
     persistence_write_session: Session,
     providers: Sequence[Provider],
     extractor: Extractor,
-    semantic_judge: SemanticDuplicateJudge,
 ) -> IngestionOrchestrator:
     """Build without closing sessions; the caller owns all session lifecycles."""
     runtime_sessions = (
@@ -81,7 +78,7 @@ def build_ingestion_orchestrator(
             SqlAlchemyCompanyDeduplicationRepository(dedup_read_session)
         ),
         job_deduplicator=JobDeduplicator(
-            SqlAlchemyJobDeduplicationRepository(dedup_read_session), semantic_judge
+            SqlAlchemyJobDeduplicationRepository(dedup_read_session)
         ),
     )
     return IngestionOrchestrator(

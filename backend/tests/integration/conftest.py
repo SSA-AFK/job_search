@@ -15,7 +15,6 @@ from app.company_identity.contracts import CompanyIdentityCandidateMatch
 from app.core.config import settings
 from app.core.database import get_session
 from app.ingestion.contracts import Provider
-from app.ingestion.deduplication.semantic import DuplicateDecision
 from app.ingestion.extraction.crew import CrewExtractor
 from app.main import create_app
 from app.models import Base
@@ -37,11 +36,6 @@ class FakeLlm:
         return self.responses.pop(0)
 
 
-class FakeSemanticJudge:
-    async def jobs_are_duplicates(self, _left: object, _right: object) -> DuplicateDecision:
-        return DuplicateDecision(False)
-
-
 @dataclass
 class IntegrationHarness:
     engine: Any
@@ -60,7 +54,6 @@ class IntegrationHarness:
         return RuntimeComponents(
             providers=self.providers,
             extractor=CrewExtractor(self.fake_llm),
-            semantic_judge=FakeSemanticJudge(),
         )
 
 

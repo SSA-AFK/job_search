@@ -1,4 +1,4 @@
-"""Company-scoped job resolution with bounded semantic review."""
+"""Company-scoped job resolution with bounded duplicate detection."""
 
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -6,13 +6,12 @@ from difflib import SequenceMatcher
 from typing import Protocol
 from uuid import UUID
 
-from app.ingestion.deduplication.semantic import SemanticDuplicateJudge
+from app.ingestion.deduplication.semantic import jobs_are_duplicates
 from app.ingestion.extraction.schemas import EmploymentType, JobCandidate
 from app.ingestion.normalization.job import normalize_job
 from app.models.enums import JobType
 
-_SEMANTIC_MINIMUM = 75.0
-_SEMANTIC_MAXIMUM = 85.0
+_SIMILARITY_THRESHOLD = 75.0
 
 
 @dataclass(frozen=True)
@@ -45,11 +44,8 @@ class JobDeduplicationRepository(Protocol):
 
 
 class JobDeduplicator:
-    def __init__(
-        self, repository: JobDeduplicationRepository, semantic_judge: SemanticDuplicateJudge
-    ) -> None:
+    def __init__(self, repository: JobDeduplicationRepository) -> None:
         self._repository = repository
-        self._semantic_judge = semantic_judge
 
     async def resolve(self, company_id: UUID, candidate: JobCandidate) -> JobMatch:
         if candidate.provider is not None and candidate.source_raw_id is not None:
@@ -77,12 +73,10 @@ class JobDeduplicator:
             default=None,
             key=lambda result: (result[0], str(result[1].job_posting_id)),
         )
-        if best_match is None or best_match[0] < _SEMANTIC_MINIMUM:
+        if best_match is None or best_match[0] < _SIMILARITY_THRESHOLD:
             return JobMatch("new", None)
-        if best_match[0] > _SEMANTIC_MAXIMUM:
-            return JobMatch("existing", best_match[1].job_posting_id)
 
-        decision = await self._semantic_judge.jobs_are_duplicates(
+        decision = jobs_are_duplicates(
             JobForComparison(
                 job_posting_id=None,
                 normalized_title=normalized.normalized_title,

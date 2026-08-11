@@ -5,18 +5,12 @@ from uuid import UUID
 import pytest
 
 from app.ingestion.deduplication.job import JobDeduplicator, JobForComparison, SourceJobMatch
-from app.ingestion.deduplication.semantic import DuplicateDecision
 from app.ingestion.extraction.schemas import EmploymentType, JobCandidate
 from app.models.enums import JobType
 
 COMPANY_ID = UUID("00000000-0000-0000-0000-000000000010")
 EXISTING_JOB_ID = UUID("00000000-0000-0000-0000-000000000011")
 OTHER_COMPANY_ID = UUID("00000000-0000-0000-0000-000000000012")
-
-
-@pytest.fixture
-def semantic_judge() -> "FakeSemanticJudge":
-    return FakeSemanticJudge(DuplicateDecision(is_duplicate=True))
 
 
 @pytest.fixture
@@ -45,12 +39,12 @@ def repository() -> "FakeJobRepository":
 
 
 @pytest.fixture
-def job_deduplicator(repository: "FakeJobRepository", semantic_judge: "FakeSemanticJudge") -> JobDeduplicator:
-    return JobDeduplicator(repository, semantic_judge)
+def job_deduplicator(repository: "FakeJobRepository") -> JobDeduplicator:
+    return JobDeduplicator(repository)
 
 
-def test_exact_source_id_wins_without_fuzzy_or_semantic_judgment(
-    job_deduplicator: JobDeduplicator, semantic_judge: "FakeSemanticJudge"
+def test_exact_source_id_wins_without_fuzzy(
+    job_deduplicator: JobDeduplicator,
 ) -> None:
     match = asyncio.run(
         job_deduplicator.resolve(
@@ -61,20 +55,18 @@ def test_exact_source_id_wins_without_fuzzy_or_semantic_judgment(
 
     assert match.kind == "existing"
     assert match.job_posting_id == EXISTING_JOB_ID
-    assert semantic_judge.calls == []
 
 
 def test_same_title_in_different_city_is_not_auto_merged(
-    job_deduplicator: JobDeduplicator, semantic_judge: "FakeSemanticJudge"
+    job_deduplicator: JobDeduplicator,
 ) -> None:
     match = asyncio.run(job_deduplicator.resolve(COMPANY_ID, job_candidate(location="beijing")))
 
     assert match.kind == "new"
-    assert semantic_judge.calls == []
 
 
 def test_exact_source_from_a_different_company_is_not_merged(
-    job_deduplicator: JobDeduplicator, semantic_judge: "FakeSemanticJudge"
+    job_deduplicator: JobDeduplicator,
 ) -> None:
     match = asyncio.run(
         job_deduplicator.resolve(
@@ -84,39 +76,33 @@ def test_exact_source_from_a_different_company_is_not_merged(
     )
 
     assert match.kind == "new"
-    assert semantic_judge.calls == []
 
 
 @pytest.mark.parametrize(
-    ("title", "existing_title", "expected_kind", "semantic_calls"),
+    ("title", "existing_title", "expected_kind"),
     [
         (
             "a" * 87 + "b" * 15,
             "a" * 87 + "c" * 16,
             "existing",
-            1,
-        ),  # 84.9% against the existing title.
+        ),  # 84.9% similarity -> merge
         (
             "a" * 85 + "b" * 15,
             "a" * 85 + "c" * 15,
             "existing",
-            1,
-        ),  # 85.0% is still in the ambiguity band.
+        ),  # 85.0% similarity -> merge
         (
             "a" * 86 + "b" * 15,
             "a" * 86 + "c" * 15,
             "existing",
-            0,
-        ),  # 85.1% is an automatic merge.
+        ),  # 85.1% similarity -> merge
     ],
 )
-def test_job_similarity_boundaries_choose_semantic_or_automatic_decision(
+def test_job_similarity_boundaries(
     title: str,
     existing_title: str,
     expected_kind: str,
-    semantic_calls: int,
     repository: "FakeJobRepository",
-    semantic_judge: "FakeSemanticJudge",
 ) -> None:
     repository.jobs[COMPANY_ID] = (
         JobForComparison(
@@ -126,20 +112,16 @@ def test_job_similarity_boundaries_choose_semantic_or_automatic_decision(
             job_type=JobType.FULL_TIME,
         ),
     )
-    deduplicator = JobDeduplicator(repository, semantic_judge)
+    deduplicator = JobDeduplicator(repository)
 
     match = asyncio.run(deduplicator.resolve(COMPANY_ID, job_candidate(title=title)))
 
     assert match.kind == expected_kind
     assert match.job_posting_id == EXISTING_JOB_ID
-    assert len(semantic_judge.calls) == semantic_calls
-    if semantic_calls:
-        assert semantic_judge.calls[0][0].job_posting_id is None
-        assert semantic_judge.calls[0][1].job_posting_id == EXISTING_JOB_ID
 
 
 def test_incompatible_job_type_is_not_merged(
-    job_deduplicator: JobDeduplicator, semantic_judge: "FakeSemanticJudge"
+    job_deduplicator: JobDeduplicator,
 ) -> None:
     match = asyncio.run(
         job_deduplicator.resolve(
@@ -149,7 +131,6 @@ def test_incompatible_job_type_is_not_merged(
     )
 
     assert match.kind == "new"
-    assert semantic_judge.calls == []
 
 
 @pytest.mark.parametrize(
@@ -166,7 +147,6 @@ def test_explicit_employment_types_merge_only_when_they_match(
     existing_type: EmploymentType,
     expected_kind: str,
     repository: "FakeJobRepository",
-    semantic_judge: "FakeSemanticJudge",
 ) -> None:
     repository.jobs[COMPANY_ID] = (
         JobForComparison(
@@ -177,18 +157,17 @@ def test_explicit_employment_types_merge_only_when_they_match(
             employment_type=existing_type,
         ),
     )
-    deduplicator = JobDeduplicator(repository, semantic_judge)
+    deduplicator = JobDeduplicator(repository)
 
     match = asyncio.run(
         deduplicator.resolve(COMPANY_ID, job_candidate(employment_type=candidate_type))
     )
 
     assert match.kind == expected_kind
-    assert semantic_judge.calls == []
 
 
 def test_jobs_are_only_compared_within_the_requested_company(
-    job_deduplicator: JobDeduplicator, semantic_judge: "FakeSemanticJudge"
+    job_deduplicator: JobDeduplicator,
 ) -> None:
     match = asyncio.run(
         job_deduplicator.resolve(
@@ -198,7 +177,47 @@ def test_jobs_are_only_compared_within_the_requested_company(
     )
 
     assert match.kind == "new"
-    assert semantic_judge.calls == []
+
+
+def test_low_similarity_is_new_job(
+    repository: "FakeJobRepository",
+) -> None:
+    repository.jobs[COMPANY_ID] = (
+        JobForComparison(
+            job_posting_id=EXISTING_JOB_ID,
+            normalized_title="senior product manager",
+            city="shanghai",
+            job_type=JobType.FULL_TIME,
+        ),
+    )
+    deduplicator = JobDeduplicator(repository)
+
+    match = asyncio.run(
+        deduplicator.resolve(COMPANY_ID, job_candidate(title="junior software engineer"))
+    )
+
+    assert match.kind == "new"
+
+
+def test_same_title_same_city_is_merged(
+    repository: "FakeJobRepository",
+) -> None:
+    repository.jobs[COMPANY_ID] = (
+        JobForComparison(
+            job_posting_id=EXISTING_JOB_ID,
+            normalized_title="software engineer",
+            city="shanghai",
+            job_type=JobType.FULL_TIME,
+        ),
+    )
+    deduplicator = JobDeduplicator(repository)
+
+    match = asyncio.run(
+        deduplicator.resolve(COMPANY_ID, job_candidate(title="software engineer"))
+    )
+
+    assert match.kind == "existing"
+    assert match.job_posting_id == EXISTING_JOB_ID
 
 
 def job_candidate(**overrides: object) -> JobCandidate:
@@ -231,15 +250,3 @@ class FakeJobRepository:
 
     async def list_for_company(self, company_id: UUID) -> Iterable[JobForComparison]:
         return self.jobs.get(company_id, ())
-
-
-class FakeSemanticJudge:
-    def __init__(self, decision: DuplicateDecision) -> None:
-        self._decision = decision
-        self.calls: list[tuple[JobForComparison, JobForComparison]] = []
-
-    async def jobs_are_duplicates(
-        self, left: JobForComparison, right: JobForComparison
-    ) -> DuplicateDecision:
-        self.calls.append((left, right))
-        return self._decision

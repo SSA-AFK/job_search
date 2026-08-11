@@ -62,11 +62,6 @@ class Extractor:
         return (JobCandidate(company_name="Acme", title="Engineer", evidence_ids=("job-1",), confidence=1),)
 
 
-class SemanticJudge:
-    async def jobs_are_duplicates(self, _left, _right) -> DuplicateDecision:
-        return DuplicateDecision(False)
-
-
 def test_review_recorder_maps_database_unavailable_to_retryable() -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -130,7 +125,6 @@ def test_runtime_rejects_each_reused_session_pair(reused: tuple[str, str]) -> No
             persistence_write_session=sessions["write"],
             providers=(),
             extractor=None,  # type: ignore[arg-type]
-            semantic_judge=None,  # type: ignore[arg-type]
         )
 
 
@@ -153,7 +147,7 @@ async def test_runtime_runs_real_three_session_pipeline_and_terminal_retry(tmp_p
             dedup_read_session=dedup,
             identity_review_write_session=review,
             persistence_write_session=write,
-            providers=(provider,), extractor=extractor, semantic_judge=SemanticJudge(),
+            providers=(provider,), extractor=extractor,
         )
 
         result = await orchestrator.run(run.id)
@@ -212,7 +206,7 @@ async def test_runtime_runs_real_three_session_pipeline_and_terminal_retry(tmp_p
             dedup_read_session=dedup,
             identity_review_write_session=review,
             persistence_write_session=write,
-            providers=(FailProvider(),), extractor=FailExtractor(), semantic_judge=SemanticJudge(),
+            providers=(FailProvider(),), extractor=FailExtractor(),
         )
         counts_before_retry = {
             "documents_written": state.query(SourceDocument).count(),

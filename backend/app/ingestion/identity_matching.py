@@ -25,5 +25,10 @@ def match_company_name(requested_name: str, observed_name: str) -> CompanyMatch:
     return CompanyMatch(score >= _MINIMUM_SIMILARITY, score)
 
 
+def company_name_mentioned(requested_name: str, text: str) -> bool:
+    requested = _comparison_name(requested_name)
+    return bool(requested and requested in _comparison_name(text))
+
+
 def _comparison_name(value: str) -> str:
     return "".join(character for character in normalize_name(value) if character.isalnum())
