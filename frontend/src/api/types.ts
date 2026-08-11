@@ -24,6 +24,8 @@ export type RecruitingCoverage = {
   last_successful_at: string | null;
   freshness: "fresh" | "stale" | "unknown";
   reason_code: string | null;
+  primary_entry_url?: string | null;
+  primary_entry_platform?: string | null;
 };
 
 export type CompanySearchParams = {

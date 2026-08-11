@@ -178,6 +178,8 @@ class CompanyService:
             last_successful_at=coverage.last_successful_at,
             freshness=coverage.freshness,
             reason_code=coverage.reason_code,
+            primary_entry_url=coverage.primary_entry_url,
+            primary_entry_platform=coverage.primary_entry_platform,
         )
 
     @staticmethod

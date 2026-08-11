@@ -18,6 +18,7 @@ from app.company_identity.service import IdentitySearchUnavailable, record_ident
 from app.core.config import settings
 from app.ingestion.contracts import Provider
 from app.ingestion.deduplication.job import JobDeduplicator
+from app.ingestion.direct_ats import DirectAtsPersistence
 from app.ingestion.errors import RetryableInfrastructureError
 from app.ingestion.extraction.crew import Extractor
 from app.ingestion.orchestrator import (
@@ -35,7 +36,7 @@ from app.ingestion.repositories import (
 @dataclass(frozen=True)
 class RuntimeComponents:
     providers: Sequence[Provider]
-    extractor: Extractor
+    extractor: Extractor | None
 
 
 @dataclass(frozen=True)
@@ -62,7 +63,7 @@ def build_ingestion_orchestrator(
     identity_review_write_session: Session,
     persistence_write_session: Session,
     providers: Sequence[Provider],
-    extractor: Extractor,
+    extractor: Extractor | None,
 ) -> IngestionOrchestrator:
     """Build without closing sessions; the caller owns all session lifecycles."""
     runtime_sessions = (
@@ -84,6 +85,10 @@ def build_ingestion_orchestrator(
     return IngestionOrchestrator(
         providers=providers, extractor=extractor, batch_builder=builder,
         persistence=PersistenceService(
+            persistence_write_session,
+            cache=configured_company_cache(settings.cache_redis_url),
+        ),
+        direct_ats_persistence=DirectAtsPersistence(
             persistence_write_session,
             cache=configured_company_cache(settings.cache_redis_url),
         ),

@@ -16,7 +16,7 @@ from app.company_identity.service import (
     IdentityReviewConflict,
     IdentitySearchUnavailable,
 )
-from app.ingestion.contracts import ProviderQuery, ProviderResult, RawDocument
+from app.ingestion.contracts import ParsedJob, ProviderQuery, ProviderResult, RawDocument
 from app.ingestion.errors import (
     ExtractionError,
     ProviderError,
@@ -25,7 +25,7 @@ from app.ingestion.errors import (
 )
 from app.ingestion.extraction.schemas import CompanyCandidate
 from app.ingestion.normalization.company import normalize_company
-from app.ingestion.orchestrator import IngestionOrchestrator
+from app.ingestion.orchestrator import IngestionOrchestrator, _ats_discovery_queries
 from app.ingestion.persistence.contracts import (
     BatchBuildOutcome,
     NormalizedBatch,
@@ -242,6 +242,19 @@ class FakePersistence:
         return self.result
 
 
+class FakeDirectAtsPersistence:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.result = PersistenceResult(uuid4(), documents_written=0, jobs_written=2, warnings=())
+
+    def persist(self, **kwargs: object) -> PersistenceResult:
+        self.calls.append(kwargs)
+        return self.result
+
+    def resolve_company_id(self, _company_name: str):
+        return self.result.company_id
+
+
 def document() -> RawDocument:
     return RawDocument(
         provider="site",
@@ -273,6 +286,7 @@ def orchestrator_for(
     discovered: tuple[CompanyCandidate, ...] | None = None,
     build_outcome: BatchBuildOutcome | None = None,
     identity_review_recorder: FakeIdentityReviewRecorder | None = None,
+    direct_ats_persistence: FakeDirectAtsPersistence | None = None,
 ) -> tuple[IngestionOrchestrator, FakeRuns, FakePersistence]:
     runs = FakeRuns({run.id: run})
     persistence = FakePersistence()
@@ -284,6 +298,7 @@ def orchestrator_for(
             ),
             batch_builder=FakeBatchBuilder(build_outcome),
             persistence=persistence,
+            direct_ats_persistence=direct_ats_persistence,  # type: ignore[arg-type]
             runs=runs,
             identity_review_recorder=(
                 identity_review_recorder or FakeIdentityReviewRecorder()
@@ -292,6 +307,97 @@ def orchestrator_for(
         runs,
         persistence,
     )
+
+
+def test_ats_discovery_queries_are_bounded_to_known_platform_hosts() -> None:
+    assert _ats_discovery_queries("  Acme  ") == (
+        "Acme jobs.feishu.cn",
+        "Acme app.mokahr.com",
+    )
+    assert _ats_discovery_queries("   ") == ()
+
+
+@pytest.mark.asyncio
+async def test_zhihu_gets_bounded_ats_discovery_queries() -> None:
+    run = FakeRun(uuid4())
+    zhihu = FakeProvider("zhihu_global_search", ProviderResult(documents=(document(),)))
+    other = FakeProvider("official_news", ProviderResult(documents=(document(),)))
+    orchestrator, _runs, _persistence = orchestrator_for(
+        run,
+        providers=[zhihu, other],
+    )
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.SUCCEEDED
+    assert [query.query for query in zhihu.queries] == [
+        "Acme",
+        "Acme jobs.feishu.cn",
+        "Acme app.mokahr.com",
+    ]
+    assert [query.query for query in other.queries] == ["Acme"]
+
+
+@pytest.mark.asyncio
+async def test_matching_ats_entry_bypasses_extractor_and_persists_structured_jobs() -> None:
+    run = FakeRun(uuid4())
+    discovery = FakeProvider(
+        "zhihu_global_search",
+        ProviderResult(
+            documents=(
+                RawDocument(
+                    provider="zhihu_global_search",
+                    external_id="acme-ats",
+                    url="https://www.zhihu.com/question/1",
+                    title="Acme careers",
+                    text="Acme is hiring at https://jobs.feishu.cn/acme/position",
+                    published_at=None,
+                ),
+            )
+        ),
+    )
+    ats = FakeProvider(
+        "ats",
+        ProviderResult(
+            documents=(document(),),
+            parsed_jobs=(
+                ParsedJob(
+                    title="Engineer",
+                    url="https://jobs.feishu.cn/acme/position/1",
+                    provider="ats_feishu",
+                ),
+            ),
+        ),
+        requires_website=True,
+    )
+    direct = FakeDirectAtsPersistence()
+    orchestrator, _runs, persistence = orchestrator_for(
+        run,
+        providers=[discovery, ats],
+        direct_ats_persistence=direct,
+    )
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.SUCCEEDED
+    assert result.jobs_found == 1
+    assert result.jobs_written == 2
+    assert persistence.calls == 0
+    assert direct.calls == [
+        {
+            "company_name": "Acme",
+            "entry_url": "https://jobs.feishu.cn/acme/position",
+            "platform": "feishu",
+            "jobs": (
+                ParsedJob(
+                    title="Engineer",
+                    url="https://jobs.feishu.cn/acme/position/1",
+                    provider="ats_feishu",
+                ),
+            ),
+            "crawl_run_id": run.id,
+        }
+    ]
 
 
 def identity_review_outcome() -> tuple[BatchBuildOutcome, CompanyIdentityReviewDraft]:

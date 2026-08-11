@@ -9,7 +9,7 @@ from decimal import Decimal
 from typing import Protocol
 from uuid import UUID
 
-from pydantic import HttpUrl
+from pydantic import HttpUrl, ValidationError
 from sqlalchemy.exc import OperationalError
 
 from app.company_identity.contracts import (
@@ -23,12 +23,13 @@ from app.company_identity.contracts import (
 from app.company_identity.service import IdentitySearchUnavailable
 from app.core.normalization import normalize_name, normalize_url
 from app.ingestion.contracts import (
+    ParsedJob,
     Provider,
     ProviderQuery,
     RawDocument,
 )
 from app.ingestion.deduplication.job import JobDeduplicator
-from app.ingestion.identity_matching import company_name_mentioned, match_company_name
+from app.ingestion.direct_ats import DirectAtsPersistence
 from app.ingestion.errors import (
     ProviderError,
     RetryableInfrastructureError,
@@ -43,6 +44,11 @@ from app.ingestion.extraction.schemas import (
     FilingCandidate,
     JobCandidate,
     ProfileExtraction,
+)
+from app.ingestion.identity_matching import (
+    company_name_mentioned,
+    company_name_variants,
+    match_company_name,
 )
 from app.ingestion.normalization.company import normalize_company
 from app.ingestion.normalization.job import normalize_job
@@ -74,6 +80,7 @@ _PUBLIC_CODE = re.compile(r"^[a-z][a-z0-9_]{0,49}$")
 class _ProviderOutcome:
     name: str
     documents: tuple[RawDocument, ...]
+    parsed_jobs: tuple[ParsedJob, ...]
     issue: str | None
 
 
@@ -97,6 +104,7 @@ class AtsCareerUrl:
 
 
 class CrawlRunState(RunResultSource, Protocol):
+    id: UUID
     claim_token: str | None
     started_at: datetime | None
 
@@ -398,9 +406,10 @@ class IngestionOrchestrator:
         self,
         *,
         providers: Sequence[Provider],
-        extractor: Extractor,
+        extractor: Extractor | None,
         batch_builder: NormalizedBatchBuilder,
         persistence: PersistenceService,
+        direct_ats_persistence: DirectAtsPersistence | None = None,
         runs: CrawlRunRepository,
         identity_review_recorder: IdentityReviewRecorder,
     ) -> None:
@@ -408,6 +417,7 @@ class IngestionOrchestrator:
         self.extractor = extractor
         self.batch_builder = batch_builder
         self.persistence = persistence
+        self.direct_ats_persistence = direct_ats_persistence
         self.runs = runs
         self.identity_review_recorder = identity_review_recorder
 
@@ -465,9 +475,15 @@ class IngestionOrchestrator:
             if request is None:
                 raise _PipelineError("invalid_run")
             provider_entries = tuple(enumerate(self.providers))
-            discovery_providers = tuple(
+            all_discovery_providers = tuple(
                 entry for entry in provider_entries if not _requires_website(entry[1])
             )
+            serper_discovery_providers = tuple(
+                entry
+                for entry in all_discovery_providers
+                if _provider_name(entry[1]) == "serper"
+            )
+            discovery_providers = serper_discovery_providers or all_discovery_providers
             website_providers = tuple(
                 entry for entry in provider_entries if _requires_website(entry[1])
             )
@@ -475,6 +491,27 @@ class IngestionOrchestrator:
                 discovery_providers,
                 ProviderQuery(query=request.query),
             )
+            ats_discovery_providers = (
+                serper_discovery_providers
+                if serper_discovery_providers
+                else tuple(
+                    entry
+                    for entry in discovery_providers
+                    if _provider_name(entry[1]) == "zhihu_global_search"
+                )
+            )
+            for search_name in company_name_variants(request.query):
+                for index, provider in ats_discovery_providers:
+                    for query in _ats_discovery_queries(
+                        search_name, site_restricted=_provider_name(provider) == "serper"
+                    ):
+                        outcomes = self._merge_outcome_dicts(
+                            outcomes,
+                            await self._collect_providers(
+                                ((index, provider),),
+                                ProviderQuery(query=query),
+                            ),
+                        )
             providers_attempted, documents, provider_error, diagnostics = self._merge_outcomes(
                 outcomes
             )
@@ -493,7 +530,107 @@ class IngestionOrchestrator:
                     diagnostics=diagnostics,
                 )
             # Scan raw documents for ATS career URLs (regex, no LLM)
-            ats_career_urls = _scan_ats_career_urls(documents, request.query)
+            ats_career_urls = _scan_ats_career_urls(
+                documents, company_name_variants(request.query)
+            )
+            ats_providers = tuple(
+                entry for entry in website_providers if _provider_name(entry[1]) == "ats"
+            )
+            if ats_career_urls and self.direct_ats_persistence is not None:
+                stage = "ats"
+                direct_results: list[PersistenceResult] = []
+                for candidate in ats_career_urls:
+                    parsed_url = _parse_ats_url(candidate.url)
+                    if parsed_url is None:
+                        continue
+                    ats_host = _normalized_website_host(parsed_url)
+                    if ats_host is None:
+                        continue
+                    candidate_outcomes = await self._collect_providers(
+                        ats_providers,
+                        ProviderQuery(
+                            query=request.query,
+                            website=parsed_url,
+                            allowed_hosts=frozenset({ats_host}),
+                        ),
+                    )
+                    outcomes = self._merge_outcome_dicts(outcomes, candidate_outcomes)
+                    successful = any(
+                        outcome.name == "ats" and bool(outcome.documents) and outcome.issue is None
+                        for outcome in candidate_outcomes.values()
+                    )
+                    if not successful:
+                        continue
+                    parsed_jobs = tuple(
+                        job
+                        for outcome in candidate_outcomes.values()
+                        for job in outcome.parsed_jobs
+                    )
+                    persisted = self.direct_ats_persistence.persist(
+                        company_name=request.query,
+                        entry_url=candidate.url,
+                        platform=_ats_platform(candidate.url),
+                        jobs=parsed_jobs,
+                        crawl_run_id=run.id,
+                    )
+                    if persisted is not None:
+                        direct_results.append(persisted)
+                (
+                    providers_attempted,
+                    documents,
+                    provider_error,
+                    diagnostics,
+                ) = self._merge_outcomes(outcomes)
+                if direct_results:
+                    company_id = direct_results[0].company_id
+                    if any(result.company_id != company_id for result in direct_results):
+                        raise _PipelineError("invalid_company_identity")
+                    persisted = PersistenceResult(
+                        company_id=company_id,
+                        documents_written=0,
+                        jobs_written=sum(result.jobs_written for result in direct_results),
+                        warnings=(),
+                    )
+                    return self._finish(
+                        run,
+                        expected_claim_token=claim_token,
+                        status=(
+                            CollectionStatus.PARTIAL if provider_error else CollectionStatus.SUCCEEDED
+                        ),
+                        providers_attempted=providers_attempted,
+                        documents_found=len(documents),
+                        jobs_found=sum(
+                            len(outcome.parsed_jobs)
+                            for outcome in outcomes.values()
+                            if outcome.name == "ats"
+                        ),
+                        persistence=persisted,
+                        error_code=provider_error,
+                        diagnostics=diagnostics,
+                    )
+                return self._finish(
+                    run,
+                    expected_claim_token=claim_token,
+                    status=CollectionStatus.FAILED,
+                    providers_attempted=providers_attempted,
+                    documents_found=len(documents),
+                    jobs_found=0,
+                    persistence=self._existing_company_result(request.query),
+                    error_code=provider_error or "ats_collection_failed",
+                    diagnostics=diagnostics,
+                )
+            if self.extractor is None:
+                return self._finish(
+                    run,
+                    expected_claim_token=claim_token,
+                    status=CollectionStatus.FAILED,
+                    providers_attempted=providers_attempted,
+                    documents_found=len(documents),
+                    jobs_found=0,
+                    persistence=self._existing_company_result(request.query),
+                    error_code="ats_entry_discovery_pending",
+                    diagnostics=diagnostics,
+                )
             stage = "discovery"
             discovered = await self.extractor.discover(documents)
             selected, discovery_error = _select_company(request.query, discovered)
@@ -560,7 +697,7 @@ class IngestionOrchestrator:
                 processed_ats_urls.add(url)
                 try:
                     parsed = HttpUrl(url)
-                except Exception:
+                except ValidationError:
                     continue
                 ats_host = _normalized_website_host(parsed)
                 if ats_host is not None:
@@ -674,6 +811,7 @@ class IngestionOrchestrator:
         outcomes: dict[int, _ProviderOutcome] = {}
         for index, provider in providers:
             documents: tuple[RawDocument, ...] = ()
+            parsed_jobs: tuple[ParsedJob, ...] = ()
             issue: str | None = None
             try:
                 result = await provider.search(provider_query)
@@ -683,11 +821,13 @@ class IngestionOrchestrator:
                 issue = "provider_unavailable"
             else:
                 documents = result.documents
+                parsed_jobs = result.parsed_jobs
                 for warning in result.warnings:
                     issue = issue or _warning_code(warning)
             outcomes[index] = _ProviderOutcome(
                 name=_provider_name(provider),
                 documents=documents,
+                parsed_jobs=parsed_jobs,
                 issue=issue,
             )
         return outcomes
@@ -705,11 +845,25 @@ class IngestionOrchestrator:
                 result[index] = _ProviderOutcome(
                     name=prev.name,
                     documents=prev.documents + outcome.documents,
+                    parsed_jobs=prev.parsed_jobs + outcome.parsed_jobs,
                     issue=prev.issue or outcome.issue,
                 )
             else:
                 result[index] = outcome
         return result
+
+    def _existing_company_result(self, company_name: str) -> PersistenceResult | None:
+        if self.direct_ats_persistence is None:
+            return None
+        company_id = self.direct_ats_persistence.resolve_company_id(company_name)
+        if company_id is None:
+            return None
+        return PersistenceResult(
+            company_id=company_id,
+            documents_written=0,
+            jobs_written=0,
+            warnings=(),
+        )
 
     @staticmethod
     def _merge_outcomes(
@@ -798,19 +952,58 @@ _ATS_URL_PATTERNS = (
     re.compile(r"https?://app\.mokahr\.com/[a-zA-Z0-9_@./#?&=-]+"),
 )
 
+_ATS_DISCOVERY_TERMS = ("jobs.feishu.cn", "app.mokahr.com")
+_ATS_HOST_PLATFORMS = {
+    "jobs.feishu.cn": "feishu",
+    "app.mokahr.com": "moka",
+}
+
+
+def _ats_discovery_queries(
+    company_name: str, *, site_restricted: bool = False
+) -> tuple[str, ...]:
+    """Build the bounded P0 ATS lookup queries for the public search provider."""
+    normalized_name = " ".join(company_name.split())
+    if not normalized_name:
+        return ()
+    if site_restricted:
+        return tuple(f'"{normalized_name}" site:{term}' for term in _ATS_DISCOVERY_TERMS)
+    return tuple(f"{normalized_name} {term}" for term in _ATS_DISCOVERY_TERMS)
+
+
+def _parse_ats_url(url: str) -> HttpUrl | None:
+    try:
+        parsed = HttpUrl(url)
+    except ValidationError:
+        return None
+    return parsed if _normalized_website_host(parsed) in _ATS_HOST_PLATFORMS else None
+
+
+def _ats_platform(url: str) -> str:
+    parsed = _parse_ats_url(url)
+    if parsed is None:
+        raise _PipelineError("invalid_ats_url")
+    host = _normalized_website_host(parsed)
+    if host is None:
+        raise _PipelineError("invalid_ats_url")
+    return _ATS_HOST_PLATFORMS[host]
+
 
 def _scan_ats_career_urls(
-    documents: tuple[RawDocument, ...], requested_name: str
+    documents: tuple[RawDocument, ...], requested_names: str | tuple[str, ...]
 ) -> tuple[AtsCareerUrl, ...]:
     """Return known ATS URLs only when their Zhihu document matches the company."""
     seen: set[str] = set()
     results: list[AtsCareerUrl] = []
+    names = (requested_names,) if isinstance(requested_names, str) else requested_names
     for doc in documents:
         if not doc.text:
             continue
         observed = doc.title or ""
-        exact_mention = company_name_mentioned(requested_name, doc.text)
-        if not exact_mention and not match_company_name(requested_name, observed).accepted:
+        exact_mention = any(company_name_mentioned(name, doc.text) for name in names)
+        if not exact_mention and not any(
+            match_company_name(name, observed).accepted for name in names
+        ):
             continue
         for pattern in _ATS_URL_PATTERNS:
             for match in pattern.finditer(doc.text):

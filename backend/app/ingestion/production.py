@@ -3,16 +3,18 @@
 import re
 from typing import Protocol
 
-from app.ingestion.extraction.client import OpenAICompatibleLlmClient
-from app.ingestion.extraction.crew import CrewExtractor
 from app.ingestion.providers.ats import AtsProvider
 from app.ingestion.providers.ats_extractors.feishu import FeishuAtsExtractor
+from app.ingestion.providers.ats_extractors.lagou import LagouAtsExtractor
+from app.ingestion.providers.ats_extractors.liepin import LiepinAtsExtractor
 from app.ingestion.providers.ats_extractors.moka import MokaAtsExtractor
+from app.ingestion.providers.ats_extractors.zhipin import ZhipinAtsExtractor
 from app.ingestion.providers.ats_renderer import AtsRenderer
 from app.ingestion.providers.company_site import CompanySiteProvider
 from app.ingestion.providers.http import SafeHttpClient
 from app.ingestion.providers.limits import ControlledProvider
 from app.ingestion.providers.robots import RobotsPolicy
+from app.ingestion.providers.serper import SerperProvider
 from app.ingestion.providers.tianyancha import TianyanchaProvider
 from app.ingestion.providers.ymicp import YmicpProvider
 from app.ingestion.providers.zhihu import ZhihuGlobalSearchProvider
@@ -25,12 +27,12 @@ _HOST_PATTERN = re.compile(
 
 
 class RuntimeSettings(Protocol):
-    openai_compatible_base_url: str | None
-    openai_compatible_model: str | None
-    openai_compatible_api_key: str | None
-    openai_request_timeout_seconds: float
     zhihu_provider_enabled: bool
     zhihu_access_secret: str | None
+    serper_provider_enabled: bool
+    serper_api_key: str | None
+    serper_gl: str
+    serper_hl: str
     company_site_provider_enabled: bool
     company_site_approved_hosts: str
     provider_max_concurrency: int
@@ -38,6 +40,9 @@ class RuntimeSettings(Protocol):
     ats_provider_enabled: bool
     ats_feishu_enabled: bool
     ats_moka_enabled: bool
+    ats_zhipin_enabled: bool
+    ats_liepin_enabled: bool
+    ats_lagou_enabled: bool
     ats_approved_hosts: str
     playwright_pool_size: int
     playwright_page_timeout_seconds: float
@@ -54,26 +59,11 @@ class ProductionRuntimeConfigurationError(Exception):
 
 
 def create_runtime_components(config: RuntimeSettings) -> RuntimeComponents:
-    llm_values = (
-        config.openai_compatible_base_url,
-        config.openai_compatible_model,
-        config.openai_compatible_api_key,
-    )
-    if any(not value or not value.strip() for value in llm_values):
-        raise ProductionRuntimeConfigurationError(
-            "OPENAI_COMPATIBLE_BASE_URL, MODEL, and API_KEY are required"
-        )
     if config.provider_max_concurrency < 1:
         raise ProductionRuntimeConfigurationError("provider concurrency must be positive")
     if config.provider_min_interval_seconds < 0:
         raise ProductionRuntimeConfigurationError("provider interval must not be negative")
 
-    llm = OpenAICompatibleLlmClient(
-        base_url=llm_values[0],  # type: ignore[arg-type]
-        model=llm_values[1],  # type: ignore[arg-type]
-        api_key=llm_values[2],  # type: ignore[arg-type]
-        timeout_seconds=config.openai_request_timeout_seconds,
-    )
     providers: list[object] = []
     if config.ymicp_provider_enabled:
         providers.append(
@@ -105,6 +95,15 @@ def create_runtime_components(config: RuntimeSettings) -> RuntimeComponents:
                 enabled=True, access_secret=config.zhihu_access_secret
             )
         )
+    if config.serper_provider_enabled:
+        providers.append(
+            SerperProvider(
+                enabled=True,
+                api_key=config.serper_api_key,
+                gl=config.serper_gl,
+                hl=config.serper_hl,
+            )
+        )
     if config.company_site_provider_enabled:
         approved_hosts = frozenset(
             host.strip().lower().rstrip(".")
@@ -127,7 +126,15 @@ def create_runtime_components(config: RuntimeSettings) -> RuntimeComponents:
         )
     if config.ats_provider_enabled:
         enabled_platforms = frozenset(
-            p for p, on in (("feishu", config.ats_feishu_enabled), ("moka", config.ats_moka_enabled)) if on
+            p
+            for p, on in (
+                ("feishu", config.ats_feishu_enabled),
+                ("moka", config.ats_moka_enabled),
+                ("zhipin", config.ats_zhipin_enabled),
+                ("liepin", config.ats_liepin_enabled),
+                ("lagou", config.ats_lagou_enabled),
+            )
+            if on
         )
         if not enabled_platforms:
             raise ProductionRuntimeConfigurationError(
@@ -145,6 +152,9 @@ def create_runtime_components(config: RuntimeSettings) -> RuntimeComponents:
                 renderer=renderer,
                 feishu_extractor=FeishuAtsExtractor(),
                 moka_extractor=MokaAtsExtractor(),
+                zhipin_extractor=ZhipinAtsExtractor(),
+                liepin_extractor=LiepinAtsExtractor(),
+                lagou_extractor=LagouAtsExtractor(),
                 enabled_platforms=enabled_platforms,
             )
         )
@@ -161,5 +171,5 @@ def create_runtime_components(config: RuntimeSettings) -> RuntimeComponents:
     )
     return RuntimeComponents(
         providers=controlled,
-        extractor=CrewExtractor(llm),
+        extractor=None,
     )

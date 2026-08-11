@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     collection_runtime_factory: str | None = None
     zhihu_provider_enabled: bool = False
     zhihu_access_secret: str | None = None
+    serper_provider_enabled: bool = False
+    serper_api_key: str | None = None
+    serper_gl: str = "cn"
+    serper_hl: str = "zh-cn"
     openai_compatible_base_url: str | None = None
     openai_compatible_model: str | None = None
     openai_compatible_api_key: str | None = None
@@ -37,7 +41,10 @@ class Settings(BaseSettings):
     ats_provider_enabled: bool = False
     ats_feishu_enabled: bool = False
     ats_moka_enabled: bool = False
-    ats_approved_hosts: str = "jobs.feishu.cn,app.mokahr.com"
+    ats_zhipin_enabled: bool = False
+    ats_liepin_enabled: bool = False
+    ats_lagou_enabled: bool = False
+    ats_approved_hosts: str = "jobs.feishu.cn,app.mokahr.com,zhipin.com,liepin.com,lagou.com"
     playwright_pool_size: int = 2
     playwright_page_timeout_seconds: float = 30.0
     tianyancha_provider_enabled: bool = False

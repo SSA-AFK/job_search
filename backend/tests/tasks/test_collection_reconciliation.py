@@ -46,10 +46,10 @@ def test_checked_in_runtime_factory_composes_a_worker_without_operator_code() ->
     assert [provider.name for provider in components.providers] == [
         "zhihu_global_search"
     ]
-    assert type(components.extractor).__name__ == "CrewExtractor"
+    assert components.extractor is None
 
 
-def test_checked_in_runtime_factory_fails_fast_without_llm_configuration() -> None:
+def test_checked_in_runtime_factory_does_not_require_llm_configuration() -> None:
     from app.ingestion.production import (
         ProductionRuntimeConfigurationError,
         create_runtime_components,
@@ -80,7 +80,7 @@ def test_checked_in_runtime_factory_fails_fast_without_llm_configuration() -> No
         tianyancha_call_budget=100,
     )
 
-    with pytest.raises(ProductionRuntimeConfigurationError, match="OPENAI"):
+    with pytest.raises(ProductionRuntimeConfigurationError, match="at least one Provider"):
         create_runtime_components(config)
 
 

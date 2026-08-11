@@ -11,11 +11,12 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     false,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import GUID, Base, TimestampMixin, UTCDateTime, utc_now
-from app.models.enums import JobEntryStatus, JobSnapshotStatus
+from app.models.enums import JobEntryStatus, JobSnapshotStatus, VerificationStatus
 
 
 def _enum_column(
@@ -38,6 +39,13 @@ class JobEntry(Base, TimestampMixin):
         UniqueConstraint("id", "company_id", name="uq_job_entries_id_company"),
         Index("ix_job_entries_status_checked", "status", "last_checked_at"),
         Index("ix_job_entries_platform_status", "platform", "status"),
+        Index(
+            "uq_job_entries_primary_per_company",
+            "company_id",
+            unique=True,
+            sqlite_where=text("is_primary = 1"),
+            postgresql_where=text("is_primary"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
@@ -60,6 +68,22 @@ class JobEntry(Base, TimestampMixin):
     failure_count: Mapped[int] = mapped_column(
         Integer, default=0, server_default="0", nullable=False
     )
+    is_primary: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
+    verification_status: Mapped[VerificationStatus] = mapped_column(
+        Enum(
+            VerificationStatus,
+            values_callable=lambda enum: [member.value for member in enum],
+            native_enum=False,
+            create_constraint=True,
+            name="job_entry_verification_status",
+            length=30,
+        ),
+        default=VerificationStatus.PENDING_VERIFICATION,
+        nullable=False,
+    )
+    verified_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     last_checked_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     last_success_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 

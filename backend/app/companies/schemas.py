@@ -75,6 +75,8 @@ class RecruitingCoverageItem(BaseModel):
     last_successful_at: datetime | None
     freshness: Literal["fresh", "stale", "unknown"]
     reason_code: str | None
+    primary_entry_url: str | None
+    primary_entry_platform: str | None
 
 
 class FilingItem(BaseModel):

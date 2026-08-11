@@ -1,6 +1,6 @@
 """Provider-facing immutable data contracts."""
 
-from datetime import datetime
+from datetime import date, datetime
 from ipaddress import ip_address
 from typing import Annotated, Protocol, runtime_checkable
 
@@ -16,6 +16,12 @@ class ParsedJob(BaseModel):
     url: str = Field(min_length=1, max_length=2_000)
     city: str | None = Field(default=None, max_length=200)
     employment_type: str | None = Field(default=None, max_length=50)
+    job_type: str | None = Field(default=None, max_length=50)
+    salary_min_monthly: int | None = None
+    salary_max_monthly: int | None = None
+    salary_months: int | None = None
+    description: str | None = Field(default=None, max_length=4_000)
+    posted_at: date | None = None
     provider: str | None = Field(default=None, min_length=1, max_length=50)
     source_raw_id: str | None = Field(default=None, max_length=255)
     external_id: str | None = Field(default=None, max_length=255)

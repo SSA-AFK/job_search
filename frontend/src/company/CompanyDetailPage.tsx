@@ -112,6 +112,7 @@ function DetailContent({ company, activeJobCount }: { company: CompanyDetail; ac
         <strong>{coverage.status === "active_roles" ? "正在招聘" : coverage.status === "empty_confirmed" ? "已核验暂无职位" : coverage.status === "entry_discovery_pending" ? "招聘入口待发现" : coverage.status === "collection_incomplete" ? "招聘信息待复查" : "招聘信息已过期"}</strong>
         {coverage.status === "active_roles" && coverage.active_job_count !== null ? <span>{` · ${coverage.active_job_count} 个在招职位`}</span> : null}
         <span>{coverage.last_checked_at ? ` · 最近核验 ${coverage.last_checked_at.slice(0, 10)}` : " · 尚未核验"}</span>
+        {coverage.primary_entry_url ? <a href={coverage.primary_entry_url} target="_blank" rel="noreferrer">招聘入口{coverage.primary_entry_platform ? `（${coverage.primary_entry_platform}）` : ""}<ExternalLink aria-hidden="true" size={14} /></a> : null}
       </section>
       <dl className="company-facts">
         <div><dt>别名</dt><dd>{aliases.length ? aliases.join("、") : "暂无别名"}</dd></div>
