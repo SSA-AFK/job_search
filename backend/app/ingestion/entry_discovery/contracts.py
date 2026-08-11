@@ -5,15 +5,13 @@
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from rapidfuzz.fuzz import ratio, partial_ratio
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field
+from rapidfuzz.fuzz import partial_ratio, ratio
 
 from app.core.normalization import normalize_name
-
 
 # ---------------------------------------------------------------------------
 # Legal-name prefix / suffix removal for the "去后缀名" variant
@@ -118,6 +116,7 @@ class CompanyNamePool(BaseModel):
     brand_names: tuple[str, ...] = Field(default_factory=tuple)
     historical_aliases: tuple[str, ...] = Field(default_factory=tuple)
     domains: tuple[str, ...] = Field(default_factory=tuple)
+    known_entry_urls: tuple[str, ...] = Field(default_factory=tuple)
 
     # ------------------------------------------------------------------
     # Derived variants
@@ -283,10 +282,7 @@ _NAME_LOW_THRESHOLD = 78.0
 
 
 def _check_domain(url: str, root_domains: tuple[str, ...]) -> tuple[bool, bool]:
-    try:
-        host = (urlsplit(url).hostname or "").lower().rstrip(".")
-    except Exception:
-        return False, False
+    host = (urlsplit(url).hostname or "").lower().rstrip(".")
     if not host:
         return False, False
     exact = host in root_domains or any(
@@ -353,13 +349,19 @@ def validate_entry_candidate(
     # Bonus for known ATS platforms even without perfect match
     if candidate.platform in {EntryPlatform.ATS_FEISHU, EntryPlatform.ATS_MOKA}:
         score += 0.05
+    if candidate.source_provider == "known_entry_url":
+        if exact_domain or root_match_domain or name_mention or best_sim >= _NAME_LOW_THRESHOLD:
+            score += 0.20
+        elif candidate.platform in {EntryPlatform.ATS_FEISHU, EntryPlatform.ATS_MOKA, EntryPlatform.BOSS_ZHIPIN, EntryPlatform.LIEPIN, EntryPlatform.LAGOU}:
+            score += 0.55
     confidence = min(1.0, score)
     title_normalized = normalize_for_compare(candidate.title or "")
     title_has_company_evidence = any(
         value and value in title_normalized for value in compare_variants
     ) or best_sim >= _NAME_HIGH_THRESHOLD
     if (
-        candidate.platform in {EntryPlatform.ATS_FEISHU, EntryPlatform.ATS_MOKA}
+        candidate.source_provider != "known_entry_url"
+        and candidate.platform in {EntryPlatform.ATS_FEISHU, EntryPlatform.ATS_MOKA}
         and not title_has_company_evidence
         and not root_match_domain
     ):

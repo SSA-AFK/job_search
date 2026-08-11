@@ -56,7 +56,7 @@ class ZhipinAtsExtractor:
         content = f"{page.title or ''}\n{page.html}".lower()
         if "/login" in path or "sign in" in content or "扫码登录" in content:
             return "login_required"
-        if any(k in content for k in ("captcha", "verify you are human", "请完成验证", "安全验证", "滑块")):
+        if any(k in content for k in ("captcha", "verify you are human", "请完成验证", "安全验证", "滑块", "请稍候", "page-security")):
             return "captcha_required"
         if any(k in content for k in ("ip被封禁", "ip blocked", "访问过于频繁", "403 forbidden")):
             return "rate_limited"

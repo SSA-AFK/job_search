@@ -18,6 +18,7 @@ from app.ingestion.providers.serper import SerperProvider
 from app.ingestion.providers.tianyancha import TianyanchaProvider
 from app.ingestion.providers.ymicp import YmicpProvider
 from app.ingestion.providers.zhihu import ZhihuGlobalSearchProvider
+from app.ingestion.providers.zhipin_cdp import PlaywrightZhipinCdpClient, ZhipinCdpCompanyProvider
 from app.ingestion.runtime import RuntimeComponents
 
 _HOST_PATTERN = re.compile(
@@ -44,6 +45,12 @@ class RuntimeSettings(Protocol):
     ats_liepin_enabled: bool
     ats_lagou_enabled: bool
     ats_approved_hosts: str
+    zhipin_cdp_company_provider_enabled: bool
+    zhipin_cdp_endpoint_url: str
+    zhipin_cdp_min_match_score: float
+    zhipin_cdp_page_size: int
+    zhipin_cdp_max_pages: int
+    zhipin_cdp_block_threshold: int
     playwright_pool_size: int
     playwright_page_timeout_seconds: float
     tianyancha_provider_enabled: bool
@@ -102,6 +109,24 @@ def create_runtime_components(config: RuntimeSettings) -> RuntimeComponents:
                 api_key=config.serper_api_key,
                 gl=config.serper_gl,
                 hl=config.serper_hl,
+            )
+        )
+    if config.zhipin_cdp_company_provider_enabled:
+        if config.zhipin_cdp_page_size < 1 or config.zhipin_cdp_max_pages < 1:
+            raise ProductionRuntimeConfigurationError(
+                "ZHIPIN_CDP_PAGE_SIZE and ZHIPIN_CDP_MAX_PAGES must be positive"
+            )
+        providers.append(
+            ZhipinCdpCompanyProvider(
+                client=PlaywrightZhipinCdpClient(
+                    endpoint_url=config.zhipin_cdp_endpoint_url,
+                    page_timeout_seconds=config.playwright_page_timeout_seconds,
+                ),
+                enabled=True,
+                min_match_score=config.zhipin_cdp_min_match_score,
+                page_size=config.zhipin_cdp_page_size,
+                max_pages=config.zhipin_cdp_max_pages,
+                platform_block_threshold=config.zhipin_cdp_block_threshold,
             )
         )
     if config.company_site_provider_enabled:

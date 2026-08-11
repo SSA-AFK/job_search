@@ -11,11 +11,9 @@ from app.ingestion.entry_discovery.contracts import (
     build_careers_probe_paths,
     build_site_queries,
     extract_root_domain,
-    normalize_for_compare,
     strip_legal_suffixes,
     validate_entry_candidate,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -84,6 +82,11 @@ def test_name_pool_all_variants(moonshot_pool: CompanyNamePool) -> None:
 
 def test_name_pool_root_domains(moonshot_pool: CompanyNamePool) -> None:
     assert moonshot_pool.root_domains() == ("moonshot.cn",)
+
+
+def test_known_entry_url_field_defaults_to_empty() -> None:
+    pool = CompanyNamePool(canonical_name="Acme")
+    assert pool.known_entry_urls == ()
 
 
 # ---------------------------------------------------------------------------

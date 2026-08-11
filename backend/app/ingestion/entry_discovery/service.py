@@ -15,7 +15,6 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
-from pydantic import HttpUrl, ValidationError
 
 from app.ingestion.contracts import ProviderQuery
 from app.ingestion.entry_discovery.contracts import (
@@ -99,6 +98,9 @@ class EntryDiscoveryService:
         if self._serper is not None and getattr(self._serper, "name", None) == "serper":
             tasks.append(asyncio.create_task(self._run_site_queries(name_pool)))
 
+        if name_pool.known_entry_urls:
+            tasks.append(asyncio.create_task(self._validate_known_entry_urls(name_pool)))
+
         # 2) 官网 careers 路径探测
         if name_pool.domains:
             tasks.append(asyncio.create_task(self._probe_careers_pages(name_pool)))
@@ -149,10 +151,14 @@ class EntryDiscoveryService:
             ("lagou", "lagou.com"),
         ]}
 
+        serper = self._serper
+        if serper is None:
+            return []
+
         async def one_query(platform: str, q: str) -> list[EntryCandidate]:
             async with self._sem_site:
                 try:
-                    result = await self._serper.search(ProviderQuery(query=q, max_results=10))
+                    result = await serper.search(ProviderQuery(query=q, max_results=10))
                 except Exception:  # noqa: BLE001
                     return []
                 out: list[EntryCandidate] = []
@@ -185,6 +191,31 @@ class EntryDiscoveryService:
             )
         )
 
+    async def _validate_known_entry_urls(self, name_pool: CompanyNamePool) -> list[EntryCandidate]:
+        results: list[EntryCandidate] = []
+        seen: set[str] = set()
+        for url in name_pool.known_entry_urls:
+            value = url.strip()
+            if not value:
+                continue
+            if not value.startswith(("http://", "https://")):
+                value = f"https://{value}"
+            key = value.rstrip("/").lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(
+                EntryCandidate(
+                    url=value,
+                    platform=_platform_from_url(value),
+                    title=None,
+                    snippet=None,
+                    source_provider="known_entry_url",
+                    source_url=value,
+                )
+            )
+        return results
+
     # ------------------------------------------------------------------
     # Careers page probe
     # ------------------------------------------------------------------
@@ -194,7 +225,9 @@ class EntryDiscoveryService:
         anchors: list[str] = []
         seen: set[str] = set()
         for d in name_pool.domains:
-            host = d.lower().lstrip("*.").lstrip("www.")
+            host = d.lower()
+            host = host.removeprefix("*.")
+            host = host.removeprefix("www.")
             if host and host not in seen:
                 seen.add(host)
                 anchors.append(host)
@@ -250,6 +283,21 @@ def _flatten(nested: list[list[EntryCandidate]]) -> list[EntryCandidate]:
     for inner in nested:
         result.extend(inner)
     return result
+
+
+def _platform_from_url(url: str) -> str:
+    host = (urlsplit(url).hostname or "").lower().rstrip(".")
+    if host == "jobs.feishu.cn" or host.endswith(".jobs.feishu.cn"):
+        return EntryPlatform.ATS_FEISHU
+    if host == "app.mokahr.com" or host.endswith(".app.mokahr.com"):
+        return EntryPlatform.ATS_MOKA
+    if host == "zhipin.com" or host.endswith(".zhipin.com"):
+        return EntryPlatform.BOSS_ZHIPIN
+    if host == "liepin.com" or host.endswith(".liepin.com"):
+        return EntryPlatform.LIEPIN
+    if host == "lagou.com" or host.endswith(".lagou.com"):
+        return EntryPlatform.LAGOU
+    return EntryPlatform.COMPANY_SITE_CAREERS
 
 
 _TITLE_RE = None

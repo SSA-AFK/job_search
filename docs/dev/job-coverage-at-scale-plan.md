@@ -1,10 +1,10 @@
 # 万级公司职位覆盖设计
 
-> **状态：Stage 3A 已完成；Stage 3B0 manifest 已冻结，entry-evidence smoke 已通过；Stage 3B 已完成离线接入，在线 smoke 待 opt-in gate**
-> **修订日期：2026-08-10**
+> **状态：Stage 3A 已完成；Stage 3B0 manifest 已冻结，entry-evidence smoke 已通过；Stage 3B Tasks 1–7 已完成，飞书/Moka 离线样本通过，Playwright 池生命周期受控；BOSS/猎聘/拉勾基础解析、安全页识别、Provider 阻断统计、platform cooldown 与默认关闭的 BOSS CDP 公司职位 Provider 已完成；所有新增采集默认关闭，在线 smoke 待 opt-in gate**
+> **修订日期：2026-08-11**
 > **定位：** Stage 3 的产品与技术设计，定义万级公司下职位覆盖、完整性、新鲜度和成本边界。
 > **实施入口：** [migration-master-plan.md](migration-master-plan.md)
-> **当前基线：** Stage 1、Stage 2 已合并到 `main`；Stage 3A 在隔离分支完成实现、最终审阅和当前矩阵，尚未集成；Stage 3B0 已冻结 1,000 家 canonical manifest，并完成 2 条公开证据的受限模型 smoke；Stage 3B 仍等待单独实施计划与审批。
+> **当前基线：** Stage 1、Stage 2 已合并到 `main`；Stage 3A 在隔离分支完成实现、最终审阅和当前矩阵，尚未集成；Stage 3B0 已冻结 1,000 家 canonical manifest，并完成 2 条公开证据的受限模型 smoke；Stage 3B 已完成离线 Provider 接入与默认关闭的 BOSS CDP 增强通道，真实在线 smoke、完整枚举和规模验证仍需单独审批。
 
 ## 1. 结论
 
@@ -36,6 +36,7 @@ Stage 3 的目标不是“全网实时全量职位库”，而是建立可测量
 | Redis 降级缓存 | 已实现 | 不作为采集状态事实源 |
 | 采集任务状态和前端轮询 | 已实现 | 展示覆盖任务终态，不等待外部采集 |
 | 10k 公司/100k 职位查询性能 | 已验证 | 仅证明查询容量，不证明采集吞吐 |
+| ATS 阻断统计与 BOSS CDP 公司职位 Provider | 已实现，默认关闭 | 作为 BOSS 登录态本地只读增强通道，进入现有职位去重链路 |
 
 ### 2.2 已有验证资产但未接入生产
 
@@ -125,6 +126,27 @@ ATS 原型不能直接复制到运行时。正式适配器必须：
 - LLM 只用于异常结构、字段补全或模糊去重；
 - 每次 LLM 调用必须有字符预算、超时、证据引用和可观测成本；
 - LLM 不决定访问目标，不拥有数据库或任意工具。
+
+### 5.4 BOSS CDP 公司职位增强通道
+
+BOSS CDP 公司职位 Provider 是 Stage 3B 的默认关闭增强通道，不替代官网、飞书、Moka 和公开入口发现。该通道仅在用户显式启用、本机 Chrome 已通过 CDP 暴露且账号具备合法访问权限时运行。
+
+当前实现边界：
+
+- 通过本机 Chrome CDP 会话复用已登录浏览器上下文；
+- 公司名先经过 BOSS 公司搜索，候选公司按规范化名称、品牌名、简称、主体名和法定名做相似度匹配；
+- 匹配成功后按 brandId 分页读取该公司在 BOSS 当前可见职位；
+- 输出 `ParsedJob` 并直入 `DirectAtsPersistence`，复用现有 `(provider, source_raw_id)` 和公司内语义去重；
+- 通过 `ProviderFetchStats` 记录 `entries_discovered`、`pages_fetched`、`parsed_jobs`、`blocked_pages` 和稳定 `error_code`；
+- 遇到登录、安全页、限流、接口结构变化或浏览器不可用时返回稳定错误码，不伪造零职位；
+- 连续阻断达到阈值后进入 `platform_cooldown`，同轮不再继续请求 BOSS。
+
+剩余边界：
+
+- 默认测试只覆盖 fake CDP page 和固定 JSON 解析，不访问真实 BOSS；
+- 真实在线 smoke 必须 opt-in，且只能在授权账号、本机浏览器和低频预算下运行；
+- 该通道仍不能证明公司“全量招聘”，只能证明 BOSS 登录态当前可见职位；
+- 不做验证码、滑块、安全页或访问控制绕过。
 
 ## 6. 列表快照与职位生命周期
 
@@ -241,7 +263,7 @@ Stage 3 建议增加以下模型，最终字段以审批后的 Alembic 计划为
 
 ## 12. 审批门
 
-Stage 3A 已按获批的详细 implementation plan 完成，七项计划任务及 Task 7 审阅全部通过。Company Identity Resolution Hardening 的离线、PostgreSQL、严格 10,000-company performance、secret baseline 与专用只读审计数据库本地 gate 均已通过。Task 10 已完成 reviewed candidate import、identity resolution、review/audit gate、canonical manifest freeze 与受限 entry-evidence smoke。Stage 3B 状态继续为“等待单独实施计划与审批”；本次未执行职位列表枚举、Playwright、前端看板或规模扩容。
+Stage 3A 已按获批的详细 implementation plan 完成，七项计划任务及 Task 7 审阅全部通过。Company Identity Resolution Hardening 的离线、PostgreSQL、严格 10,000-company performance、secret baseline 与专用只读审计数据库本地 gate 均已通过。Task 10 已完成 reviewed candidate import、identity resolution、review/audit gate、canonical manifest freeze 与受限 entry-evidence smoke。Stage 3B Tasks 1-7 已完成离线接入；BOSS/猎聘/拉勾基础解析、安全页识别、Provider 阻断统计、platform cooldown 与默认关闭的 BOSS CDP 公司职位 Provider 已完成。真实在线 smoke、完整覆盖快照枚举、前端看板和规模扩容仍需 opt-in gate 与单独审批。
 
 ## 13. Stage 3A 实施记录
 
@@ -300,6 +322,17 @@ Tasks 1–7 均已完成。Task 7 及全分支最终审阅在 round 4/5 后得�
 
 canonical manifest version 为 `abaad7965cabbaaa09e2dab6013be11c8b26d112e1444c18c36a8bb68bf584c4`，包含 1,000 个唯一 company id 与 1,000 个唯一 position。最终 allocation 为 chips/compute 45、cloud/model platforms 44、autonomous transport 49、computer vision 197、data/MLOps 105、enterprise/vertical AI 141、foundation models 139、robotics 47、speech/language 233。tracked manifest 为 230,607 bytes，SHA-256 `8ba503a77a37c18d2c1ddf8792fc161e423597d0b1e38e4630cddb9bdef52c81`；tracked quota 为 1,308 bytes，SHA-256 `343b3cf9ce5849d88b158f252953d1ad38273f99058e91693f09a552d2bc54e8`。tracked 文件与三个独立 external freeze replay 均 byte-identical。
 
-legacy discovery 已完成 1,000 条 `not_found`，未发出 Zhihu 请求。随后新增不可变 entry-evidence round `evidence-smoke-20260809`：从已登记 CAGD 证据关联到七牛云与万兴科技的公开官方招聘页，DashScope `qwen-plus` 共调用 2 次，得到 2 条 `accepted` self-hosted entry；2 条均进入分层抽检并完成审计，严重误判 0、暂停分层 0。aggregate entry coverage 为 2/1,000（0.2%）。本结果只证明受限证据流水线可运行，不代表整体覆盖率目标已达成；不得请求或枚举 job list。新增迁移 `0010_entry_evidence_rounds` 与 `0011_entry_evidence_integrity`；后者冻结 round membership、保存重放证据与模型判断、对严重误判追加 quarantine，并在数据库层强制 append-only。加固后的外部证据若缺少进程内 robots/ownership 验证只能进入 `review_required`。原计划 job details 与 coverage indexes 顺延为 `0012`、`0013`。Stage 3B 仍等待自己的 implementation plan 与明确审批。
+legacy discovery 已完成 1,000 条 `not_found`，未发出 Zhihu 请求。随后新增不可变 entry-evidence round `evidence-smoke-20260809`：从已登记 CAGD 证据关联到七牛云与万兴科技的公开官方招聘页，DashScope `qwen-plus` 共调用 2 次，得到 2 条 `accepted` self-hosted entry；2 条均进入分层抽检并完成审计，严重误判 0、暂停分层 0。aggregate entry coverage 为 2/1,000（0.2%）。本结果只证明受限证据流水线可运行，不代表整体覆盖率目标已达成；不得请求或枚举 job list。新增迁移 `0010_entry_evidence_rounds` 与 `0011_entry_evidence_integrity`；后者冻结 round membership、保存重放证据与模型判断、对严重误判追加 quarantine，并在数据库层强制 append-only。加固后的外部证据若缺少进程内 robots/ownership 验证只能进入 `review_required`。原计划 job details 与 coverage indexes 顺延为 `0012`、`0013`。Stage 3B 离线 Provider 接入与默认关闭 BOSS CDP 增强通道已完成；真实在线 smoke、完整枚举和规模验证仍需单独审批。
+
+## 15. 最近验证记录
+
+2026-08-11：
+
+- `tests/ingestion/providers/test_zhipin_cdp.py`：7 passed，覆盖 fake CDP page、公司搜索解析、职位分页解析、登录页识别、公司匹配、默认关闭、阻断熔断和低置信拒绝；
+- `tests/ingestion/providers/test_ats.py` 与 `tests/ingestion/test_orchestrator.py`：覆盖 ProviderFetchStats、BOSS/ATS 阻断诊断透传和 platform cooldown；
+- `tests/ingestion + tests/core`：476 passed, 3 skipped；
+- `ruff check`：核心改动文件通过。
+
+## 16. 仍需跟踪风险
 
 仍需跟踪的 Minor/运行风险：advisory lock keys 尚未排序去重，理论上存在 64-bit hash collision 下的锁顺序风险；既有 seed importer 直接写 `RegulatoryFiling` 的路径在 Task 3 persistence locking 范围外；100-company audit chunk 的 common evidence 可能占用 display slot，`display_names` 可能不完整；POSIX 分支缺少项目依赖齐全的 runtime 验证，Windows symlink 测试又受当前账户权限限制；POSIX 同权限 writer 的剩余竞态按人工裁定保留。上述风险不得被 Task 10 数据执行静默覆盖。

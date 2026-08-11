@@ -19,6 +19,7 @@ from app.core.config import settings
 from app.ingestion.contracts import Provider
 from app.ingestion.deduplication.job import JobDeduplicator
 from app.ingestion.direct_ats import DirectAtsPersistence
+from app.ingestion.entry_discovery.service import EntryDiscoveryService
 from app.ingestion.errors import RetryableInfrastructureError
 from app.ingestion.extraction.crew import Extractor
 from app.ingestion.orchestrator import (
@@ -91,6 +92,11 @@ def build_ingestion_orchestrator(
         direct_ats_persistence=DirectAtsPersistence(
             persistence_write_session,
             cache=configured_company_cache(settings.cache_redis_url),
+        ),
+        entry_discovery_service=(
+            EntryDiscoveryService(serper_provider=serper_provider)
+            if (serper_provider := next((provider for provider in providers if getattr(provider, "name", None) == "serper"), None)) is not None
+            else None
         ),
         runs=cast(CrawlRunRepository, CollectionRepository(run_state_session)),
         identity_review_recorder=SqlAlchemyIdentityReviewRecorder(

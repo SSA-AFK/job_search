@@ -112,8 +112,7 @@ class EvidenceCandidate(FrozenExtractionModel):
             for item in v:
                 if not isinstance(item, str):
                     item = str(item)
-                if item.startswith("evidence:"):
-                    item = item[len("evidence:"):]
+                item = item.removeprefix("evidence:")
                 result.append(item)
             return result
         return v

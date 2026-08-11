@@ -56,7 +56,7 @@ class RecruitingCoverageService:
         if latest is not None and latest.status is not JobSnapshotStatus.SUCCEEDED:
             return RecruitingCoverage(RecruitingStatus.COLLECTION_INCOMPLETE, None, latest.completed_at, last_successful.completed_at if last_successful else None, "unknown", "temporary_source_error", primary_url, primary_platform)
         if last_successful is None:
-            return RecruitingCoverage(RecruitingStatus.COLLECTION_INCOMPLETE, latest.completed_at if latest else None, None, "unknown", "needs_review", primary_url, primary_platform)
+            return RecruitingCoverage(RecruitingStatus.COLLECTION_INCOMPLETE, None, latest.completed_at if latest else None, None, "unknown", "needs_review", primary_url, primary_platform)
         fresh = last_successful.completed_at >= now - timedelta(hours=24)
         if not fresh:
             return RecruitingCoverage(RecruitingStatus.STALE, None, latest.completed_at if latest else None, last_successful.completed_at, "stale", None, primary_url, primary_platform)

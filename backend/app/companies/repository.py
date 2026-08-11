@@ -1,4 +1,5 @@
 from collections import defaultdict
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import case, exists, func, or_, select
@@ -107,24 +108,25 @@ class CompanyRepository:
         job_count = self.session.scalar(
             select(func.count(JobPosting.id)).where(JobPosting.company_id == company_id)
         )
-        company._loaded_aliases = aliases  # type: ignore[attr-defined]
-        company._loaded_filings = filings  # type: ignore[attr-defined]
-        company._loaded_sources = source_rows  # type: ignore[attr-defined]
-        company._loaded_profile_fields = list(
+        loaded_company = cast(Any, company)
+        loaded_company._loaded_aliases = aliases
+        loaded_company._loaded_filings = filings
+        loaded_company._loaded_sources = source_rows
+        loaded_company._loaded_profile_fields = list(
             self.session.scalars(
                 select(CompanyProfileField)
                 .where(CompanyProfileField.company_id == company_id)
                 .order_by(CompanyProfileField.field_key)
             )
-        )  # type: ignore[attr-defined]
-        company._loaded_funding_events = list(
+        )
+        loaded_company._loaded_funding_events = list(
             self.session.scalars(
                 select(FundingEvent)
                 .where(FundingEvent.company_id == company_id)
                 .order_by(FundingEvent.announced_at.desc(), FundingEvent.id)
             )
-        )  # type: ignore[attr-defined]
-        company._loaded_funding_investors = {
+        )
+        loaded_company._loaded_funding_investors = {
             event.id: list(
                 self.session.scalars(
                     select(FundingInvestor.name)

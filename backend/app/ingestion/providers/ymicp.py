@@ -1,7 +1,7 @@
 """Local ymicp adapter for active ICP record verification."""
 
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
@@ -12,7 +12,8 @@ from app.ingestion.contracts import ProviderQuery, ProviderResult, RawDocument
 from app.ingestion.errors import ProviderError
 
 _MIIT_URL = TypeAdapter(HttpUrl).validate_python("https://beian.miit.gov.cn/")
-_JsonGetter = Callable[[str, dict[str, object]], Awaitable[dict[str, object]]]
+_QueryParams = Mapping[str, str | int | float | bool | None]
+_JsonGetter = Callable[[str, _QueryParams], Awaitable[dict[str, object]]]
 
 
 class YmicpProvider:
@@ -54,7 +55,8 @@ class YmicpProvider:
                 retryable=True,
                 detail=str(payload.get("msg", "unknown ymicp failure")),
             )
-        records = payload.get("params", {}).get("list", []) if isinstance(payload.get("params"), dict) else []
+        params = payload.get("params")
+        records = params.get("list", []) if isinstance(params, dict) else []
         if not isinstance(records, list) or not records:
             return ProviderResult(documents=(), warnings=("ymicp_no_match",))
         document = RawDocument(
@@ -68,7 +70,7 @@ class YmicpProvider:
         )
         return ProviderResult(documents=(document,))
 
-    async def _default_get_json(self, url: str, params: dict[str, object]) -> dict[str, object]:
+    async def _default_get_json(self, url: str, params: _QueryParams) -> dict[str, object]:
         async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
             response = await client.get(url, params=params)
             response.raise_for_status()

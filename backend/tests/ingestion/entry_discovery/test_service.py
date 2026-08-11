@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+
 import pytest
-import httpx
-from pydantic import HttpUrl
+from pydantic import HttpUrl, ValidationError
 
 from app.ingestion.contracts import ProviderQuery, ProviderResult, RawDocument
 from app.ingestion.entry_discovery.contracts import (
@@ -14,7 +14,6 @@ from app.ingestion.entry_discovery.contracts import (
     EntryPlatform,
 )
 from app.ingestion.entry_discovery.service import DiscoveryResult, EntryDiscoveryService
-
 
 # ---------------------------------------------------------------------------
 # Fake Serper Provider
@@ -36,8 +35,8 @@ def _doc(url: str, *, title: str | None = None, text: str = "", provider: str = 
     # 用 http:// 临时包装以避免校验失败，测试用的假 URL
     try:
         u = HttpUrl(url)
-    except Exception:
-        u = HttpUrl(f"https://example.com/placeholder")
+    except ValidationError:
+        u = HttpUrl("https://example.com/placeholder")
     return RawDocument(provider=provider, external_id=None, url=u, title=title, text=text, published_at=None)
 
 
@@ -131,6 +130,24 @@ async def test_site_queries_rejects_unrelated(moonshot_pool: CompanyNamePool) ->
     assert all(c.platform != EntryPlatform.ATS_FEISHU or not c.is_high_confidence()
                for c in result.high_confidence)
     assert result.ats_entries == ()
+
+
+# ---------------------------------------------------------------------------
+# Tests - Known entry URLs
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_known_entry_url_is_validated_without_root_domain_probe() -> None:
+    pool = CompanyNamePool(
+        canonical_name="Acme",
+        known_entry_urls=("https://www.zhipin.com/web/geek/jobs?query=Acme",),
+        domains=("zhipin.com",),
+    )
+    svc = EntryDiscoveryService()
+    result = await svc.discover(pool)
+    assert len(result.high_confidence) == 1
+    assert result.high_confidence[0].platform == EntryPlatform.BOSS_ZHIPIN
+    assert result.high_confidence[0].source_provider == "known_entry_url"
 
 
 # ---------------------------------------------------------------------------

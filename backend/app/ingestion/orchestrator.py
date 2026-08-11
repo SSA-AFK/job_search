@@ -25,11 +25,14 @@ from app.core.normalization import normalize_name, normalize_url
 from app.ingestion.contracts import (
     ParsedJob,
     Provider,
+    ProviderFetchStats,
     ProviderQuery,
     RawDocument,
 )
 from app.ingestion.deduplication.job import JobDeduplicator
-from app.ingestion.direct_ats import DirectAtsPersistence
+from app.ingestion.direct_ats import DirectAtsPersistence, DirectAtsSnapshotMetadata
+from app.ingestion.entry_discovery.contracts import CompanyNamePool, EntryCandidate, EntryPlatform
+from app.ingestion.entry_discovery.service import EntryDiscoveryService
 from app.ingestion.errors import (
     ProviderError,
     RetryableInfrastructureError,
@@ -65,7 +68,7 @@ from app.ingestion.persistence.contracts import (
 from app.ingestion.persistence.result import PersistenceResult
 from app.ingestion.persistence.service import PersistenceService
 from app.ingestion.result import IngestionResult, RunResultSource
-from app.models import CollectionStatus
+from app.models import CollectionStatus, JobSnapshotStatus
 from app.models.base import utc_now
 
 _TERMINAL_STATUSES = {
@@ -82,6 +85,7 @@ class _ProviderOutcome:
     documents: tuple[RawDocument, ...]
     parsed_jobs: tuple[ParsedJob, ...]
     issue: str | None
+    stats: tuple[ProviderFetchStats, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -89,11 +93,14 @@ class _Diagnostic:
     stage: str
     code: str
     provider: str | None = None
+    detail: dict[str, object] | None = None
 
-    def payload(self) -> dict[str, str]:
-        value = {"stage": self.stage, "code": self.code}
+    def payload(self) -> dict[str, object]:
+        value: dict[str, object] = {"stage": self.stage, "code": self.code}
         if self.provider is not None:
             value["provider"] = self.provider
+        if self.detail is not None:
+            value.update(self.detail)
         return value
 
 
@@ -410,6 +417,7 @@ class IngestionOrchestrator:
         batch_builder: NormalizedBatchBuilder,
         persistence: PersistenceService,
         direct_ats_persistence: DirectAtsPersistence | None = None,
+        entry_discovery_service: EntryDiscoveryService | None = None,
         runs: CrawlRunRepository,
         identity_review_recorder: IdentityReviewRecorder,
     ) -> None:
@@ -418,6 +426,7 @@ class IngestionOrchestrator:
         self.batch_builder = batch_builder
         self.persistence = persistence
         self.direct_ats_persistence = direct_ats_persistence
+        self.entry_discovery_service = entry_discovery_service
         self.runs = runs
         self.identity_review_recorder = identity_review_recorder
 
@@ -500,22 +509,31 @@ class IngestionOrchestrator:
                     if _provider_name(entry[1]) == "zhihu_global_search"
                 )
             )
-            for search_name in company_name_variants(request.query):
-                for index, provider in ats_discovery_providers:
-                    for query in _ats_discovery_queries(
-                        search_name, site_restricted=_provider_name(provider) == "serper"
-                    ):
-                        outcomes = self._merge_outcome_dicts(
-                            outcomes,
-                            await self._collect_providers(
-                                ((index, provider),),
-                                ProviderQuery(query=query),
-                            ),
-                        )
+            entry_candidates: tuple[EntryCandidate, ...] = ()
+            if self.entry_discovery_service is not None:
+                discovery = await self.entry_discovery_service.discover(
+                    _company_name_pool_from_request(request.query)
+                )
+                entry_candidates = discovery.high_confidence
+            else:
+                for search_name in company_name_variants(request.query):
+                    for index, provider in ats_discovery_providers:
+                        for query in _ats_discovery_queries(
+                            search_name, site_restricted=_provider_name(provider) == "serper"
+                        ):
+                            outcomes = self._merge_outcome_dicts(
+                                outcomes,
+                                await self._collect_providers(
+                                    ((index, provider),),
+                                    ProviderQuery(query=query),
+                                ),
+                            )
             providers_attempted, documents, provider_error, diagnostics = self._merge_outcomes(
                 outcomes
             )
-            if not documents:
+            if entry_candidates:
+                diagnostics = (*diagnostics, _Diagnostic("entry_discovery", "entries_discovered", detail={"count": len(entry_candidates)}))
+            if not documents and not entry_candidates:
                 if not diagnostics:
                     diagnostics = (_Diagnostic("provider", "no_documents"),)
                 return self._finish(
@@ -529,13 +547,59 @@ class IngestionOrchestrator:
                     error_code=provider_error or "no_documents",
                     diagnostics=diagnostics,
                 )
-            # Scan raw documents for ATS career URLs (regex, no LLM)
+            direct_job_board_results: list[PersistenceResult] = []
+            if self.direct_ats_persistence is not None:
+                for outcome in outcomes.values():
+                    if outcome.name != "zhipin_cdp_company" or not outcome.parsed_jobs:
+                        continue
+                    entry_url = str(outcome.documents[0].url) if outcome.documents else "https://www.zhipin.com"
+                    persisted = self.direct_ats_persistence.persist(
+                        company_name=request.query,
+                        entry_url=entry_url,
+                        platform="zhipin",
+                        jobs=outcome.parsed_jobs,
+                        crawl_run_id=run.id,
+                        snapshot=_snapshot_metadata_from_outcomes({0: outcome}),
+                    )
+                    if persisted is not None:
+                        direct_job_board_results.append(persisted)
+                if direct_job_board_results:
+                    company_id = direct_job_board_results[0].company_id
+                    if any(result.company_id != company_id for result in direct_job_board_results):
+                        raise _PipelineError("invalid_company_identity")
+                    persisted = PersistenceResult(
+                        company_id=company_id,
+                        documents_written=0,
+                        jobs_written=sum(result.jobs_written for result in direct_job_board_results),
+                        warnings=(),
+                    )
+                    return self._finish(
+                        run,
+                        expected_claim_token=claim_token,
+                        status=CollectionStatus.PARTIAL if provider_error else CollectionStatus.SUCCEEDED,
+                        providers_attempted=providers_attempted,
+                        documents_found=len(documents),
+                        jobs_found=sum(
+                            len(outcome.parsed_jobs)
+                            for outcome in outcomes.values()
+                            if outcome.name == "zhipin_cdp_company"
+                        ),
+                        persistence=persisted,
+                        error_code=provider_error,
+                        diagnostics=diagnostics,
+                    )
             ats_career_urls = _scan_ats_career_urls(
                 documents, company_name_variants(request.query)
             )
             ats_providers = tuple(
                 entry for entry in website_providers if _provider_name(entry[1]) == "ats"
             )
+            entry_ats_urls = tuple(
+                candidate
+                for candidate in (_entry_candidate_to_ats_url(candidate) for candidate in entry_candidates)
+                if candidate is not None
+            )
+            ats_career_urls = _merge_ats_career_urls(entry_ats_urls, ats_career_urls)
             if ats_career_urls and self.direct_ats_persistence is not None:
                 stage = "ats"
                 direct_results: list[PersistenceResult] = []
@@ -566,12 +630,14 @@ class IngestionOrchestrator:
                         for outcome in candidate_outcomes.values()
                         for job in outcome.parsed_jobs
                     )
+                    snapshot = _snapshot_metadata_from_outcomes(candidate_outcomes)
                     persisted = self.direct_ats_persistence.persist(
                         company_name=request.query,
                         entry_url=candidate.url,
                         platform=_ats_platform(candidate.url),
                         jobs=parsed_jobs,
                         crawl_run_id=run.id,
+                        snapshot=snapshot,
                     )
                     if persisted is not None:
                         direct_results.append(persisted)
@@ -724,7 +790,7 @@ class IngestionOrchestrator:
             jobs = await self.extractor.extract_jobs(company, documents)
             jobs_found = len(jobs)
             stage = "normalization"
-            outcome = await self.batch_builder.build(
+            batch_outcome = await self.batch_builder.build(
                 company=company,
                 profile=profile,
                 jobs=jobs,
@@ -741,11 +807,11 @@ class IngestionOrchestrator:
                     if current is None
                     else IngestionResult.from_run(current)
                 )
-            if outcome.review_draft is not None:
+            if batch_outcome.review_draft is not None:
                 stage = "identity_review"
                 self.identity_review_recorder.record(
                     crawl_run_id=run.id,
-                    draft=outcome.review_draft,
+                    draft=batch_outcome.review_draft,
                 )
                 code = "company_identity_review_required"
                 return self._finish(
@@ -759,7 +825,7 @@ class IngestionOrchestrator:
                     error_code=code,
                     diagnostics=(*diagnostics, _Diagnostic("identity_resolution", code)),
                 )
-            batch = outcome.batch
+            batch = batch_outcome.batch
             if batch is None:
                 raise _PipelineError("invalid_batch_outcome")
             stage = "persistence"
@@ -812,6 +878,7 @@ class IngestionOrchestrator:
         for index, provider in providers:
             documents: tuple[RawDocument, ...] = ()
             parsed_jobs: tuple[ParsedJob, ...] = ()
+            stats: tuple[ProviderFetchStats, ...] = ()
             issue: str | None = None
             try:
                 result = await provider.search(provider_query)
@@ -822,6 +889,7 @@ class IngestionOrchestrator:
             else:
                 documents = result.documents
                 parsed_jobs = result.parsed_jobs
+                stats = result.stats
                 for warning in result.warnings:
                     issue = issue or _warning_code(warning)
             outcomes[index] = _ProviderOutcome(
@@ -829,6 +897,7 @@ class IngestionOrchestrator:
                 documents=documents,
                 parsed_jobs=parsed_jobs,
                 issue=issue,
+                stats=stats,
             )
         return outcomes
 
@@ -847,6 +916,7 @@ class IngestionOrchestrator:
                     documents=prev.documents + outcome.documents,
                     parsed_jobs=prev.parsed_jobs + outcome.parsed_jobs,
                     issue=prev.issue or outcome.issue,
+                    stats=prev.stats + outcome.stats,
                 )
             else:
                 result[index] = outcome
@@ -875,15 +945,27 @@ class IngestionOrchestrator:
         tuple[_Diagnostic, ...],
     ]:
         ordered = tuple(outcomes[index] for index in sorted(outcomes))
+        issue_diagnostics = tuple(
+            _Diagnostic("provider", outcome.issue, outcome.name)
+            for outcome in ordered
+            if outcome.issue is not None
+        )
+        stats_diagnostics = tuple(
+            _Diagnostic(
+                "provider",
+                "fetch_stats",
+                outcome.name,
+                _provider_stats_payload(stat),
+            )
+            for outcome in ordered
+            for stat in outcome.stats
+            if stat.blocked_pages > 0 or stat.error_code is not None
+        )
         return (
             tuple(outcome.name for outcome in ordered),
             tuple(document for outcome in ordered for document in outcome.documents),
             next((outcome.issue for outcome in ordered if outcome.issue is not None), None),
-            tuple(
-                _Diagnostic("provider", outcome.issue, outcome.name)
-                for outcome in ordered
-                if outcome.issue is not None
-            ),
+            issue_diagnostics + stats_diagnostics,
         )
 
     def _finish(
@@ -950,12 +1032,21 @@ class _PipelineError(Exception):
 _ATS_URL_PATTERNS = (
     re.compile(r"https?://jobs\.feishu\.cn/[a-zA-Z0-9_@./#?&=-]+"),
     re.compile(r"https?://app\.mokahr\.com/[a-zA-Z0-9_@./#?&=-]+"),
+    re.compile(r"https?://(?:www\.)?zhipin\.com/[a-zA-Z0-9_@./#?&=-]+"),
+    re.compile(r"https?://(?:www\.)?liepin\.com/[a-zA-Z0-9_@./#?&=-]+"),
+    re.compile(r"https?://(?:www\.)?lagou\.com/[a-zA-Z0-9_@./#?&=-]+"),
 )
 
-_ATS_DISCOVERY_TERMS = ("jobs.feishu.cn", "app.mokahr.com")
+_ATS_DISCOVERY_TERMS = ("jobs.feishu.cn", "app.mokahr.com", "zhipin.com", "liepin.com", "lagou.com")
 _ATS_HOST_PLATFORMS = {
     "jobs.feishu.cn": "feishu",
     "app.mokahr.com": "moka",
+    "zhipin.com": "zhipin",
+    "www.zhipin.com": "zhipin",
+    "liepin.com": "liepin",
+    "www.liepin.com": "liepin",
+    "lagou.com": "lagou",
+    "www.lagou.com": "lagou",
 }
 
 
@@ -976,7 +1067,8 @@ def _parse_ats_url(url: str) -> HttpUrl | None:
         parsed = HttpUrl(url)
     except ValidationError:
         return None
-    return parsed if _normalized_website_host(parsed) in _ATS_HOST_PLATFORMS else None
+    host = _normalized_website_host(parsed)
+    return parsed if host is not None and _platform_for_host(host) is not None else None
 
 
 def _ats_platform(url: str) -> str:
@@ -984,9 +1076,70 @@ def _ats_platform(url: str) -> str:
     if parsed is None:
         raise _PipelineError("invalid_ats_url")
     host = _normalized_website_host(parsed)
-    if host is None:
+    platform = _platform_for_host(host) if host is not None else None
+    if platform is None:
         raise _PipelineError("invalid_ats_url")
-    return _ATS_HOST_PLATFORMS[host]
+    return platform
+
+
+def _platform_for_host(host: str) -> str | None:
+    normalized = host.lower().rstrip(".")
+    if normalized in _ATS_HOST_PLATFORMS:
+        return _ATS_HOST_PLATFORMS[normalized]
+    for known_host, platform in _ATS_HOST_PLATFORMS.items():
+        if normalized.endswith("." + known_host):
+            return platform
+    return None
+
+
+def _company_name_pool_from_request(query: str) -> CompanyNamePool:
+    variants = company_name_variants(query)
+    return CompanyNamePool(canonical_name=query, historical_aliases=tuple(v for v in variants if v != query))
+
+
+def _entry_candidate_to_ats_url(candidate: EntryCandidate) -> AtsCareerUrl | None:
+    if candidate.platform not in {
+        EntryPlatform.ATS_FEISHU,
+        EntryPlatform.ATS_MOKA,
+        EntryPlatform.BOSS_ZHIPIN,
+        EntryPlatform.LIEPIN,
+        EntryPlatform.LAGOU,
+    }:
+        return None
+    if _parse_ats_url(candidate.url) is None:
+        return None
+    return AtsCareerUrl(url=candidate.url.rstrip("/"), source_url=candidate.source_url or candidate.url)
+
+
+def _merge_ats_career_urls(
+    discovered: tuple[AtsCareerUrl, ...], scanned: tuple[AtsCareerUrl, ...]
+) -> tuple[AtsCareerUrl, ...]:
+    seen: set[str] = set()
+    merged: list[AtsCareerUrl] = []
+    for candidate in (*discovered, *scanned):
+        key = candidate.url.rstrip("/").lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(candidate)
+    return tuple(merged)
+
+
+def _snapshot_metadata_from_outcomes(outcomes: dict[int, _ProviderOutcome]) -> DirectAtsSnapshotMetadata:
+    stats = tuple(stat for outcome in outcomes.values() for stat in outcome.stats)
+    pages_fetched = sum(stat.pages_fetched for stat in stats) or 1
+    parsed_jobs = sum(len(outcome.parsed_jobs) for outcome in outcomes.values())
+    error_code = next((stat.error_code for stat in stats if stat.error_code), None)
+    if error_code is None:
+        error_code = "pagination_incomplete"
+    return DirectAtsSnapshotMetadata(
+        status=JobSnapshotStatus.PARTIAL,
+        pagination_complete=False,
+        empty_confirmed=False,
+        observed_count=parsed_jobs,
+        pages_fetched=pages_fetched,
+        error_code=error_code,
+    )
 
 
 def _scan_ats_career_urls(
@@ -1017,6 +1170,21 @@ def _scan_ats_career_urls(
 def _provider_name(provider: Provider) -> str:
     value = getattr(provider, "name", type(provider).__name__)
     return str(value)[:50]
+
+
+def _provider_stats_payload(stat: ProviderFetchStats) -> dict[str, object]:
+    value: dict[str, object] = {
+        "stat_provider": stat.provider,
+        "entries_discovered": stat.entries_discovered,
+        "pages_fetched": stat.pages_fetched,
+        "parsed_jobs": stat.parsed_jobs,
+        "blocked_pages": stat.blocked_pages,
+    }
+    if stat.platform is not None:
+        value["platform"] = stat.platform
+    if stat.error_code is not None:
+        value["error_code"] = stat.error_code
+    return value
 
 
 def _requires_website(provider: Provider) -> bool:

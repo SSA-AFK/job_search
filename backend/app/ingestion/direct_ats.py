@@ -30,6 +30,18 @@ class DirectAtsWriteResult:
     observed_count: int
 
 
+@dataclass(frozen=True)
+class DirectAtsSnapshotMetadata:
+    status: JobSnapshotStatus = JobSnapshotStatus.PARTIAL
+    pagination_complete: bool = False
+    empty_confirmed: bool = False
+    reported_total: int | None = None
+    observed_count: int | None = None
+    pages_fetched: int = 1
+    content_fingerprint: str | None = None
+    error_code: str | None = "pagination_incomplete"
+
+
 class DirectAtsPersistence:
     """Writes structured ATS results only for an already-known company identity."""
 
@@ -45,6 +57,7 @@ class DirectAtsPersistence:
         platform: str,
         jobs: tuple[ParsedJob, ...],
         crawl_run_id: UUID,
+        snapshot: DirectAtsSnapshotMetadata | None = None,
     ) -> PersistenceResult | None:
         company_id = self.resolve_company_id(company_name)
         if company_id is None:
@@ -56,6 +69,7 @@ class DirectAtsPersistence:
             platform=platform,
             jobs=jobs,
             crawl_run_id=crawl_run_id,
+            snapshot=snapshot,
         )
         if self._cache is not None:
             self._cache.invalidate_company(company_id)
@@ -111,7 +125,7 @@ def _merge_job_from_parsed(job: JobPosting, parsed: ParsedJob) -> None:
 
 
 def write_direct_ats_jobs(
-    session: Session, *, company_id: UUID, entry_url: str, platform: str, jobs: tuple[ParsedJob, ...], crawl_run_id: UUID | None = None
+    session: Session, *, company_id: UUID, entry_url: str, platform: str, jobs: tuple[ParsedJob, ...], crawl_run_id: UUID | None = None, snapshot: DirectAtsSnapshotMetadata | None = None
 ) -> DirectAtsWriteResult:
     now = datetime.now(UTC)
     normalized_entry_url = normalize_url(entry_url)
@@ -163,6 +177,8 @@ def write_direct_ats_jobs(
             source.apply_url = parsed.url
             source.last_seen_at = now
             source.is_active = True
-    session.add(JobCollectionSnapshot(job_entry_id=entry.id, crawl_run_id=crawl_run_id, status=JobSnapshotStatus.SUCCEEDED, lifecycle_applied=True, pagination_complete=True, empty_confirmed=not jobs, observed_count=len(jobs), pages_fetched=1, command_hash=hashlib.sha256(normalized_entry_url.encode()).hexdigest(), started_at=now, completed_at=now))
+    metadata = snapshot or DirectAtsSnapshotMetadata(observed_count=len(jobs))
+    observed_count = metadata.observed_count if metadata.observed_count is not None else len(jobs)
+    session.add(JobCollectionSnapshot(job_entry_id=entry.id, crawl_run_id=crawl_run_id, status=metadata.status, lifecycle_applied=metadata.status is JobSnapshotStatus.SUCCEEDED and metadata.pagination_complete, pagination_complete=metadata.pagination_complete, empty_confirmed=metadata.empty_confirmed, reported_total=metadata.reported_total, observed_count=observed_count, pages_fetched=metadata.pages_fetched, content_fingerprint=metadata.content_fingerprint, error_code=metadata.error_code, command_hash=hashlib.sha256(f"{normalized_entry_url}:{metadata.status.value}:{metadata.pagination_complete}:{observed_count}:{metadata.pages_fetched}:{metadata.error_code or ''}".encode()).hexdigest(), started_at=now, completed_at=now))
     session.commit()
     return DirectAtsWriteResult(jobs_written=written, observed_count=len(jobs))

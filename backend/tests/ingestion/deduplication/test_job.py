@@ -220,6 +220,37 @@ def test_same_title_same_city_is_merged(
     assert match.job_posting_id == EXISTING_JOB_ID
 
 
+def test_cross_job_board_same_company_title_city_and_type_is_merged(
+    repository: "FakeJobRepository",
+) -> None:
+    repository.jobs[COMPANY_ID] = (
+        JobForComparison(
+            job_posting_id=EXISTING_JOB_ID,
+            normalized_title="高级专家工程师乘客推荐引擎方向",
+            city="北京",
+            job_type=JobType.FULL_TIME,
+            employment_type=EmploymentType.FULL_TIME,
+        ),
+    )
+    deduplicator = JobDeduplicator(repository)
+
+    match = asyncio.run(
+        deduplicator.resolve(
+            COMPANY_ID,
+            job_candidate(
+                title="高级专家工程师（乘客推荐引擎方向）",
+                location="北京",
+                employment_type=EmploymentType.FULL_TIME,
+                provider="ats_zhipin",
+                source_raw_id="https://m.zhipin.com/job_detail/65677bde329d768b0nFy2NW1ElZQ.html",
+            ),
+        )
+    )
+
+    assert match.kind == "existing"
+    assert match.job_posting_id == EXISTING_JOB_ID
+
+
 def job_candidate(**overrides: object) -> JobCandidate:
     values: dict[str, object] = {
         "company_name": "Example",

@@ -20,6 +20,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--limit must be positive")
 
     runtime = create_runtime_components(settings)
+    if runtime.extractor is None:
+        parser.error("extractor is not configured")
     session = SessionLocal()
     try:
         results = asyncio.run(

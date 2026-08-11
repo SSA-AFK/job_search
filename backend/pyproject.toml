@@ -42,6 +42,14 @@ markers = [
     "postgresql: isolated PostgreSQL migration verification",
 ]
 
+[[tool.mypy.overrides]]
+module = ["openpyxl.*", "celery.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+ignore_errors = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

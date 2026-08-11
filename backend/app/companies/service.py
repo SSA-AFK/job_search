@@ -1,5 +1,5 @@
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -21,7 +21,7 @@ from app.companies.schemas import (
     RecruitingCoverageItem,
 )
 from app.core.errors import CompanyNotFoundError
-from app.models import Company, CompanySource, JobPosting, SourceDocument
+from app.models import Company, CompanySource, JobPosting, SourceDocument, VerificationStatus
 from app.recruiting_coverage.service import RecruitingCoverageService
 
 
@@ -176,7 +176,7 @@ class CompanyService:
             active_job_count=coverage.active_job_count,
             last_checked_at=coverage.last_checked_at,
             last_successful_at=coverage.last_successful_at,
-            freshness=coverage.freshness,
+            freshness=cast(Literal["fresh", "stale", "unknown"], coverage.freshness),
             reason_code=coverage.reason_code,
             primary_entry_url=coverage.primary_entry_url,
             primary_entry_platform=coverage.primary_entry_platform,
@@ -191,7 +191,7 @@ class CompanyService:
             url=document.url,
             title=document.title,
             covered_fields=company_source.covered_fields,
-            field_verification=company_source.field_verification,
+            field_verification={key: VerificationStatus(value) for key, value in company_source.field_verification.items()},
             confidence=company_source.confidence,
             published_at=document.published_at,
             fetched_at=document.fetched_at,

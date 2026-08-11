@@ -13,18 +13,24 @@ _PLATFORM_SELECTORS: dict[str, tuple[str, str]] = {
     "feishu": (".positionItem, div.job-card, li.job-item, [data-job-id]", "a"),
     "moka": ("a.link-abc, .link-abc, div.position-list-item, li.position-item, [data-position-id]", "a"),
     "zhipin": (
-        "li.job-card-wrapper, div.job-list-box li, div.job-card, [ka='search_list'] li, "
-        ".search-job-result li, .job-lists li",
+        (
+            "li.job-card-wrapper, div.job-list-box li, div.job-card, [ka='search_list'] li, "
+            ".search-job-result li, .job-lists li"
+        ),
         "a.job-name, .job-card-left a, a[href*='/job_detail/']",
     ),
     "liepin": (
-        "div.sojob-item, div.job-list-item, div.search-result-list div.job-item, "
-        "li.job-list-item, .job-list-view > section, div[data-position-id]",
+        (
+            "div.sojob-item, div.job-list-item, div.search-result-list div.job-item, "
+            "li.job-list-item, .job-list-view > section, div[data-position-id]"
+        ),
         "a.job-title, h3.job-title a, a[href*='/job/'], a[href*='liepin.com/job']",
     ),
     "lagou": (
-        "div.job-box, li.con_list_item, a.position_link, div.list_item_top, "
-        "div.passed_bar, .job-list li, div.job-card",
+        (
+            "div.job-box, li.con_list_item, a.position_link, div.list_item_top, "
+            "div.passed_bar, .job-list li, div.job-card"
+        ),
         "a.position_link, a.s-top-name, h3 a, a[href*='/jobs/'], a[href*='lagou.com/jobs']",
     ),
     "generic": ("a.job-card, .job-listing a, .position a", "a"),
@@ -36,7 +42,10 @@ _PLATFORM_SELECTORS: dict[str, tuple[str, str]] = {
 # ---------------------------------------------------------------------------
 
 _SALARY_RANGE_RE = re.compile(
-    r"(?P<min>\d+(?:\.\d+)?)\s*[-~到至Kk千×Xx*]\s*(?P<max>\d+(?:\.\d+)?)\s*"
+    r"(?P<min>\d+(?:\.\d+)?)\s*"
+    r"(?P<min_unit>K|k|千|万|w|W|元)?"
+    r"\s*[-~到至×Xx*]\s*"
+    r"(?P<max>\d+(?:\.\d+)?)\s*"
     r"(?P<unit>K|k|千|万|w|W|元|薪)?"
 )
 _MONTHS_RE = re.compile(r"(?P<n>\d{1,2})\s*薪")
@@ -50,34 +59,77 @@ def _guess_salary_fields(text: str) -> tuple[int | None, int | None, int | None]
       1.5-2.5万 / 1.5-2.5w → (15, 25, None)   # 换算成 K
       15-25K·14薪 / 15-25K 14薪 → (15, 25, 14)
       8千-1.2万 → 单位混杂，忽略（保守）
+      150-200/天、200元/天 → 日薪，直接跳过
+      30-60万/年 → 年薪，保守跳过
     """
     if not text:
         return None, None, None
-    months_match = _MONTHS_RE.search(text)
+    t = text
+    # 日薪 / 年薪 → 明确不是月薪范围，提前拒绝
+    if any(k in t for k in ("/天", "元/天", "每天", "日结", "/日", "日薪")):
+        return None, None, None
+    if any(k in t for k in ("万/年", "w/年", "W/年", "元/年", "每年", "/年", "年薪")):
+        return None, None, None
+    months_match = _MONTHS_RE.search(t)
     months = int(months_match.group("n")) if months_match else None
 
-    m = _SALARY_RANGE_RE.search(text)
-    if not m:
+    # 扫描所有匹配，优先找"带明确货币单位"的合法薪资，避免误命中 3-5年 之类经验
+    matches = list(_SALARY_RANGE_RE.finditer(t))
+    salary_match = None
+    for m in matches:
+        min_unit = (m.group("min_unit") or "").lower()
+        unit = (m.group("unit") or "").lower()
+        combined_unit = min_unit or unit
+        start = m.start()
+        end = m.end()
+        # 上下文排除：紧邻 "年/经验/个月/天" 表示这是经验/年限不是薪资
+        post_ctx = t[end:end + 3]
+        pre_ctx = t[max(0, start - 2):start]
+        if any(k in post_ctx for k in ("年", "月", "经验", "天")) and not combined_unit:
+            continue
+        if any(k in pre_ctx for k in ("经验", "工作", "不限")) and not combined_unit:
+            continue
+        # 有单位的匹配优先
+        if combined_unit in {"k", "千", "万", "w"}:
+            salary_match = m
+            break
+        if salary_match is None:
+            salary_match = m
+
+    if salary_match is None:
         return None, None, months
+    m = salary_match
     try:
         low = float(m.group("min"))
         high = float(m.group("max"))
     except (TypeError, ValueError):
         return None, None, months
+    min_unit = (m.group("min_unit") or "").lower()
     unit = (m.group("unit") or "").lower()
-    if unit in {"万", "w"}:
+    combined_unit = min_unit or unit
+    # 前后单位不一致（如 8千-1.2万）时保守丢弃
+    if min_unit and unit and min_unit != unit:
+        if {min_unit, unit} <= {"k", "千"} or {min_unit, unit} <= {"万", "w"}:
+            # 大小写或同义差异可接受
+            pass
+        else:
+            return None, None, months
+    if combined_unit in {"万", "w"}:
         low *= 10
         high *= 10
-    elif unit in {"千", "元"}:
+    elif combined_unit in {"千", "元"}:
         # 千: 8-12千 = 8k-12k; 元通常是日/面议，不处理
-        if unit == "千":
+        if combined_unit == "千":
             pass  # 已是 K 级别
         else:
             return None, None, months
-    # 超出合理范围的月薪（> 500K 或 < 0.5K）直接丢弃，避免误解析
-    if high < 0.5 or low > 500 or low > high:
+    elif not combined_unit:
+        # 完全无单位的裸数字（如 25-50）不采信，避免误匹配
         return None, None, months
-    return int(round(low)), int(round(high)), months
+    # 超出合理范围的月薪（> 500K 或 < 0.5K 或 low > high）直接丢弃，避免误解析
+    if high < 0.5 or high > 500 or low > 500 or low > high:
+        return None, None, months
+    return round(low), round(high), months
 
 
 def _guess_city(text: str) -> str | None:
@@ -195,6 +247,8 @@ def parse_html_job_list(html: str, platform: str) -> AtsListResult:
                 continue
             href_val = link.get("href", "")
             href = href_val[0] if isinstance(href_val, list) else href_val
+            if not isinstance(href, str):
+                continue
             href_key = href.strip()
             if not href_key or href_key in seen_hrefs:
                 continue

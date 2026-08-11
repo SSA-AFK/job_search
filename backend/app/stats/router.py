@@ -1,14 +1,12 @@
 """Aggregated statistics for the dashboard overview."""
 
-from collections import Counter
-
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_session
-from app.models import CollectionStatus, Company, CrawlRun, JobPosting
+from app.models import Company, CrawlRun, JobPosting
 
 router = APIRouter(prefix="/stats", tags=["stats"])
 
@@ -33,7 +31,7 @@ class OverviewStats(BaseModel):
 
 
 @router.get("/overview", response_model=OverviewStats)
-def overview(session: Session = Depends(get_session)) -> OverviewStats:
+def overview(session: Session = Depends(get_session)) -> OverviewStats:  # noqa: B008
     companies_total = session.scalar(select(func.count(Company.id))) or 0
     companies_with_description = session.scalar(
         select(func.count(Company.id)).where(Company.description.is_not(None))

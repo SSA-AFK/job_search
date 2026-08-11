@@ -68,8 +68,6 @@ DocumentUrl = Annotated[
 ]
 
 
-from app.ingestion.extraction.schemas import JobCandidate
-
 
 class ProviderQuery(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -92,6 +90,18 @@ class RawDocument(BaseModel):
     authority_level: int | None = Field(default=None, ge=1, le=4)
 
 
+class ProviderFetchStats(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    provider: str = Field(min_length=1, max_length=50)
+    platform: str | None = Field(default=None, max_length=50)
+    entries_discovered: int = Field(default=0, ge=0)
+    pages_fetched: int = Field(default=0, ge=0)
+    parsed_jobs: int = Field(default=0, ge=0)
+    blocked_pages: int = Field(default=0, ge=0)
+    error_code: str | None = Field(default=None, max_length=100)
+
+
 class ProviderResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -99,6 +109,7 @@ class ProviderResult(BaseModel):
     truncated: bool = False
     warnings: tuple[str, ...] = ()
     parsed_jobs: tuple[ParsedJob, ...] = ()
+    stats: tuple[ProviderFetchStats, ...] = ()
 
 
 class Provider(Protocol):

@@ -13,7 +13,6 @@ from app.company_identity.contracts import (
 )
 from app.company_identity.service import IdentitySearchUnavailable
 from app.ingestion.contracts import ProviderQuery, ProviderResult, RawDocument
-from app.ingestion.deduplication.semantic import DuplicateDecision
 from app.ingestion.errors import RetryableInfrastructureError
 from app.ingestion.extraction.schemas import (
     CompanyCandidate,

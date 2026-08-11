@@ -1,6 +1,6 @@
 from urllib.parse import urlsplit
 
-from app.ingestion.contracts import ParsedJob, ProviderQuery, ProviderResult
+from app.ingestion.contracts import ParsedJob, ProviderFetchStats, ProviderQuery, ProviderResult
 from app.ingestion.providers.ats_extractors.feishu import FeishuAtsExtractor
 from app.ingestion.providers.ats_extractors.lagou import LagouAtsExtractor
 from app.ingestion.providers.ats_extractors.liepin import LiepinAtsExtractor
@@ -24,6 +24,17 @@ _EMPLOYMENT_TYPE_TO_JOB_TYPE = {
     "part_time": "part_time",
     "temporary": "temporary",
 }
+
+_ACCESS_BLOCK_ERROR_CODES = frozenset(
+    {
+        "captcha_required",
+        "login_required",
+        "rate_limited",
+        "robots_disallowed",
+        "render_failed",
+        "platform_cooldown",
+    }
+)
 
 _AtsExtractor = (
     FeishuAtsExtractor | MokaAtsExtractor | ZhipinAtsExtractor | LiepinAtsExtractor | LagouAtsExtractor
@@ -54,22 +65,35 @@ class AtsProvider:
         renderer: AtsRenderer,
         feishu_extractor: FeishuAtsExtractor,
         moka_extractor: MokaAtsExtractor,
-        zhipin_extractor: ZhipinAtsExtractor,
-        liepin_extractor: LiepinAtsExtractor,
-        lagou_extractor: LagouAtsExtractor,
+        zhipin_extractor: ZhipinAtsExtractor | None = None,
+        liepin_extractor: LiepinAtsExtractor | None = None,
+        lagou_extractor: LagouAtsExtractor | None = None,
         enabled_platforms: frozenset[str],
+        platform_block_threshold: int = 2,
     ) -> None:
         self._http = http_client
         self._robots = robots_policy
         self._renderer = renderer
-        self._extractors: dict[str, _AtsExtractor] = {
+        extractors: dict[str, _AtsExtractor] = {
             "feishu": feishu_extractor,
             "moka": moka_extractor,
-            "zhipin": zhipin_extractor,
-            "liepin": liepin_extractor,
-            "lagou": lagou_extractor,
         }
+        if zhipin_extractor is not None:
+            extractors["zhipin"] = zhipin_extractor
+        if liepin_extractor is not None:
+            extractors["liepin"] = liepin_extractor
+        if lagou_extractor is not None:
+            extractors["lagou"] = lagou_extractor
+        # 平台启用时，必须传入对应 extractor；在构造期早报错优于运行期
+        for platform in enabled_platforms:
+            if platform not in extractors:
+                raise ValueError(
+                    f"AtsProvider: platform {platform!r} is enabled but no extractor was provided"
+                )
+        self._extractors = extractors
         self._enabled = enabled_platforms
+        self._platform_block_threshold = max(1, platform_block_threshold)
+        self._platform_block_counts: dict[str, int] = {}
         self._approved_hosts = frozenset(
             host
             for platform, host in _PLATFORM_HOSTS.items()
@@ -94,7 +118,31 @@ class AtsProvider:
                 platform = p
                 break
         if platform is None or platform not in self._enabled:
-            return ProviderResult(documents=(), warnings=("platform_disabled",))
+            return ProviderResult(
+                documents=(),
+                warnings=("platform_disabled",),
+                stats=(
+                    ProviderFetchStats(
+                        provider="ats",
+                        platform=platform,
+                        error_code="platform_disabled",
+                    ),
+                ),
+            )
+        if self._platform_block_counts.get(platform, 0) >= self._platform_block_threshold:
+            return ProviderResult(
+                documents=(),
+                warnings=("platform_cooldown",),
+                stats=(
+                    ProviderFetchStats(
+                        provider="ats",
+                        platform=platform,
+                        entries_discovered=1,
+                        blocked_pages=1,
+                        error_code="platform_cooldown",
+                    ),
+                ),
+            )
         extractor = self._extractors[platform]
         document, result = await extractor.fetch_list(
             url=url, http_client=self._http, robots_policy=self._robots, renderer=self._renderer
@@ -121,8 +169,24 @@ class AtsProvider:
                     external_id=candidate.external_id,
                 )
             )
+        error_code = result.error_code
+        if error_code in _ACCESS_BLOCK_ERROR_CODES:
+            self._platform_block_counts[platform] = self._platform_block_counts.get(platform, 0) + 1
+        elif parsed_jobs:
+            self._platform_block_counts.pop(platform, None)
         return ProviderResult(
             documents=(document,),
             warnings=tuple(warnings),
             parsed_jobs=tuple(parsed_jobs),
+            stats=(
+                ProviderFetchStats(
+                    provider="ats",
+                    platform=platform,
+                    entries_discovered=1,
+                    pages_fetched=result.pages_fetched,
+                    parsed_jobs=len(parsed_jobs),
+                    blocked_pages=1 if error_code in _ACCESS_BLOCK_ERROR_CODES else 0,
+                    error_code=error_code,
+                ),
+            ),
         )

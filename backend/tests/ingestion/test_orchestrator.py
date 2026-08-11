@@ -16,7 +16,15 @@ from app.company_identity.service import (
     IdentityReviewConflict,
     IdentitySearchUnavailable,
 )
-from app.ingestion.contracts import ParsedJob, ProviderQuery, ProviderResult, RawDocument
+from app.ingestion.contracts import (
+    ParsedJob,
+    ProviderFetchStats,
+    ProviderQuery,
+    ProviderResult,
+    RawDocument,
+)
+from app.ingestion.entry_discovery.contracts import EntryCandidate, EntryPlatform
+from app.ingestion.entry_discovery.service import DiscoveryResult
 from app.ingestion.errors import (
     ExtractionError,
     ProviderError,
@@ -143,6 +151,16 @@ class FakeProvider:
         self.queries.append(query)
         if isinstance(self.result, Exception):
             raise self.result
+        return self.result
+
+
+class FakeEntryDiscoveryService:
+    def __init__(self, result: DiscoveryResult) -> None:
+        self.result = result
+        self.calls = 0
+
+    async def discover(self, _name_pool: object) -> DiscoveryResult:
+        self.calls += 1
         return self.result
 
 
@@ -287,6 +305,7 @@ def orchestrator_for(
     build_outcome: BatchBuildOutcome | None = None,
     identity_review_recorder: FakeIdentityReviewRecorder | None = None,
     direct_ats_persistence: FakeDirectAtsPersistence | None = None,
+    entry_discovery_service: object | None = None,
 ) -> tuple[IngestionOrchestrator, FakeRuns, FakePersistence]:
     runs = FakeRuns({run.id: run})
     persistence = FakePersistence()
@@ -299,6 +318,7 @@ def orchestrator_for(
             batch_builder=FakeBatchBuilder(build_outcome),
             persistence=persistence,
             direct_ats_persistence=direct_ats_persistence,  # type: ignore[arg-type]
+            entry_discovery_service=entry_discovery_service,  # type: ignore[arg-type]
             runs=runs,
             identity_review_recorder=(
                 identity_review_recorder or FakeIdentityReviewRecorder()
@@ -313,6 +333,9 @@ def test_ats_discovery_queries_are_bounded_to_known_platform_hosts() -> None:
     assert _ats_discovery_queries("  Acme  ") == (
         "Acme jobs.feishu.cn",
         "Acme app.mokahr.com",
+        "Acme zhipin.com",
+        "Acme liepin.com",
+        "Acme lagou.com",
     )
     assert _ats_discovery_queries("   ") == ()
 
@@ -334,6 +357,9 @@ async def test_zhihu_gets_bounded_ats_discovery_queries() -> None:
         "Acme",
         "Acme jobs.feishu.cn",
         "Acme app.mokahr.com",
+        "Acme zhipin.com",
+        "Acme liepin.com",
+        "Acme lagou.com",
     ]
     assert [query.query for query in other.queries] == ["Acme"]
 
@@ -396,8 +422,117 @@ async def test_matching_ats_entry_bypasses_extractor_and_persists_structured_job
                 ),
             ),
             "crawl_run_id": run.id,
+            "snapshot": direct.calls[0]["snapshot"],
         }
     ]
+    assert direct.calls[0]["snapshot"].pagination_complete is False
+    assert direct.calls[0]["snapshot"].error_code == "pagination_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_entry_discovery_job_board_entry_routes_to_ats_provider() -> None:
+    run = FakeRun(uuid4())
+    entry = EntryCandidate(
+        url="https://www.zhipin.com/web/geek/jobs?query=Acme",
+        platform=EntryPlatform.BOSS_ZHIPIN,
+        source_provider="serper",
+        source_url="https://www.zhipin.com/web/geek/jobs?query=Acme",
+        overall_confidence=0.9,
+    )
+    entry_discovery = FakeEntryDiscoveryService(
+        DiscoveryResult(candidates=(entry,), high_confidence=(entry,), diagnostics=())
+    )
+    ats = FakeProvider(
+        "ats",
+        ProviderResult(
+            documents=(document(),),
+            parsed_jobs=(
+                ParsedJob(
+                    title="Engineer",
+                    url="https://www.zhipin.com/job_detail/1.html",
+                    provider="ats_zhipin",
+                ),
+            ),
+        ),
+        requires_website=True,
+    )
+    direct = FakeDirectAtsPersistence()
+    orchestrator, _runs, persistence = orchestrator_for(
+        run,
+        providers=[ats],
+        direct_ats_persistence=direct,
+        entry_discovery_service=entry_discovery,
+    )
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.SUCCEEDED
+    assert entry_discovery.calls == 1
+    assert ats.calls == 1
+    assert ats.queries[0].website is not None
+    assert str(ats.queries[0].website).rstrip("/") == "https://www.zhipin.com/web/geek/jobs?query=Acme"
+    assert persistence.calls == 0
+    assert direct.calls[0]["platform"] == "zhipin"
+    assert direct.calls[0]["snapshot"].pagination_complete is False
+
+
+@pytest.mark.asyncio
+async def test_zhipin_cdp_company_jobs_bypass_extractor_and_persist() -> None:
+    run = FakeRun(uuid4())
+    provider = FakeProvider(
+        "zhipin_cdp_company",
+        ProviderResult(
+            documents=(
+                RawDocument(
+                    provider="zhipin_cdp_company",
+                    external_id="brand-1",
+                    url="https://www.zhipin.com/gongsi/brand-1.html",
+                    title="BOSS直聘公司职位：Acme",
+                    text="Engineer Beijing 30-50K",
+                    published_at=None,
+                ),
+            ),
+            parsed_jobs=(
+                ParsedJob(
+                    title="Engineer",
+                    url="https://www.zhipin.com/job_detail/1.html",
+                    provider="zhipin_cdp_company",
+                ),
+            ),
+        ),
+    )
+    direct = FakeDirectAtsPersistence()
+    orchestrator, _runs, persistence = orchestrator_for(
+        run,
+        providers=[provider],
+        direct_ats_persistence=direct,
+    )
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.SUCCEEDED
+    assert result.jobs_found == 1
+    assert result.jobs_written == 2
+    assert persistence.calls == 0
+    assert direct.calls == [
+        {
+            "company_name": "Acme",
+            "entry_url": "https://www.zhipin.com/gongsi/brand-1.html",
+            "platform": "zhipin",
+            "jobs": (
+                ParsedJob(
+                    title="Engineer",
+                    url="https://www.zhipin.com/job_detail/1.html",
+                    provider="zhipin_cdp_company",
+                ),
+            ),
+            "crawl_run_id": run.id,
+            "snapshot": direct.calls[0]["snapshot"],
+        }
+    ]
+    assert direct.calls[0]["snapshot"].pagination_complete is False
+    assert direct.calls[0]["snapshot"].error_code == "pagination_incomplete"
+
 
 
 def identity_review_outcome() -> tuple[BatchBuildOutcome, CompanyIdentityReviewDraft]:
@@ -651,6 +786,53 @@ async def test_provider_warning_with_persisted_data_is_partial() -> None:
     assert result.status is CollectionStatus.PARTIAL
     assert result.error_code == "provider_degraded"
     assert persistence.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_block_stats_are_recorded_in_error_detail() -> None:
+    run = FakeRun(uuid4())
+    provider = FakeProvider(
+        "ats",
+        ProviderResult(
+            documents=(),
+            warnings=("captcha_required",),
+            stats=(
+                ProviderFetchStats(
+                    provider="ats",
+                    platform="zhipin",
+                    entries_discovered=1,
+                    pages_fetched=1,
+                    parsed_jobs=0,
+                    blocked_pages=1,
+                    error_code="captcha_required",
+                ),
+            ),
+        ),
+    )
+    orchestrator, runs, persistence = orchestrator_for(run, providers=[provider])
+
+    result = await orchestrator.run(run.id)
+
+    assert result.status is CollectionStatus.FAILED
+    assert result.error_code == "captcha_required"
+    assert json.loads(runs.runs[run.id].error_detail) == {
+        "issues": [
+            {"stage": "provider", "provider": "ats", "code": "captcha_required"},
+            {
+                "stage": "provider",
+                "provider": "ats",
+                "code": "fetch_stats",
+                "stat_provider": "ats",
+                "entries_discovered": 1,
+                "pages_fetched": 1,
+                "parsed_jobs": 0,
+                "blocked_pages": 1,
+                "platform": "zhipin",
+                "error_code": "captcha_required",
+            },
+        ]
+    }
+    assert persistence.calls == 0
 
 
 @pytest.mark.asyncio

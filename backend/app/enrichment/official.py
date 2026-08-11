@@ -42,20 +42,21 @@ class OfficialWebsiteEnricher:
         if company.website is None:
             return self._result(company, "no_website")
         try:
-            host = HttpUrl(company.website).host
+            website = HttpUrl(company.website)
         except ValidationError:
             return self._result(company, "invalid_website")
+        host = website.host
         if host is None:
             return self._result(company, "invalid_website")
-        documents, warning = await self._collect(company, host)
+        documents, warning = await self._collect(company, website, host)
         if not documents:
             return self._result(company, warning or "no_official_documents")
         try:
-            reference = CompanyRef(name=company.canonical_name, website=company.website)
+            reference = CompanyRef(name=company.canonical_name, website=website)
             profile = await self._extractor.extract_profile(reference, documents)
             discovered = CompanyCandidate(
                 name=company.canonical_name,
-                website=company.website,
+                website=website,
                 description=company.description,
                 evidence_ids=profile.profile.evidence_ids,
                 confidence=profile.profile.confidence,
@@ -87,7 +88,7 @@ class OfficialWebsiteEnricher:
             return self._result(company, "invalid_official_data", len(documents))
         return self._result(company, "succeeded", len(documents))
 
-    async def _collect(self, company: Company, host: str) -> tuple[Sequence[RawDocument], str | None]:
+    async def _collect(self, company: Company, website: HttpUrl, host: str) -> tuple[Sequence[RawDocument], str | None]:
         client = SafeHttpClient()
         provider = CompanySiteProvider(
             http_client=client,
@@ -98,7 +99,7 @@ class OfficialWebsiteEnricher:
             result = await provider.search(
                 ProviderQuery(
                     query=company.canonical_name,
-                    website=company.website,
+                    website=website,
                     allowed_hosts=frozenset({host}),
                 )
             )
@@ -117,7 +118,7 @@ class OfficialWebsiteEnricher:
             ).search(
                 ProviderQuery(
                     query=company.canonical_name,
-                    website=company.website,
+                    website=website,
                     allowed_hosts=frozenset({host}),
                 )
             )
@@ -127,7 +128,7 @@ class OfficialWebsiteEnricher:
             warnings.append(error.code)
         try:
             icp_result = await YmicpProvider().search(
-                ProviderQuery(query=company.canonical_name, website=company.website)
+                ProviderQuery(query=company.canonical_name, website=website)
             )
             documents.extend(icp_result.documents)
             warnings.extend(icp_result.warnings)

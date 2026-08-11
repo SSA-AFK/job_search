@@ -152,9 +152,12 @@ class NormalizedFilingRecord(FrozenDTO):
     def from_candidate(
         cls, candidate: FilingCandidate, *, source_evidence_id: str | None
     ) -> "NormalizedFilingRecord":
+        filing_number = candidate.filing_number
+        if filing_number is None:
+            raise ValueError("filing_number is required")
         return cls(
             filing_type=FilingType(candidate.filing_type.value),
-            filing_number=candidate.filing_number,
+            filing_number=filing_number,
             filing_name=candidate.title,
             filing_authority=candidate.filing_authority,
             filing_date=candidate.filing_date,

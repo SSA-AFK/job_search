@@ -24,5 +24,7 @@ class AtsListResult(BaseModel):
     status: AtsParseStatus
     observed_count: int = Field(default=0, ge=0)
     reported_total: int | None = Field(default=None, ge=0)
+    pages_fetched: int = Field(default=1, ge=0)
+    pagination_complete: bool = False
     error_code: str | None = Field(default="parse_failed", max_length=100)
     content_fingerprint: str | None = Field(default=None, max_length=128)

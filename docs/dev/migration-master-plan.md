@@ -1,7 +1,7 @@
 # Stage 3 万级职位覆盖迁移总计划
 
-> **状态：Stage 3A 已完成；Company Identity Resolution Hardening 本地 gate 已通过，Task 10 等待最终 whole-branch review；Stage 3B 已完成离线接入，在线 smoke 待 opt-in gate**
-> **修订日期：2026-08-10**
+> **状态：Stage 3A 已完成；Company Identity Resolution Hardening 本地 gate 已通过，Task 10 等待最终 whole-branch review；Stage 3B 已完成离线接入，BOSS CDP 公司职位 Provider 已默认关闭接入，在线 smoke 待 opt-in gate**
+> **修订日期：2026-08-11**
 > **定位：** 基于已完成 Stage 2 的 Stage 3 执行路线；Stage 3A 已按获批详细计划实施，后续阶段仍不是可直接开工的 implementation plan。
 > **设计依据：** [job-coverage-at-scale-plan.md](job-coverage-at-scale-plan.md)
 > **审批规则：** 本文批准后仍需生成详细 implementation plan，并再次获得执行授权。
@@ -20,6 +20,7 @@
 - Redis 降级缓存和前端采集轮询；
 - 10k 公司/100k 职位的查询性能门。
 - 招聘入口、完整性快照、安全来源生命周期和内部覆盖 JSON 报告。
+- ATS Provider 默认关闭生产注册、阻断统计、BOSS/猎聘/拉勾基础解析和默认关闭的 BOSS CDP 公司职位增强通道。
 
 ### 1.2 可复用但未正式集成
 
@@ -34,11 +35,11 @@
 
 ### 1.3 当前关键缺口
 
-1. ATS 原型未注册到生产运行时；
-2. 当前 Provider 尚未产出可证明分页完整性的快照；
+1. 当前 Provider 尚未产出可证明分页完整性的覆盖快照；
+2. BOSS CDP 通道已具备本机登录态读取骨架，但真实在线 smoke 仍需显式 opt-in gate；
 3. 当前日调度逐公司提交和派发，缺少批处理与背压；
-4. 限流仅为单进程 Provider 级；
-5. 常规职位抽取仍可能依赖 LLM；
+4. 限流仍以单进程 Provider 级为主，尚未形成跨 Worker 共享预算；
+5. 部分常规职位抽取仍可能依赖 LLM fallback；
 6. 尚无队列滞后和误关闭保护前端看板；
 7. 尚无真实 1k、3k、10k 端到端采集基准。
 
@@ -76,6 +77,7 @@ backend/app/
 │   │   └── enrichment.py           # 详情增强策略
 │   └── providers/
 │       ├── ats.py                  # ATS Provider 组合边界
+│       ├── zhipin_cdp.py           # 默认关闭的 BOSS 本机 CDP 公司职位增强通道
 │       ├── ats_classifier.py       # 原型适配后接入
 │       ├── ats_renderer.py         # 受控 Playwright 池
 │       └── ats_extractors/          # 平台独立解析器
@@ -219,6 +221,7 @@ Stage 3B0 canonical manifest 已冻结 1,000 家，version 为 `abaad7965cabbaaa
 - 确定性解析器生成职位候选和列表枚举元数据；
 - 第一批只启用已有离线样本覆盖充分的平台；
 - 每个平台有独立开关、授权说明、并发和错误码；
+- BOSS CDP 公司职位通道仅作为默认关闭、本机登录态、只读增强 Provider；
 - 登录、验证码、robots.txt 禁止或访问拒绝时停止并降级为入口记录。
 
 ### 验收
@@ -227,6 +230,7 @@ Stage 3B0 canonical manifest 已冻结 1,000 家，version 为 `abaad7965cabbaaa
 - 获授权在线 smoke test 默认不在 CI 运行；
 - 浏览器池异常不会导致 Worker 泄漏或任务永久 running；
 - ATS 失败不影响已有数据库搜索；
+- BOSS 登录、安全页、限流、接口变化和浏览器不可用均有稳定错误码与 `ProviderFetchStats`；
 - 常规成功路径不调用 LLM；
 - 未授权平台保持关闭。
 
@@ -234,9 +238,9 @@ Stage 3B0 canonical manifest 已冻结 1,000 家，version 为 `abaad7965cabbaaa
 
 若适配需要绕过访问控制，或无法纳入现有安全 HTTP/运行时契约，不启用该平台。
 
-### 实施状态（2026-08-10）
+### 实施状态（2026-08-11）
 
-Tasks 1-7 完成；飞书/Moka 离线样本通过；Playwright 池生命周期受控；未启用在线采集。Stage 3B 实现了确定性 HTML 职位列表解析器（Task 2）、受控 Playwright 渲染池（Task 3）、飞书与 Moka 平台提取器（Tasks 4-5）、ATS Provider 组合与配置注册（Task 6）及离线集成验收（Task 7）。所有新增配置默认关闭（`ats_provider_enabled=False`、`ats_feishu_enabled=False`、`ats_moka_enabled=False`），ATS 失败不影响已有搜索数据读取。在线 smoke test 为 opt-in，不在默认 CI 中运行。完整分页枚举（Stage 3C）、职位详情增强（Stage 3E）和 20/100/1,000 基准运行（Stage 3D）不在 Stage 3B 范围内。
+Tasks 1-7 完成；飞书/Moka 离线样本通过；Playwright 池生命周期受控；未启用在线采集。Stage 3B 实现了确定性 HTML 职位列表解析器（Task 2）、受控 Playwright 渲染池（Task 3）、飞书与 Moka 平台提取器（Tasks 4-5）、ATS Provider 组合与配置注册（Task 6）及离线集成验收（Task 7）。后续补充完成 BOSS/猎聘/拉勾基础解析、安全页识别、Provider 阻断统计、platform cooldown，以及默认关闭的 `zhipin_cdp_company` 本机 CDP 登录态只读增强通道。该通道通过 `PlaywrightZhipinCdpClient` 连接本机 Chrome CDP endpoint，执行公司搜索、brandId 匹配和职位分页解析，输出 `ParsedJob` 并进入现有 `DirectAtsPersistence` 去重链路。所有新增配置默认关闭（`ats_provider_enabled=False`、`ats_feishu_enabled=False`、`ats_moka_enabled=False`、`zhipin_cdp_company_provider_enabled=False`），ATS/BOSS CDP 失败不影响已有搜索数据读取。在线 smoke test 为 opt-in，不在默认 CI 中运行。完整覆盖快照枚举（Stage 3C）、职位详情增强（Stage 3E）和 20/100/1,000 基准运行（Stage 3D）不在当前默认关闭增强范围内。2026-08-11 验证记录：`tests/ingestion/providers/test_zhipin_cdp.py` 7 passed；相关 orchestrator/ATS 测试通过；`tests/ingestion + tests/core` 476 passed, 3 skipped；核心改动文件 ruff clean。
 
 ## 7. Stage 3C：完整列表枚举
 
