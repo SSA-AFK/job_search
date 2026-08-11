@@ -12,6 +12,7 @@ from app.models.enums import (
     JobEntryStatus,
     JobSnapshotStatus,
     JobType,
+    RecruitingStatus,
     RunType,
     VerificationStatus,
 )
@@ -124,6 +125,7 @@ __all__ = [
     "JobSnapshotStatus",
     "JobSource",
     "JobType",
+    "RecruitingStatus",
     "RegulatoryFiling",
     "RunType",
     "SourceDocument",

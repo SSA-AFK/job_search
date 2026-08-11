@@ -59,6 +59,14 @@ class JobSnapshotStatus(StrEnum):
     FAILED = "failed"
 
 
+class RecruitingStatus(StrEnum):
+    ACTIVE_ROLES = "active_roles"
+    EMPTY_CONFIRMED = "empty_confirmed"
+    ENTRY_DISCOVERY_PENDING = "entry_discovery_pending"
+    COLLECTION_INCOMPLETE = "collection_incomplete"
+    STALE = "stale"
+
+
 class FilingType(StrEnum):
     ICP = "icp"
     ALGORITHM = "algorithm"
