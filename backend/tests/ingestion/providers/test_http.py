@@ -274,11 +274,37 @@ async def test_request_start_hook_runs_for_initial_and_redirect_requests() -> No
 
 @pytest.mark.anyio
 @respx.mock
+async def test_per_call_request_hook_counts_redirects() -> None:
+    starts: list[str] = []
+
+    async def record_start(url: str) -> None:
+        starts.append(url)
+
+    respx.get("https://example.com/start").mock(
+        return_value=httpx.Response(302, headers={"location": "/final"})
+    )
+    respx.get("https://example.com/final").mock(
+        return_value=httpx.Response(200, headers={"content-type": "text/plain"}, text="done")
+    )
+    client = SafeHttpClient(dns_resolver=public_dns)
+
+    await client.get_text(
+        "https://example.com/start",
+        allowed_hosts={"example.com"},
+        request_started=record_start,
+    )
+
+    assert starts == ["https://example.com/start", "https://example.com/final"]
+
+
+@pytest.mark.anyio
+@respx.mock
 @pytest.mark.parametrize(
     ("status_code", "error_code", "retryable"),
     [
         (401, "provider_access_denied", False),
         (403, "provider_access_denied", False),
+        (404, "http_not_found", False),
         (429, "provider_rate_limited", True),
         (500, "http_status", True),
     ],

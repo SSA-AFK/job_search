@@ -200,12 +200,15 @@ class SafeHttpClient:
         *,
         allowed_hosts: set[str],
         redirect_validator: RedirectValidator | None = None,
+        request_started: RequestStartHook | None = None,
     ) -> HttpDocument:
         """Fetch an allowlisted public URL, following only validated redirects."""
         normalized_hosts = frozenset(host.lower().rstrip(".") for host in allowed_hosts)
         try:
             async with asyncio.timeout(self._total_timeout_seconds):
-                return await self._get_text(url, normalized_hosts, redirect_validator)
+                return await self._get_text(
+                    url, normalized_hosts, redirect_validator, request_started
+                )
         except TimeoutError as error:
             raise ProviderError(
                 code="total_timeout", retryable=True, detail="request exceeded total timeout"
@@ -222,6 +225,7 @@ class SafeHttpClient:
         url: str,
         allowed_hosts: frozenset[str],
         redirect_validator: RedirectValidator | None,
+        request_started: RequestStartHook | None,
     ) -> HttpDocument:
         current_url = await self._validate_url(url, allowed_hosts, error_code="unsafe_url")
         timeout = httpx.Timeout(self._connect_timeout_seconds)
@@ -234,6 +238,8 @@ class SafeHttpClient:
                 transport.pin(current_url)
                 if self._before_request is not None:
                     await self._before_request(str(current_url.url))
+                if request_started is not None:
+                    await request_started(str(current_url.url))
                 async with client.stream(
                     "GET", current_url.url, headers={"Accept-Encoding": "identity"}
                 ) as response:
@@ -266,6 +272,8 @@ class SafeHttpClient:
                             error_code = "provider_access_denied"
                         elif response.status_code == 429:
                             error_code = "provider_rate_limited"
+                        elif response.status_code == 404:
+                            error_code = "http_not_found"
                         else:
                             error_code = "http_status"
                         raise ProviderError(

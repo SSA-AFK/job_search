@@ -9,6 +9,8 @@ def test_celery_app_registers_all_task_entry_points_in_a_fresh_process() -> None
     command = (
         "from app.tasks.celery_app import celery_app; "
         "required = {'app.tasks.collection.run_ingestion', "
+        "'app.tasks.entry_verification.run_entry_verification', "
+        "'app.tasks.job_enumeration.run_job_enumeration', "
         "'app.tasks.schedule.enqueue_stale_companies', "
         "'app.tasks.expiration.expire_stale_job_sources'}; "
         "assert required <= set(celery_app.tasks)"

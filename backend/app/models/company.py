@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import Date, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from app.core.normalization import normalize_public_identity_url
@@ -31,6 +31,17 @@ class Company(Base, TimestampMixin):
     city: Mapped[str | None] = mapped_column(String(50))
     headquarters: Mapped[str | None] = mapped_column(String(300))
     founded_year: Mapped[int | None] = mapped_column()
+    established_at: Mapped[date | None] = mapped_column(Date())
+    province: Mapped[str | None] = mapped_column(String(50))
+    district: Mapped[str | None] = mapped_column(String(50))
+    company_type: Mapped[str | None] = mapped_column(String(100))
+    registered_capital: Mapped[str | None] = mapped_column(String(100))
+    paid_in_capital: Mapped[str | None] = mapped_column(String(100))
+    industry_sector: Mapped[str | None] = mapped_column(String(100))
+    industry_middle: Mapped[str | None] = mapped_column(String(100))
+    insured_employee_count: Mapped[int | None] = mapped_column(Integer())
+    employee_report_year: Mapped[int | None] = mapped_column(Integer())
+    business_scope: Mapped[str | None] = mapped_column(Text())
     logo_url: Mapped[str | None] = mapped_column(String(1000))
     website: Mapped[str | None] = mapped_column(String(1000))
     normalized_website: Mapped[str] = mapped_column(

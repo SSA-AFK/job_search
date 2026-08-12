@@ -1035,9 +1035,10 @@ _ATS_URL_PATTERNS = (
     re.compile(r"https?://(?:www\.)?zhipin\.com/[a-zA-Z0-9_@./#?&=-]+"),
     re.compile(r"https?://(?:www\.)?liepin\.com/[a-zA-Z0-9_@./#?&=-]+"),
     re.compile(r"https?://(?:www\.)?lagou\.com/[a-zA-Z0-9_@./#?&=-]+"),
+    re.compile(r"https?://jobs\.bytedance\.com/[a-zA-Z0-9_@./#?&=-]+"),
 )
 
-_ATS_DISCOVERY_TERMS = ("jobs.feishu.cn", "app.mokahr.com", "zhipin.com", "liepin.com", "lagou.com")
+_ATS_DISCOVERY_TERMS = ("jobs.feishu.cn", "app.mokahr.com", "zhipin.com", "liepin.com", "lagou.com", "jobs.bytedance.com")
 _ATS_HOST_PLATFORMS = {
     "jobs.feishu.cn": "feishu",
     "app.mokahr.com": "moka",
@@ -1047,6 +1048,7 @@ _ATS_HOST_PLATFORMS = {
     "www.liepin.com": "liepin",
     "lagou.com": "lagou",
     "www.lagou.com": "lagou",
+    "jobs.bytedance.com": "bytedance",
 }
 
 
@@ -1101,6 +1103,7 @@ def _entry_candidate_to_ats_url(candidate: EntryCandidate) -> AtsCareerUrl | Non
     if candidate.platform not in {
         EntryPlatform.ATS_FEISHU,
         EntryPlatform.ATS_MOKA,
+        EntryPlatform.ATS_BYTEDANCE,
         EntryPlatform.BOSS_ZHIPIN,
         EntryPlatform.LIEPIN,
         EntryPlatform.LAGOU,

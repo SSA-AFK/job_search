@@ -9,7 +9,6 @@ import type {
   CompanySort,
   FundingStage,
   Page,
-  RecruitingCoverage,
 } from "../api/types";
 
 type CompanyResultsProps = {
@@ -83,14 +82,17 @@ function CompanyRow({ company }: { company: CompanyListItem }) {
       <div className="company-copy">
         <div className="company-title-line">
           <h3><Link className="company-detail-link" to={`/companies/${company.id}`}>{company.canonical_name}</Link></h3>
+          <span className={`ranking-status ranking-status--${company.ranking_status ?? "observation"}`}>{company.rank ? `第 ${company.rank} 名` : "观察中"}</span>
           <span>{company.city ? locationLabels[company.city] ?? company.city : "城市待确认"}</span>
+          {company.campus_job_count ? <span className="opportunity-tag">校招 {company.campus_job_count}</span> : null}
+          {company.internship_job_count ? <span className="opportunity-tag">实习 {company.internship_job_count}</span> : null}
         </div>
         <p className="company-tags">
           {[company.industry, company.sub_industry, fundingLabels[company.funding_stage], scaleLabels[company.scale]]
             .filter(Boolean)
             .join(" · ")}
         </p>
-        <RecruitingSummary coverage={company.recruiting_coverage} />
+        <p className="company-ranking-summary">{company.ranking_score ?? 0} 分 · {company.company_stage === "early" ? "早期" : company.company_stage === "mature" ? "成熟" : "成长"}阶段</p>
         {company.description ? <p className="company-description">{company.description}</p> : null}
       </div>
       {websiteUrl ? (
@@ -111,24 +113,6 @@ function CompanyRow({ company }: { company: CompanyListItem }) {
   );
 }
 
-const recruitingLabels: Record<RecruitingCoverage["status"], string> = {
-  active_roles: "正在招聘",
-  empty_confirmed: "已核验暂无职位",
-  entry_discovery_pending: "招聘入口待发现",
-  collection_incomplete: "招聘信息待复查",
-  stale: "招聘信息已过期",
-};
-
-function RecruitingSummary({ coverage }: { coverage: RecruitingCoverage }) {
-  const checked = coverage.last_checked_at?.slice(0, 10);
-  return (
-    <p className={`recruiting-summary recruiting-summary--${coverage.status}`}>
-      <strong>{recruitingLabels[coverage.status]}</strong>
-      {coverage.status === "active_roles" && coverage.active_job_count !== null ? ` · ${coverage.active_job_count} 个职位` : ""}
-      {checked ? ` · 最近核验 ${checked}` : ""}
-    </p>
-  );
-}
 
 function LoadingRows() {
   return (

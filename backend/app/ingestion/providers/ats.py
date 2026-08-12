@@ -1,6 +1,7 @@
 from urllib.parse import urlsplit
 
 from app.ingestion.contracts import ParsedJob, ProviderFetchStats, ProviderQuery, ProviderResult
+from app.ingestion.providers.ats_extractors.bytedance import BytedanceAtsExtractor
 from app.ingestion.providers.ats_extractors.feishu import FeishuAtsExtractor
 from app.ingestion.providers.ats_extractors.lagou import LagouAtsExtractor
 from app.ingestion.providers.ats_extractors.liepin import LiepinAtsExtractor
@@ -16,6 +17,7 @@ _PLATFORM_HOSTS = {
     "zhipin": "zhipin.com",
     "liepin": "liepin.com",
     "lagou": "lagou.com",
+    "bytedance": "jobs.bytedance.com",
 }
 
 _EMPLOYMENT_TYPE_TO_JOB_TYPE = {
@@ -37,7 +39,7 @@ _ACCESS_BLOCK_ERROR_CODES = frozenset(
 )
 
 _AtsExtractor = (
-    FeishuAtsExtractor | MokaAtsExtractor | ZhipinAtsExtractor | LiepinAtsExtractor | LagouAtsExtractor
+    FeishuAtsExtractor | MokaAtsExtractor | ZhipinAtsExtractor | LiepinAtsExtractor | LagouAtsExtractor | BytedanceAtsExtractor
 )
 
 
@@ -68,6 +70,7 @@ class AtsProvider:
         zhipin_extractor: ZhipinAtsExtractor | None = None,
         liepin_extractor: LiepinAtsExtractor | None = None,
         lagou_extractor: LagouAtsExtractor | None = None,
+        bytedance_extractor: BytedanceAtsExtractor | None = None,
         enabled_platforms: frozenset[str],
         platform_block_threshold: int = 2,
     ) -> None:
@@ -84,6 +87,8 @@ class AtsProvider:
             extractors["liepin"] = liepin_extractor
         if lagou_extractor is not None:
             extractors["lagou"] = lagou_extractor
+        if bytedance_extractor is not None:
+            extractors["bytedance"] = bytedance_extractor
         # 平台启用时，必须传入对应 extractor；在构造期早报错优于运行期
         for platform in enabled_platforms:
             if platform not in extractors:

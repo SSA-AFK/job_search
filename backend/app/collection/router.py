@@ -14,9 +14,9 @@ router = APIRouter(prefix="/collection-requests", tags=["collection-requests"])
 
 
 def dispatch_collection(run_id: UUID) -> str:
-    from app.tasks.collection import run_ingestion
+    from app.tasks.entry_verification import run_entry_verification
 
-    return str(run_ingestion.delay(str(run_id)).id)
+    return str(run_entry_verification.delay(str(run_id)).id)
 
 
 def get_collection_service(

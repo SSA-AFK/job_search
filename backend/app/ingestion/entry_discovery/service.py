@@ -40,7 +40,7 @@ class DiscoveryResult:
         return tuple(
             c
             for c in self.high_confidence
-            if c.platform in {EntryPlatform.ATS_FEISHU, EntryPlatform.ATS_MOKA}
+            if c.platform in {EntryPlatform.ATS_FEISHU, EntryPlatform.ATS_MOKA, EntryPlatform.ATS_BYTEDANCE}
         )
 
     @property
@@ -146,6 +146,7 @@ class EntryDiscoveryService:
         site_to_platform = {site: plat for plat, site in [
             ("ats_feishu", "jobs.feishu.cn"),
             ("ats_moka", "app.mokahr.com"),
+            ("ats_bytedance", "jobs.bytedance.com"),
             ("boss_zhipin", "zhipin.com"),
             ("liepin", "liepin.com"),
             ("lagou", "lagou.com"),
@@ -291,6 +292,8 @@ def _platform_from_url(url: str) -> str:
         return EntryPlatform.ATS_FEISHU
     if host == "app.mokahr.com" or host.endswith(".app.mokahr.com"):
         return EntryPlatform.ATS_MOKA
+    if host == "jobs.bytedance.com" or host.endswith(".jobs.bytedance.com"):
+        return EntryPlatform.ATS_BYTEDANCE
     if host == "zhipin.com" or host.endswith(".zhipin.com"):
         return EntryPlatform.BOSS_ZHIPIN
     if host == "liepin.com" or host.endswith(".liepin.com"):

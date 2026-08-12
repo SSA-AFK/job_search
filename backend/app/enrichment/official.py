@@ -20,6 +20,7 @@ from app.ingestion.providers.official_news import OfficialNewsProvider
 from app.ingestion.providers.robots import RobotsPolicy
 from app.ingestion.providers.ymicp import YmicpProvider
 from app.models import Company
+from app.rankings.official_profile import attach_official_ai_profile_hints
 
 
 @dataclass(frozen=True)
@@ -34,15 +35,25 @@ class OfficialEnrichmentResult:
 class OfficialWebsiteEnricher:
     """Refresh one stored company without relying on discovery search."""
 
-    def __init__(self, session: Session, *, extractor: Extractor) -> None:
+    def __init__(
+        self,
+        session: Session,
+        *,
+        extractor: Extractor,
+        max_pages_per_provider: int = 10,
+    ) -> None:
         self._session = session
         self._extractor = extractor
+        self._max_pages_per_provider = max_pages_per_provider
 
-    async def refresh(self, company: Company) -> OfficialEnrichmentResult:
-        if company.website is None:
+    async def refresh(
+        self, company: Company, *, website_override: str | None = None
+    ) -> OfficialEnrichmentResult:
+        candidate_website = website_override or company.website
+        if candidate_website is None:
             return self._result(company, "no_website")
         try:
-            website = HttpUrl(company.website)
+            website = HttpUrl(candidate_website)
         except ValidationError:
             return self._result(company, "invalid_website")
         host = website.host
@@ -77,6 +88,7 @@ class OfficialWebsiteEnricher:
                     )
                 }
             )
+            batch = attach_official_ai_profile_hints(batch)
             PersistenceService(self._session).persist(batch, uuid4())
         except ExtractionError as error:
             return self._result(company, error.code, len(documents))
@@ -101,6 +113,7 @@ class OfficialWebsiteEnricher:
                     query=company.canonical_name,
                     website=website,
                     allowed_hosts=frozenset({host}),
+                    max_results=self._max_pages_per_provider,
                 )
             )
         except ProviderError as error:
@@ -120,6 +133,7 @@ class OfficialWebsiteEnricher:
                     query=company.canonical_name,
                     website=website,
                     allowed_hosts=frozenset({host}),
+                    max_results=self._max_pages_per_provider,
                 )
             )
             documents.extend(news_result.documents)

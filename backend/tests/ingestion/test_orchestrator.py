@@ -336,6 +336,7 @@ def test_ats_discovery_queries_are_bounded_to_known_platform_hosts() -> None:
         "Acme zhipin.com",
         "Acme liepin.com",
         "Acme lagou.com",
+        "Acme jobs.bytedance.com",
     )
     assert _ats_discovery_queries("   ") == ()
 
@@ -360,6 +361,7 @@ async def test_zhihu_gets_bounded_ats_discovery_queries() -> None:
         "Acme zhipin.com",
         "Acme liepin.com",
         "Acme lagou.com",
+        "Acme jobs.bytedance.com",
     ]
     assert [query.query for query in other.queries] == ["Acme"]
 

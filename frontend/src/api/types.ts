@@ -54,6 +54,46 @@ export type CompanyListItem = {
   created_at: string;
   updated_at: string;
   recruiting_coverage: RecruitingCoverage;
+  ranking_status?: "ranked" | "observation";
+  rank?: number | null;
+  ranking_score?: number;
+  company_stage?: "early" | "growth" | "mature";
+  campus_job_count?: number;
+  internship_job_count?: number;
+};
+
+export type RankingComponents = {
+  ai_core: number;
+  market_validation: number;
+  growth_momentum: number;
+  industry_influence: number;
+  reliability: number;
+};
+
+export type RankingMember = {
+  company_id: string;
+  company_name: string;
+  rank: number | null;
+  status: "ranked" | "observation";
+  total_score: number;
+  company_stage: "early" | "growth" | "mature";
+  component_scores: RankingComponents;
+  reason: string;
+  missing_fields: string[];
+  campus_job_count: number;
+  internship_job_count: number;
+};
+
+export type RankingList = {
+  industry: "ai";
+  rule_version: string;
+  calculated_at: string;
+  ranked_total: number;
+  observation_total: number;
+  page: number;
+  page_size: number;
+  total: number;
+  items: RankingMember[];
 };
 
 export type Page<T> = {
@@ -119,11 +159,34 @@ export type CompanyDetail = CompanyListItem & {
   aliases: string[];
   headquarters: string | null;
   founded_year: number | null;
+  established_at: string | null;
+  province: string | null;
+  district: string | null;
+  company_type: string | null;
+  registered_capital: string | null;
+  paid_in_capital: string | null;
+  industry_sector: string | null;
+  industry_middle: string | null;
+  insured_employee_count: number | null;
+  employee_report_year: number | null;
+  business_scope: string | null;
+  latest_funding_round: string | null;
   filings: FilingItem[];
   sources: CompanySourceSummary[];
   profile_fields: CompanyProfileFieldItem[];
   funding_events: FundingEventItem[];
   job_count: number;
+  ranking_rule_version?: string;
+  ranking_calculated_at?: string;
+  ranking_components?: RankingComponents;
+  ranking_reason?: string;
+  ranking_missing_fields?: string[];
+  ranking_signals?: Array<{
+    category: "ai_relevance" | "growth" | "intellectual_property" | "market_validation" | "material_risk";
+    signal_key: "ai_business_scope" | "financing" | "ai_invention_patent" | "ai_software_copyright" | "winning_bid" | "active_qualification" | "material_risk";
+    value: Record<string, unknown>;
+    event_date: string | null;
+  }>;
 };
 
 export type JobSourceItem = {

@@ -15,6 +15,7 @@ class RenderedPage:
     html: str
     status_code: int
     title: str | None = None
+    extracted_html: str | None = None
 
 
 def _import_playwright():
@@ -62,6 +63,9 @@ class AtsRenderer:
         *,
         allowed_hosts: set[str],
         wait_selector: str | None = None,
+        scroll_steps: int = 0,
+        max_html_chars: int = 200_000,
+        extract_script: str | None = None,
     ) -> RenderedPage:
         await self._validate_url(url, allowed_hosts)
         await self._ensure_browser()
@@ -76,14 +80,26 @@ class AtsRenderer:
                     raise ProviderError(
                         code="renderer_no_response", retryable=False, detail="page.goto returned None"
                     )
+                # Some SPA ATS pages (e.g. jobs.bytedance.com) lazy-load job cards on scroll.
+                if scroll_steps > 0:
+                    for _ in range(scroll_steps):
+                        await page.mouse.wheel(0, 3000)
+                        await asyncio.sleep(0.8)
                 if wait_selector is not None:
                     await page.wait_for_selector(
                         wait_selector, timeout=int(self._page_timeout_seconds * 1000)
                     )
                 html = await page.content()
                 title = await page.title()
+                extracted_html: str | None = None
+                if extract_script is not None:
+                    extracted_html = await page.evaluate(extract_script)
                 return RenderedPage(
-                    url=page.url, html=html[:200_000], status_code=response.status, title=title
+                    url=page.url,
+                    html=html[:max_html_chars],
+                    status_code=response.status,
+                    title=title,
+                    extracted_html=extracted_html,
                 )
             except ProviderError:
                 raise
@@ -109,7 +125,8 @@ class AtsRenderer:
         host = (parsed.hostname or "").lower().rstrip(".")
         if parsed.scheme not in {"http", "https"} or not host or parsed.username:
             raise ProviderError(code="unsafe_url", retryable=False, detail="invalid scheme or authority")
-        if host not in allowed_hosts:
+        # Accept the exact allowlisted host or any subdomain of it (e.g. <tenant>.jobs.feishu.cn).
+        if not any(host == a or host.endswith("." + a) for a in allowed_hosts):
             raise ProviderError(code="unsafe_url", retryable=False, detail="host not allowlisted")
         try:
             address = ip_address(host)

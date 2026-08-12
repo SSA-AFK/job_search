@@ -1,6 +1,7 @@
 import type {
   CompanyDetail,
   CompanyListItem,
+  RankingList,
   CompanySearchParams,
   CollectionRequest,
   JobListItem,
@@ -49,6 +50,17 @@ function buildCompanyQuery(params: CompanySearchParams) {
 }
 
 export const api = {
+  async getAiRanking(
+    status: "ranked" | "observation" = "ranked",
+    stage?: "early" | "growth" | "mature",
+    signal?: AbortSignal,
+  ): Promise<RankingList> {
+    const query = new URLSearchParams({ status, page_size: "100" });
+    if (stage) query.set("stage", stage);
+    const response = await fetch(`/api/v1/rankings/ai?${query}`, { signal });
+    if (!response.ok) throw new ApiError(response.status);
+    return (await response.json()) as RankingList;
+  },
   async getCompanies(
     params: CompanySearchParams,
     signal?: AbortSignal,
@@ -67,7 +79,7 @@ export const api = {
     page: number,
     signal?: AbortSignal,
   ): Promise<Page<JobListItem>> {
-    const query = new URLSearchParams({ page: String(page), page_size: "10" });
+    const query = new URLSearchParams({ page: String(page), page_size: "20" });
     const response = await fetch(
       `/api/v1/companies/${encodeURIComponent(companyId)}/jobs?${query}`,
       { signal },

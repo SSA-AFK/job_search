@@ -66,6 +66,12 @@ class CompanyListItem(BaseModel):
     created_at: datetime
     updated_at: datetime
     recruiting_coverage: "RecruitingCoverageItem"
+    ranking_status: Literal["ranked", "observation"]
+    rank: int | None
+    ranking_score: int
+    company_stage: Literal["early", "growth", "mature"]
+    campus_job_count: int = 0
+    internship_job_count: int = 0
 
 
 class RecruitingCoverageItem(BaseModel):
@@ -117,15 +123,62 @@ class FundingEventItem(BaseModel):
     verification_status: VerificationStatus
 
 
+class RankingComponentsItem(BaseModel):
+    ai_core: int
+    market_validation: int
+    growth_momentum: int
+    industry_influence: int
+    reliability: int
+
+
+class RankingSignalItem(BaseModel):
+    category: Literal[
+        "ai_relevance",
+        "growth",
+        "intellectual_property",
+        "market_validation",
+        "material_risk",
+    ]
+    signal_key: Literal[
+        "ai_business_scope",
+        "financing",
+        "ai_invention_patent",
+        "ai_software_copyright",
+        "winning_bid",
+        "active_qualification",
+        "material_risk",
+    ]
+    value: dict[str, object]
+    event_date: date | None
+
+
 class CompanyDetail(CompanyListItem):
     aliases: list[str]
     headquarters: str | None
     founded_year: int | None
+    established_at: date | None
+    province: str | None
+    district: str | None
+    company_type: str | None
+    registered_capital: str | None
+    paid_in_capital: str | None
+    industry_sector: str | None
+    industry_middle: str | None
+    insured_employee_count: int | None
+    employee_report_year: int | None
+    business_scope: str | None
+    latest_funding_round: str | None
     filings: list[FilingItem]
     sources: list[CompanySourceSummary]
     profile_fields: list[CompanyProfileFieldItem]
     funding_events: list[FundingEventItem]
     job_count: int
+    ranking_rule_version: str
+    ranking_calculated_at: datetime
+    ranking_components: RankingComponentsItem
+    ranking_reason: str
+    ranking_missing_fields: list[str]
+    ranking_signals: list[RankingSignalItem]
 
 
 class JobSourceItem(BaseModel):

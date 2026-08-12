@@ -1,18 +1,10 @@
-import { ArrowLeft, ExternalLink, RotateCw } from "lucide-react";
+import { ArrowLeft, ChevronDown, ExternalLink, RotateCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { api, ApiError } from "../api/client";
 import { safeHttpUrl } from "../api/http-url";
-import type {
-  CompanyDetail,
-  CompanyScale,
-  FundingStage,
-  JobListItem,
-  Page,
-  VerificationStatus,
-} from "../api/types";
-import { JobList } from "./JobList";
+import type { CompanyDetail, CompanyScale, FundingStage, RankingComponents, VerificationStatus } from "../api/types";
 
 const fundingLabels: Record<FundingStage, string> = {
   seed: "种子轮",
@@ -24,6 +16,14 @@ const fundingLabels: Record<FundingStage, string> = {
   public: "已上市",
   unfunded: "未融资",
   unknown: "未知",
+};
+
+const signalGroupLabels: Record<string, string> = {
+  ai_relevance: "AI 核心业务",
+  growth: "融资与成长",
+  intellectual_property: "专利与软著",
+  market_validation: "市场验证",
+  material_risk: "经营风险",
 };
 
 const scaleLabels: Record<CompanyScale, string> = {
@@ -61,10 +61,6 @@ function pendingVerificationFields(fieldVerification: Record<string, Verificatio
     .map(([field]) => field);
 }
 
-function businessRegistrationNumber(filings: CompanyDetail["filings"]) {
-  return filings.find((filing) => filing.filing_type === "business_license")?.filing_number ?? null;
-}
-
 function profileFieldValue(value: unknown) {
   if (value === null) return "—";
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
@@ -86,14 +82,51 @@ function ExternalTextLink({ href, children }: { href: string | null; children: R
   return <a href={safeHref} target="_blank" rel="noreferrer">{children}<ExternalLink aria-hidden="true" size={14} /></a>;
 }
 
-function DetailContent({ company, activeJobCount }: { company: CompanyDetail; activeJobCount: number | null }) {
+const scoreLabels: Array<[keyof RankingComponents, string, number]> = [
+  ["ai_core", "AI 核心性", 30], ["market_validation", "市场验证", 25],
+  ["growth_momentum", "成长动能", 20], ["industry_influence", "行业影响力", 15],
+  ["reliability", "可靠性", 10],
+];
+
+function RankingPanel({ company }: { company: CompanyDetail }) {
+  const scores = company.ranking_components ?? { ai_core: 0, market_validation: 0, growth_momentum: 0, industry_influence: 0, reliability: 0 };
+  return <section className="detail-ranking" aria-label="公司榜单评分"><div className="detail-rank-number"><strong>{company.ranking_score ?? 0}</strong><span>总分</span></div><div><div className="detail-ranking-meta"><strong>{company.rank ? `榜单第 ${company.rank} 名` : "观察中"}</strong><span>{company.company_stage === "early" ? "早期" : company.company_stage === "mature" ? "成熟" : "成长"}阶段</span></div><p>{company.ranking_reason ?? "评分依据待补充"}</p><div className="detail-score-grid">{scoreLabels.map(([key, label, maximum]) => <div key={key}><span>{label}</span><i><b style={{ width: `${scores[key] / maximum * 100}%` }} /></i><strong>{scores[key]}</strong></div>)}</div></div></section>;
+}
+
+function signalText(signal: NonNullable<CompanyDetail["ranking_signals"]>[number]) {
+  const labels: Record<string, string> = { ai_business_scope: "经营范围明确包含 AI 业务", financing: "融资事件", ai_invention_patent: "AI 发明专利", ai_software_copyright: "AI 软件著作权", winning_bid: "公开中标", active_qualification: "有效资质", material_risk: "重大经营风险" };
+  const title = typeof signal.value.title === "string" ? signal.value.title : typeof signal.value.name === "string" ? signal.value.name : "";
+  return [labels[signal.signal_key] ?? signal.signal_key, title].filter(Boolean).join("：");
+}
+
+function CollapsibleList<T>({ items, limit, className, itemKey, renderItem }: {
+  items: T[];
+  limit: number;
+  className: string;
+  itemKey: (item: T, index: number) => string;
+  renderItem: (item: T, index: number) => React.ReactNode;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const visible = expanded ? items : items.slice(0, limit);
+  return <><ul className={className}>{visible.map((item, index) => <li key={itemKey(item, index)}>{renderItem(item, index)}</li>)}</ul>{items.length > limit ? <button className="expand-button" type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? "收起" : `展开全部 ${items.length} 条`}<ChevronDown aria-hidden="true" size={15} /></button> : null}</>;
+}
+
+function ExpandableText({ children }: { children: string }) {
+  const [expanded, setExpanded] = useState(false);
+  return <div className="expandable-copy"><p className={expanded ? "" : "is-clamped"}>{children}</p><button className="expand-button" type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? "收起" : "展开全文"}<ChevronDown aria-hidden="true" size={15} /></button></div>;
+}
+
+function DetailContent({ company }: { company: CompanyDetail }) {
   const website = safeHttpUrl(company.website);
   const aliases = company.aliases ?? [];
   const filings = company.filings ?? [];
   const profileFields = company.profile_fields ?? [];
   const sources = company.sources ?? [];
-  const registrationNumber = businessRegistrationNumber(filings);
-  const coverage = company.recruiting_coverage;
+  const signals = company.ranking_signals ?? [];
+  const signalGroups = Object.entries(signals.reduce<Record<string, typeof signals>>((groups, signal) => {
+    (groups[signal.category] ??= []).push(signal);
+    return groups;
+  }, {}));
   return (
     <>
       <div className="detail-identity">
@@ -101,23 +134,18 @@ function DetailContent({ company, activeJobCount }: { company: CompanyDetail; ac
         <div>
           <h1>{company.canonical_name}</h1>
           <p className="detail-tags">
-            {[company.industry, company.sub_industry, fundingLabels[company.funding_stage], scaleLabels[company.scale], company.city]
+            {[company.industry, company.sub_industry, company.latest_funding_round ?? "融资暂未查到", scaleLabels[company.scale], company.city]
               .filter(Boolean).join(" · ")}
           </p>
         </div>
         {website ? <a className="secondary-button detail-website" href={website} target="_blank" rel="noreferrer">公司官网<ExternalLink aria-hidden="true" size={15} /></a> : null}
       </div>
+      <RankingPanel company={company} />
       {company.description ? <p className="detail-description">{company.description}</p> : null}
-      <section className="recruiting-coverage" aria-label="Recruiting coverage">
-        <strong>{coverage.status === "active_roles" ? "正在招聘" : coverage.status === "empty_confirmed" ? "已核验暂无职位" : coverage.status === "entry_discovery_pending" ? "招聘入口待发现" : coverage.status === "collection_incomplete" ? "招聘信息待复查" : "招聘信息已过期"}</strong>
-        {coverage.status === "active_roles" && coverage.active_job_count !== null ? <span>{` · ${coverage.active_job_count} 个在招职位`}</span> : null}
-        <span>{coverage.last_checked_at ? ` · 最近核验 ${coverage.last_checked_at.slice(0, 10)}` : " · 尚未核验"}</span>
-        {coverage.primary_entry_url ? <a href={coverage.primary_entry_url} target="_blank" rel="noreferrer">招聘入口{coverage.primary_entry_platform ? `（${coverage.primary_entry_platform}）` : ""}<ExternalLink aria-hidden="true" size={14} /></a> : null}
-      </section>
       <dl className="company-facts">
         <div><dt>别名</dt><dd>{aliases.length ? aliases.join("、") : "暂无别名"}</dd></div>
-        <div><dt>职位记录</dt><dd>{company.job_count ?? 0} 个</dd></div>
-        <div><dt>当前在招</dt><dd>{activeJobCount === null ? "加载中" : `${activeJobCount} 个`}</dd></div>
+        <div><dt>榜单状态</dt><dd>{company.rank ? `第 ${company.rank} 名` : "观察中"}</dd></div>
+        <div><dt>评分规则</dt><dd>{company.ranking_rule_version ?? "待补充"}</dd></div>
         <div><dt>资料更新</dt><dd>{company.updated_at.slice(0, 10)}</dd></div>
       </dl>
 
@@ -125,15 +153,23 @@ function DetailContent({ company, activeJobCount }: { company: CompanyDetail; ac
         <h2 id="profile-heading">基本信息</h2>
         <dl className="company-profile">
           <div><dt>所属行业</dt><dd>{[company.industry, company.sub_industry].filter(Boolean).join(" · ") || "待补充"}</dd></div>
-          <div><dt>融资阶段</dt><dd>{fundingLabels[company.funding_stage]}</dd></div>
+          <div><dt>最新融资</dt><dd>{company.latest_funding_round ?? "暂未查到"}</dd></div>
           <div><dt>团队规模</dt><dd>{scaleLabels[company.scale]}</dd></div>
+          <div><dt>参保人数</dt><dd>{company.insured_employee_count !== null ? `${company.insured_employee_count} 人${company.employee_report_year ? `（${company.employee_report_year} 年报）` : ""}` : "待补充"}</dd></div>
           <div><dt>主要城市</dt><dd>{company.city ?? "待补充"}</dd></div>
-          <div><dt>公司总部</dt><dd>{company.headquarters ?? "待补充"}</dd></div>
-          <div><dt>成立年份</dt><dd>{company.founded_year ? `${company.founded_year} 年` : "待补充"}</dd></div>
-          <div><dt>统一社会信用代码</dt><dd>{registrationNumber ?? "待补充"}</dd></div>
+          <div><dt>企业类型</dt><dd>{company.company_type ?? "待补充"}</dd></div>
+          <div><dt>成立时间</dt><dd>{company.established_at ?? (company.founded_year ? `${company.founded_year} 年` : "待补充")}</dd></div>
+          <div><dt>注册资本</dt><dd>{company.registered_capital ?? "待补充"}</dd></div>
           <div><dt>公司官网</dt><dd>{website ? <a href={website} target="_blank" rel="noreferrer">访问官网<ExternalLink aria-hidden="true" size={14} /></a> : "待补充"}</dd></div>
         </dl>
+        <details className="more-profile"><summary>更多工商信息</summary><dl className="company-profile"><div><dt>总部地区</dt><dd>{company.headquarters ?? "待补充"}</dd></div><div><dt>所属区县</dt><dd>{company.district ?? "待补充"}</dd></div><div><dt>实缴资本</dt><dd>{company.paid_in_capital ?? "待补充"}</dd></div><div><dt>国标行业</dt><dd>{[company.industry_sector, company.sub_industry, company.industry_middle].filter(Boolean).join(" · ") || "待补充"}</dd></div></dl></details>
       </section>
+
+      {company.business_scope ? <section className="detail-section" aria-labelledby="scope-heading"><h2 id="scope-heading">经营范围</h2><ExpandableText>{company.business_scope}</ExpandableText></section> : null}
+
+      {company.funding_events.length ? <section className="detail-section" aria-labelledby="funding-heading"><h2 id="funding-heading">融资记录</h2><CollapsibleList items={company.funding_events} limit={3} className="record-list" itemKey={(event, index) => `${event.round_label}:${event.announced_at ?? index}`} renderItem={event => <><div><strong>{event.round_label}</strong><VerificationBadge status={event.verification_status} /></div><span>{event.announced_at ?? "日期暂未披露"}</span><p>{event.investors.length ? `投资方：${event.investors.join("、")}` : "投资方暂未披露"}</p></>} /></section> : null}
+
+      <section className="detail-section" aria-labelledby="signals-heading"><h2 id="signals-heading">评分依据</h2>{signalGroups.length ? <div className="signal-groups">{signalGroups.map(([category, group]) => <section key={category}><h3>{signalGroupLabels[category] ?? category}<span>{group?.length ?? 0} 条</span></h3><CollapsibleList items={group ?? []} limit={3} className="signal-list" itemKey={(signal, index) => `${signal.signal_key}:${signal.event_date ?? index}`} renderItem={signal => <><strong>{signalText(signal)}</strong><span>{signal.event_date ?? "当前有效"}</span></>} /></section>)}</div> : <p className="section-empty">评分依据待补充</p>}</section>
 
       <section className="detail-section" aria-labelledby="filings-heading">
         <h2 id="filings-heading">备案与登记</h2>
@@ -168,27 +204,23 @@ function DetailContent({ company, activeJobCount }: { company: CompanyDetail; ac
       <section className="detail-section" aria-labelledby="evidence-heading">
         <h2 id="evidence-heading">资料依据</h2>
         {sources.length ? (
-          <ul className="record-list">
-            {sources.map((source) => (
-              <SourceRow key={`${source.provider}:${source.url}`} source={source} />
-            ))}
-          </ul>
+          <CollapsibleList items={sources} limit={5} className="record-list" itemKey={source => `${source.provider}:${source.url}`} renderItem={source => <SourceRowContent source={source} />} />
         ) : <p className="section-empty">暂无可展示的资料依据</p>}
       </section>
     </>
   );
 }
 
-function SourceRow({ source }: { source: CompanyDetail["sources"][number] }) {
+function SourceRowContent({ source }: { source: CompanyDetail["sources"][number] }) {
   const pendingFields = pendingVerificationFields(source.field_verification);
   const coveredFields = source.covered_fields ?? [];
   const fetchedDate = source.fetched_at?.slice(0, 10) ?? "时间未知";
   return (
-    <li>
+    <>
       <div><strong>{providerLabels[source.provider] ?? source.provider}</strong><span>置信度 {source.confidence}</span></div>
       <ExternalTextLink href={source.url}>{source.title ?? source.url}</ExternalTextLink>
       <p>覆盖字段：{coveredFields.join("、") || "未标注"} · 获取于 {fetchedDate}{pendingFields.length ? ` · 待核验：${pendingFields.join("、")}` : ""}</p>
-    </li>
+    </>
   );
 }
 
@@ -197,11 +229,6 @@ export function CompanyDetailPage() {
   const [company, setCompany] = useState<CompanyDetail | null>(null);
   const [detailState, setDetailState] = useState<"loading" | "ready" | "error" | "not-found">("loading");
   const [detailRetry, setDetailRetry] = useState(0);
-  const [jobs, setJobs] = useState<Page<JobListItem> | null>(null);
-  const [jobsLoading, setJobsLoading] = useState(true);
-  const [jobsError, setJobsError] = useState(false);
-  const [jobsPage, setJobsPage] = useState(1);
-  const [jobsRetry, setJobsRetry] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -216,27 +243,12 @@ export function CompanyDetailPage() {
     return () => controller.abort();
   }, [companyId, detailRetry]);
 
-  useEffect(() => {
-    const controller = new AbortController();
-    setJobsLoading(true);
-    setJobsError(false);
-    api.getCompanyJobs(companyId, jobsPage, controller.signal).then((result) => {
-      setJobs(result);
-      setJobsLoading(false);
-    }).catch((error: unknown) => {
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      setJobsError(true);
-      setJobsLoading(false);
-    });
-    return () => controller.abort();
-  }, [companyId, jobsPage, jobsRetry]);
-
   return (
     <main>
       <header className="app-header">
         <div className="content-width header-content">
-          <Link className="product-name" to="/companies" aria-label="AI 公司检索首页"><span aria-hidden="true">企</span>AI 公司检索</Link>
-          <p>面向求职决策的公司资料库</p>
+          <Link className="product-name" to="/list" aria-label="AI 公司榜首页"><span aria-hidden="true">企</span>AI 职业公司榜</Link>
+          <nav className="primary-nav" aria-label="主导航"><Link to="/list">AI 榜单</Link><Link className="active" to="/companies">公司目录</Link></nav>
         </div>
       </header>
       <div className="content-width detail-workspace">
@@ -248,10 +260,10 @@ export function CompanyDetailPage() {
         ) : null}
         {detailState === "ready" && company ? (
           <article>
-            <DetailContent company={company} activeJobCount={jobs?.total ?? null} />
+            <DetailContent company={company} />
             <section className="detail-section jobs-section" aria-labelledby="jobs-heading">
-              <div className="section-heading"><h2 id="jobs-heading">在招职位</h2><span>{jobs ? `${jobs.total} 个在招职位` : "正在加载职位"}</span></div>
-              <JobList data={jobs} loading={jobsLoading} error={jobsError} onPageChange={setJobsPage} onRetry={() => setJobsRetry((value) => value + 1)} />
+              <div className="section-heading"><h2 id="jobs-heading">职位信息</h2></div>
+              <p className="jobs-placeholder">职位功能即将开放。公司榜单与资料页当前不采集或展示职位数据。</p>
             </section>
           </article>
         ) : null}

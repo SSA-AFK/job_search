@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Literal, cast
 from uuid import UUID
 
@@ -18,10 +18,14 @@ from app.companies.schemas import (
     JobQuery,
     JobSourceItem,
     Page,
+    RankingComponentsItem,
+    RankingSignalItem,
     RecruitingCoverageItem,
 )
 from app.core.errors import CompanyNotFoundError
 from app.models import Company, CompanySource, JobPosting, SourceDocument, VerificationStatus
+from app.rankings.public_service import ranking_reason
+from app.rankings.repository import PublishedRankingRow
 from app.recruiting_coverage.service import RecruitingCoverageService
 
 
@@ -37,8 +41,9 @@ class CompanyService:
         if cached is not None:
             return cached
         companies, total = self.repository.search(query)
+        opportunity_counts = self.repository.early_career_counts([company.id for company in companies])
         page = Page(
-            items=[self._company_list_item(company) for company in companies],
+            items=[self._company_list_item(company, opportunity_counts.get(company.id, (0, 0))) for company in companies],
             page=query.page,
             page_size=query.page_size,
             total=total,
@@ -62,6 +67,27 @@ class CompanyService:
             self._source_summary(company_source, document)
             for company_source, document in company._loaded_sources  # type: ignore[attr-defined]
         ]
+        signal_funding_events = self._signal_funding_events(
+            company._loaded_ranking_signals  # type: ignore[attr-defined]
+        )
+        funding_events = [
+            FundingEventItem(
+                round_label=event.round_label,
+                announced_at=event.announced_at,
+                amount=event.amount,
+                currency=event.currency,
+                investors=company._loaded_funding_investors[event.id],  # type: ignore[attr-defined]
+                verification_status=event.verification_status,
+            )
+            for event in company._loaded_funding_events  # type: ignore[attr-defined]
+        ]
+        known_funding = {(event.round_label, event.announced_at) for event in funding_events}
+        funding_events.extend(
+            event
+            for event in signal_funding_events
+            if (event.round_label, event.announced_at) not in known_funding
+        )
+        funding_events.sort(key=lambda event: event.announced_at or date.min, reverse=True)
         detail = CompanyDetail(
             **self._company_fields(company),
             aliases=[
@@ -70,6 +96,18 @@ class CompanyService:
             ],
             headquarters=company.headquarters,
             founded_year=company.founded_year,
+            established_at=company.established_at,
+            province=company.province,
+            district=company.district,
+            company_type=company.company_type,
+            registered_capital=company.registered_capital,
+            paid_in_capital=company.paid_in_capital,
+            industry_sector=company.industry_sector,
+            industry_middle=company.industry_middle,
+            insured_employee_count=company.insured_employee_count,
+            employee_report_year=company.employee_report_year,
+            business_scope=company.business_scope,
+            latest_funding_round=funding_events[0].round_label if funding_events else None,
             filings=[
                 FilingItem(
                     filing_type=filing.filing_type,
@@ -93,19 +131,40 @@ class CompanyService:
                 )
                 for field in company._loaded_profile_fields  # type: ignore[attr-defined]
             ],
-            funding_events=[
-                FundingEventItem(
-                    round_label=event.round_label,
-                    announced_at=event.announced_at,
-                    amount=event.amount,
-                    currency=event.currency,
-                    investors=company._loaded_funding_investors[event.id],  # type: ignore[attr-defined]
-                    verification_status=event.verification_status,
-                )
-                for event in company._loaded_funding_events  # type: ignore[attr-defined]
-            ],
+            funding_events=funding_events,
             job_count=company._loaded_job_count,  # type: ignore[attr-defined]
             recruiting_coverage=self._recruiting_coverage_item(company.id),
+            ranking_rule_version=company._loaded_ranking_snapshot.rule_version,  # type: ignore[attr-defined]
+            ranking_calculated_at=company._loaded_ranking_snapshot.calculated_at,  # type: ignore[attr-defined]
+            ranking_components=RankingComponentsItem.model_validate(
+                company._loaded_ranking_snapshot.component_scores  # type: ignore[attr-defined]
+            ),
+            ranking_reason=ranking_reason(
+                PublishedRankingRow(
+                    company,
+                    company._loaded_ranking_snapshot,  # type: ignore[attr-defined]
+                    company._loaded_ranking_rank,  # type: ignore[attr-defined]
+                )
+            ),
+            ranking_missing_fields=company._loaded_ranking_snapshot.missing_fields,  # type: ignore[attr-defined]
+            ranking_signals=[
+                RankingSignalItem(
+                    category=signal.category,
+                    signal_key=signal.signal_key,
+                    value=signal.value,
+                    event_date=signal.event_date.date() if signal.event_date else None,
+                )
+                for signal in company._loaded_ranking_signals  # type: ignore[attr-defined]
+                if signal.category
+                in {
+                    "ai_relevance",
+                    "growth",
+                    "intellectual_property",
+                    "market_validation",
+                    "material_risk",
+                }
+            ],
+            **self._opportunity_fields(company.id),
         )
         if self.cache is not None:
             self.cache.set_detail(company_id, detail.model_dump_json())
@@ -145,6 +204,7 @@ class CompanyService:
 
     @staticmethod
     def _company_fields(company: Company) -> dict[str, Any]:
+        snapshot = company._loaded_ranking_snapshot  # type: ignore[attr-defined]
         return {
             "id": company.id,
             "canonical_name": company.canonical_name,
@@ -159,13 +219,23 @@ class CompanyService:
             "last_collected_at": company.last_collected_at,
             "created_at": company.created_at,
             "updated_at": company.updated_at,
+            "ranking_status": "ranked" if snapshot.is_eligible else "observation",
+            "rank": company._loaded_ranking_rank,  # type: ignore[attr-defined]
+            "ranking_score": int(snapshot.total_score),
+            "company_stage": snapshot.company_stage or "growth",
         }
 
-    def _company_list_item(self, company: Company) -> CompanyListItem:
+    def _company_list_item(self, company: Company, counts: tuple[int, int] = (0, 0)) -> CompanyListItem:
         return CompanyListItem(
             **self._company_fields(company),
+            campus_job_count=counts[0],
+            internship_job_count=counts[1],
             recruiting_coverage=self._recruiting_coverage_item(company.id),
         )
+
+    def _opportunity_fields(self, company_id: UUID) -> dict[str, int]:
+        campus, internship = self.repository.early_career_counts([company_id]).get(company_id, (0, 0))
+        return {"campus_job_count": campus, "internship_job_count": internship}
 
     def _recruiting_coverage_item(self, company_id: object) -> RecruitingCoverageItem:
         coverage = RecruitingCoverageService(self.repository.session).build(
@@ -198,12 +268,36 @@ class CompanyService:
         )
 
     @staticmethod
+    def _signal_funding_events(signals: list[Any]) -> list[FundingEventItem]:
+        events: list[FundingEventItem] = []
+        for signal in signals:
+            if signal.signal_key != "financing" or signal.verification_status != "internal_verified":
+                continue
+            round_label = signal.value.get("round")
+            if not isinstance(round_label, str) or not round_label.strip() or round_label == "出资设立":
+                continue
+            investors = signal.value.get("investors", [])
+            events.append(
+                FundingEventItem(
+                    round_label=round_label.strip(),
+                    announced_at=signal.event_date.date() if signal.event_date else None,
+                    amount=None,
+                    currency=None,
+                    investors=[value for value in investors if isinstance(value, str)]
+                    if isinstance(investors, list)
+                    else [],
+                    verification_status=VerificationStatus.VERIFIED,
+                )
+            )
+        return events
+
+    @staticmethod
     def _job_list_item(job: JobPosting) -> JobListItem:
         return JobListItem(
             id=job.id,
             company_id=job.company_id,
             title=job.title,
-            job_type=job.job_type,
+            job_type=CompanyRepository._public_job_type(job.job_type, job.title),
             city=job.city,
             salary_min_monthly=job.salary_min_monthly,
             salary_max_monthly=job.salary_max_monthly,

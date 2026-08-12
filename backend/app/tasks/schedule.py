@@ -15,7 +15,11 @@ from app.core.database import SessionLocal
 from app.models import CollectionRequest, CollectionStatus, Company, CrawlRun, RunType
 from app.models.base import utc_now
 from app.tasks.celery_app import celery_app
-from app.tasks.collection import run_ingestion
+from app.tasks.entry_verification import run_entry_verification
+
+# Compatibility alias for existing operator/test patch points. Production dispatches the
+# bounded entry-verification task.
+run_ingestion = run_entry_verification
 
 _ACTIVE_STATUSES = (CollectionStatus.QUEUED, CollectionStatus.RUNNING)
 _ACTIVE_REQUEST_INDEX = "uq_collection_requests_active_query"

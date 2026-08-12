@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-    database_url: str = "sqlite:///./company_search.db"
+    database_url: str = "sqlite:///./company_ranking_pilot_v2.sqlite3"
     collection_enabled: bool = False
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
@@ -44,7 +44,8 @@ class Settings(BaseSettings):
     ats_zhipin_enabled: bool = False
     ats_liepin_enabled: bool = False
     ats_lagou_enabled: bool = False
-    ats_approved_hosts: str = "jobs.feishu.cn,app.mokahr.com,zhipin.com,liepin.com,lagou.com"
+    ats_bytedance_enabled: bool = False
+    ats_approved_hosts: str = "jobs.feishu.cn,app.mokahr.com,zhipin.com,liepin.com,lagou.com,jobs.bytedance.com"
     zhipin_cdp_company_provider_enabled: bool = False
     zhipin_cdp_endpoint_url: str = "http://127.0.0.1:9222"
     zhipin_cdp_min_match_score: float = 80.0
@@ -59,6 +60,12 @@ class Settings(BaseSettings):
     ymicp_provider_enabled: bool = True
     ymicp_base_url: str = "http://127.0.0.1:16181"
     ymicp_timeout_seconds: float = 30.0
+    jobhunt_enabled: bool = False
+    jobhunt_executable: str | None = None
+    jobhunt_expected_version: str = "0.2.4"
+    jobhunt_site_registry_path: str = "data/jobhunt_sites.json"
+    jobhunt_timeout_seconds: float = 60.0
+    job_freshness_hours: int = 24
 
 
 settings = Settings()

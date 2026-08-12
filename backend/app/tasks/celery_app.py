@@ -5,6 +5,8 @@ from app.core.config import settings
 
 _TASK_IMPORTS = (
     "app.tasks.collection",
+    "app.tasks.entry_verification",
+    "app.tasks.job_enumeration",
     "app.tasks.schedule",
     "app.tasks.expiration",
 )

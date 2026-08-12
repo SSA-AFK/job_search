@@ -167,6 +167,7 @@ class CompanyNamePool(BaseModel):
 class EntryPlatform:
     ATS_FEISHU = "ats_feishu"
     ATS_MOKA = "ats_moka"
+    ATS_BYTEDANCE = "ats_bytedance"
     COMPANY_SITE_CAREERS = "company_site_careers"
     BOSS_ZHIPIN = "boss_zhipin"
     LIEPIN = "liepin"
@@ -204,6 +205,7 @@ class EntryCandidate:
 _ATS_SITES = (
     (EntryPlatform.ATS_FEISHU, "jobs.feishu.cn"),
     (EntryPlatform.ATS_MOKA, "app.mokahr.com"),
+    (EntryPlatform.ATS_BYTEDANCE, "jobs.bytedance.com"),
 )
 
 _JOB_BOARD_SITES = (
@@ -347,12 +349,12 @@ def validate_entry_candidate(
     elif best_sim >= _NAME_LOW_THRESHOLD:
         score += 0.10
     # Bonus for known ATS platforms even without perfect match
-    if candidate.platform in {EntryPlatform.ATS_FEISHU, EntryPlatform.ATS_MOKA}:
+    if candidate.platform in {EntryPlatform.ATS_FEISHU, EntryPlatform.ATS_MOKA, EntryPlatform.ATS_BYTEDANCE}:
         score += 0.05
     if candidate.source_provider == "known_entry_url":
         if exact_domain or root_match_domain or name_mention or best_sim >= _NAME_LOW_THRESHOLD:
             score += 0.20
-        elif candidate.platform in {EntryPlatform.ATS_FEISHU, EntryPlatform.ATS_MOKA, EntryPlatform.BOSS_ZHIPIN, EntryPlatform.LIEPIN, EntryPlatform.LAGOU}:
+        elif candidate.platform in {EntryPlatform.ATS_FEISHU, EntryPlatform.ATS_MOKA, EntryPlatform.ATS_BYTEDANCE, EntryPlatform.BOSS_ZHIPIN, EntryPlatform.LIEPIN, EntryPlatform.LAGOU}:
             score += 0.55
     confidence = min(1.0, score)
     title_normalized = normalize_for_compare(candidate.title or "")
@@ -361,7 +363,7 @@ def validate_entry_candidate(
     ) or best_sim >= _NAME_HIGH_THRESHOLD
     if (
         candidate.source_provider != "known_entry_url"
-        and candidate.platform in {EntryPlatform.ATS_FEISHU, EntryPlatform.ATS_MOKA}
+        and candidate.platform in {EntryPlatform.ATS_FEISHU, EntryPlatform.ATS_MOKA, EntryPlatform.ATS_BYTEDANCE}
         and not title_has_company_evidence
         and not root_match_domain
     ):

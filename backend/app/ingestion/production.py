@@ -4,6 +4,7 @@ import re
 from typing import Protocol
 
 from app.ingestion.providers.ats import AtsProvider
+from app.ingestion.providers.ats_extractors.bytedance import BytedanceAtsExtractor
 from app.ingestion.providers.ats_extractors.feishu import FeishuAtsExtractor
 from app.ingestion.providers.ats_extractors.lagou import LagouAtsExtractor
 from app.ingestion.providers.ats_extractors.liepin import LiepinAtsExtractor
@@ -44,6 +45,7 @@ class RuntimeSettings(Protocol):
     ats_zhipin_enabled: bool
     ats_liepin_enabled: bool
     ats_lagou_enabled: bool
+    ats_bytedance_enabled: bool
     ats_approved_hosts: str
     zhipin_cdp_company_provider_enabled: bool
     zhipin_cdp_endpoint_url: str
@@ -158,6 +160,7 @@ def create_runtime_components(config: RuntimeSettings) -> RuntimeComponents:
                 ("zhipin", config.ats_zhipin_enabled),
                 ("liepin", config.ats_liepin_enabled),
                 ("lagou", config.ats_lagou_enabled),
+                ("bytedance", config.ats_bytedance_enabled),
             )
             if on
         )
@@ -180,6 +183,7 @@ def create_runtime_components(config: RuntimeSettings) -> RuntimeComponents:
                 zhipin_extractor=ZhipinAtsExtractor(),
                 liepin_extractor=LiepinAtsExtractor(),
                 lagou_extractor=LagouAtsExtractor(),
+                bytedance_extractor=BytedanceAtsExtractor(),
                 enabled_platforms=enabled_platforms,
             )
         )

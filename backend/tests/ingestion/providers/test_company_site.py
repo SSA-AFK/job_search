@@ -297,6 +297,19 @@ async def test_robots_policy_fails_closed_when_robots_cannot_be_fetched() -> Non
 
 
 @pytest.mark.anyio
+async def test_robots_policy_allows_when_robots_missing_404() -> None:
+    safe_client = AsyncMock(spec=SafeHttpClient)
+    safe_client.get_text.side_effect = ProviderError(
+        code="http_not_found", retryable=False, detail="received HTTP 404"
+    )
+    policy = RobotsPolicy(http_client=safe_client)
+
+    assert await policy.can_fetch("https://example.com/careers") is True
+    assert await policy.can_fetch("https://example.com/jobs") is True
+    assert safe_client.get_text.await_count == 1
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("error_code", ["provider_access_denied", "provider_rate_limited"])
 async def test_robots_policy_preserves_source_stop_errors(error_code: str) -> None:
     safe_client = AsyncMock(spec=SafeHttpClient)

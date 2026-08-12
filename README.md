@@ -2,6 +2,32 @@
 
 Local web application for searching companies, viewing evidence and jobs, and optionally collecting new company data. Existing SQLite data remains searchable when Redis, Celery, an LLM, or a Provider is unavailable.
 
+## Recruiting data workflow
+
+The production collection endpoint now performs bounded recruiting-entry verification for an
+existing company. It checks existing entries first, then the company's `/careers` URL, and finally
+at most one general Serper query. A run validates at most three candidates and five HTTP requests;
+the first verified public entry stops the run. This stage never parses or writes jobs.
+
+External job enumeration is separate and opt-in. JobHunt-CLI must be installed by the operator at
+an absolute path, pinned to `JOBHUNT_EXPECTED_VERSION`, and enabled with an explicitly reviewed
+`backend/data/jobhunt_sites.json` company-to-site mapping. The application never installs or updates
+JobHunt-CLI, and JobHunt failure never falls back to BOSS automatically.
+
+BOSS data is accepted only as a manually captured local JSON file. Import it into an explicit,
+non-default database with:
+
+```powershell
+cd backend
+$env:PYTHONPATH='.'
+.\.venv\Scripts\python.exe -m app.imports.boss_cli `
+  --database-url sqlite:///./review-copy.sqlite3 `
+  --input C:\path\to\boss_jobs.json
+```
+
+The importer never starts Chrome, logs in, creates companies, writes complete-list snapshots, or
+deactivates old jobs. Unmatched company names are counted and skipped.
+
 ## Prerequisites
 
 - Python 3.12 or newer
@@ -24,7 +50,7 @@ python -m app.seed.cli data/companies.seed.json
 python -m uvicorn app.main:app --reload
 ```
 
-The backend is available at `http://127.0.0.1:8000`. Collection stays disabled unless its worker runtime and external services are configured explicitly.
+The backend is available at `http://127.0.0.1:8011`. The frontend is available at `http://127.0.0.1:5174`. Collection stays disabled unless its worker runtime and external services are configured explicitly.
 
 To confirm that seed imports remain idempotent, run the import command a second time. The second output reports no newly created companies, jobs, or sources.
 
@@ -38,7 +64,7 @@ npm ci
 npm run dev
 ```
 
-Open `http://127.0.0.1:5173/companies`. Vite proxies `/api` requests to the local backend, so search, company details, and job-source links work from the seeded SQLite database without external services.
+Open `http://127.0.0.1:5174/companies`. Vite proxies `/api` requests to the local backend, so search, company details, and job-source links work from the seeded SQLite database without external services.
 
 ## Tests and checks
 
@@ -133,9 +159,9 @@ The response status is `503`, while `GET /api/v1/companies` and company detail/j
 
 ```powershell
 $body = @{ query = "Example Technologies" } | ConvertTo-Json
-$request = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/api/v1/collection-requests -ContentType application/json -Body $body
-Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/collection-requests/$($request.id)"
-Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/companies?q=Example%20Technologies"
+$request = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8011/api/v1/collection-requests -ContentType application/json -Body $body
+Invoke-RestMethod -Uri "http://127.0.0.1:8011/api/v1/collection-requests/$($request.id)"
+Invoke-RestMethod -Uri "http://127.0.0.1:8011/api/v1/companies?q=Example%20Technologies"
 ```
 
 Database request/run rows are the status source of truth. Terminal statuses are `succeeded`, `partial`, and `failed`; public failure codes include `collection_unavailable`, Provider codes such as `request_timeout`, `provider_auth_failed`, and `provider_rate_limited`, plus extraction `invalid_output`. `crawl_runs.error_detail` stores sanitized JSON issues with stage, code, and optional provider attribution; it never stores credentials or raw model output.
@@ -153,7 +179,7 @@ In separate PowerShell windows, activate the backend environment and start the A
 ```powershell
 Set-Location backend
 .\.venv\Scripts\Activate.ps1
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8011
 ```
 
 ```powershell
@@ -226,3 +252,54 @@ The orchestrator runs Providers in two phases. Discovery Providers first identif
 Unsupported commercial job-board and company-data Providers remain explicitly disabled pending both credentials and collection authorization. Do not add them to `RuntimeComponents.providers`; disabled Providers make no network call and do not appear in `providers_attempted`.
 
 Do not set real secrets in `.env.example`, tracked files, shell history, or test fixtures. Use process-scoped environment variables or an approved secret manager.
+# AI 求职公司榜（内部校准）
+
+首批 AI 公司榜使用天眼查 Excel 导出作为本地基线，只补充融资、AI 发明专利、中标验证和重大风险四类缺口。基础工商、企业规模和完整历史不会重复调用。天眼返回仅用于内部结构化评分；用户可见结论必须来自官网、政府或审核后的公开来源。
+
+在 `backend` 目录运行，且必须显式使用隔离 SQLite 数据库：
+
+```powershell
+$env:PYTHONPATH='.'
+python -m app.rankings.cli `
+  --database-url sqlite:///company_ranking_pilot_v2.sqlite3 `
+  --workbook 'C:\path\to\companies.xlsx' `
+  --sample-size 100 `
+  --seed ai-ranking-pilot-v1 `
+  --collect-tyc `
+  --report
+```
+
+命令可重复执行：成功且未过期的类别会跳过；认证或额度耗尽时批次快速停止，恢复后从未完成类别继续。首轮每家公司最多四个数据类别；专利与软著、中标与资质分别需要两个底层工具，因此完整覆盖最多六个工具调用。输出同时报告 `logical_calls` 与 `tool_calls`，不得将网络批量请求数解释为供应商额度次数。
+
+内部报告包含发展阶段、五维原始分、阶段百分位、证据覆盖和资格原因。AI 相关性由
+Excel 经营范围的严格 AI 术语命中，或近三年 AI 专利/软件著作权自动判定；经营范围原文
+仅在导入内存中使用，数据库只保存派生分类、命中数量和不可逆指纹。官网不参与默认
+评分和入榜门槛，仅用于榜单前 20 家或争议公司的可选复核。
+
+2026-08-12 首批校准批次使用规则 `tyc-ranking-v2` 与评分规则
+`ai-long-term-v2`：100 家、400/400 个数据类别成功、最多 600 个底层工具调用；
+重复运行验证为 0 调用。官网证据采集成功 16 家、无官网 37 家、关闭失败 47 家；
+这些官网结果只保留为可选复核材料，不影响自动榜单。最终 98 家自动入榜，2 家因经营
+范围和 AI 知识产权均无明确 AI 证据留在观察池。
+
+临时 API Key 只允许写入本机 CLI 凭据存储，禁止写入仓库、数据库、报告或命令示例；
+批次结束后应由密钥所有者在天眼账户侧立即废止。
+
+## AI 榜单页面
+
+应用默认使用现有 `backend/company_ranking_pilot_v2.sqlite3` 作为同一业务数据库，不创建或
+联查第二套榜单数据库。若系统环境中已有旧 `DATABASE_URL`，启动后端时必须显式覆盖：
+
+```powershell
+cd backend
+$env:DATABASE_URL='sqlite:///./company_ranking_pilot_v2.sqlite3'
+$env:PYTHONPATH='.'
+python -m uvicorn app.main:app --reload
+```
+
+- `/list`：98 家正式 AI 榜单与 2 家观察池。
+- `/companies`：只检索本期固定 100 家公司。
+- `/companies/{id}`：公司公开资料、榜单评分和白名单评分依据；职位区仅保留占位。
+
+页面运行不访问天眼 API 或公司官网。榜单刷新通过离线采集与重评分命令完成，前端只读取
+数据库快照。

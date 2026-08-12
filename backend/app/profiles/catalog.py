@@ -12,6 +12,12 @@ class ProfileFieldDefinition:
 
 
 PROFILE_FIELD_CATALOG = (
+    ProfileFieldDefinition("ai.track", "AI细分赛道", "ai", 1),
+    ProfileFieldDefinition("ai.core_level", "AI业务核心程度", "ai", 1),
+    ProfileFieldDefinition("ai.products", "公开产品", "product", 1),
+    ProfileFieldDefinition("ai.market_proofs", "公开市场验证", "market", 1),
+    ProfileFieldDefinition("ai.technology_signals", "公开技术信号", "technology", 1),
+    ProfileFieldDefinition("ai.growth_events", "公开成长事件", "growth", 1),
     ProfileFieldDefinition("financing.latest_round", "最新融资轮次", "financing", 2),
     ProfileFieldDefinition("financing.latest_date", "最近融资日期", "financing", 2),
     ProfileFieldDefinition("financing.investors", "已披露投资方", "financing", 2),
@@ -30,4 +36,3 @@ PROFILE_FIELD_CATALOG = (
 )
 
 PROFILE_FIELDS_BY_KEY = {field.key: field for field in PROFILE_FIELD_CATALOG}
-

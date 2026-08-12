@@ -1,8 +1,10 @@
 """Parse restricted local exports and choose a deterministic internal pilot."""
 
 from dataclasses import dataclass
+from datetime import date, datetime
 from hashlib import sha256
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from openpyxl import load_workbook
 
@@ -20,6 +22,15 @@ _REQUIRED_HEADERS = (
     "统一社会信用代码",
     "网址",
     "天眼评分",
+    "参保人数",
+    "参保人数所属年报",
+    "经营范围",
+    "注册资本",
+    "实缴资本",
+    "所属区县",
+    "企业(机构)类型",
+    "国标行业门类",
+    "国标行业中类",
 )
 _ELIGIBLE_STATUSES = frozenset({"存续", "在业"})
 
@@ -34,9 +45,22 @@ class RankingCandidate:
     normalized_name: str
     source_row: int
     province: str
+    city: str
     industry_major: str
     score: int
     identity_hash: str
+    website_candidate: str | None
+    company_size: str | None
+    established_at: date | None
+    insured_employee_count: int | None
+    employee_report_year: int | None
+    business_scope: str | None
+    registered_capital: str | None
+    paid_in_capital: str | None
+    district: str | None
+    company_type: str | None
+    industry_sector: str | None
+    industry_middle: str | None
 
 
 def read_ranking_candidates(workbook_path: Path) -> tuple[RankingCandidate, ...]:
@@ -69,9 +93,22 @@ def read_ranking_candidates(workbook_path: Path) -> tuple[RankingCandidate, ...]
                     normalized_name=normalized_name,
                     source_row=row,
                     province=_text(values["所属省份"]) or "未知",
+                    city=_text(values["所属城市"]) or "未知",
                     industry_major=_text(values["国标行业大类"]) or "未知",
                     score=score,
                     identity_hash=sha256(credit_code.encode()).hexdigest(),
+                    website_candidate=_website(values["网址"]),
+                    company_size=_optional_text(values["企业规模"]),
+                    established_at=_date(values["成立日期"]),
+                    insured_employee_count=_integer(values["参保人数"]),
+                    employee_report_year=_integer(values["参保人数所属年报"]),
+                    business_scope=_optional_text(values["经营范围"]),
+                    registered_capital=_optional_text(values["注册资本"]),
+                    paid_in_capital=_optional_text(values["实缴资本"]),
+                    district=_optional_text(values["所属区县"]),
+                    company_type=_optional_text(values["企业(机构)类型"]),
+                    industry_sector=_optional_text(values["国标行业门类"]),
+                    industry_middle=_optional_text(values["国标行业中类"]),
                 )
             )
         if not candidates:
@@ -89,7 +126,9 @@ def select_representative_sample(
     score_bucket = _score_buckets(candidates)
     groups: dict[tuple[str, str, int], list[RankingCandidate]] = {}
     for candidate in candidates:
-        groups.setdefault((candidate.province, candidate.industry_major, score_bucket[candidate]), []).append(candidate)
+        groups.setdefault(
+            (candidate.province, candidate.industry_major, score_bucket[candidate]), []
+        ).append(candidate)
     total = len(candidates)
     allocations = {key: len(group) * sample_size // total for key, group in groups.items()}
     remaining = sample_size - sum(allocations.values())
@@ -102,9 +141,9 @@ def select_representative_sample(
     selected: list[RankingCandidate] = []
     for key, group in groups.items():
         selected.extend(
-            sorted(group, key=lambda item: sha256(f"{item.identity_hash}:{seed}".encode()).hexdigest())[ 
-                : allocations[key]
-            ]
+            sorted(
+                group, key=lambda item: sha256(f"{item.identity_hash}:{seed}".encode()).hexdigest()
+            )[: allocations[key]]
         )
     return tuple(sorted(selected, key=lambda item: item.source_row))
 
@@ -136,3 +175,41 @@ def _score(value: object) -> int | None:
 
 def _text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
+
+
+def _optional_text(value: object) -> str | None:
+    text = _text(value)
+    return None if text in {"", "-"} else text
+
+
+def _integer(value: object) -> int | None:
+    text = _optional_text(value)
+    if text is None:
+        return None
+    try:
+        return int(float(text))
+    except ValueError:
+        return None
+
+
+def _date(value: object) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = _optional_text(value)
+    if text is None:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def _website(value: object) -> str | None:
+    website = _text(value).split(";")[0].strip()
+    if not website or website == "-":
+        return None
+    candidate = website if "://" in website else f"https://{website}"
+    parsed = urlsplit(candidate)
+    return candidate if parsed.scheme in {"http", "https"} and parsed.hostname else None

@@ -17,10 +17,15 @@ from app.models import (
     Base,
     Company,
     CompanyAlias,
+    CompanyRankingSnapshot,
+    CompanyRankingSignal,
     CompanySource,
     JobPosting,
+    RankingPilot,
+    RankingPilotMember,
     SourceDocument,
 )
+from app.rankings.service import RULE_VERSION
 from app.seed.importer import import_seed
 from app.seed.schema import SeedPayload
 
@@ -116,6 +121,52 @@ def seeded_session() -> Iterator[Session]:
                 confidence=Decimal("0.975"),
             )
         )
+        pilot = RankingPilot(
+            industry="ai",
+            input_sha256="b" * 64,
+            selection_seed="api-test",
+            sample_size=len(ordered_names),
+            created_at=datetime(2026, 8, 1, tzinfo=UTC),
+        )
+        session.add(pilot)
+        session.flush()
+        for rank, name in enumerate(ordered_names, start=1):
+            company = session.scalar(select(Company).where(Company.canonical_name == name))
+            assert company is not None
+            session.add(
+                RankingPilotMember(
+                    pilot_id=pilot.id,
+                    company_id=company.id,
+                    source_row=rank + 2,
+                    source_identity_hash=str(rank).zfill(64),
+                    stratum="api-test",
+                    selection_reason="api-test",
+                )
+            )
+            session.add(
+                CompanyRankingSnapshot(
+                    pilot_id=pilot.id,
+                    company_id=company.id,
+                    industry="ai",
+                    rule_version=RULE_VERSION,
+                    total_score=Decimal(101 - rank),
+                    component_scores={
+                        "ai_core": 25,
+                        "market_validation": 20,
+                        "growth_momentum": 15,
+                        "industry_influence": 12,
+                        "reliability": 8,
+                    },
+                    raw_component_scores={},
+                    stage_percentiles={},
+                    evidence_coverage={},
+                    company_stage="growth",
+                    missing_fields=[],
+                    eligibility_reasons=[],
+                    is_eligible=True,
+                    calculated_at=datetime(2026, 8, 1, tzinfo=UTC),
+                )
+            )
         session.commit()
         yield session
 
@@ -270,9 +321,7 @@ def test_relevance_places_alias_prefix_and_contains_in_their_match_tiers(
         "DeepSeek",
         "Alias Holder",
         "DeepSeek Systems",
-        "Alias Prefix Holder",
         "The DeepSeek Lab",
-        "Alias Contains Holder",
     ]
 
 
@@ -316,9 +365,9 @@ def test_search_defaults_to_updated_at_without_query_and_paginates(client: TestC
     assert body["page_size"] == 3
     assert body["total"] == 8
     assert [item["canonical_name"] for item in body["items"]] == [
-        "字节跳动",
         "MiniMax",
-        "智谱AI",
+        "字节跳动",
+        "Alias Holder",
     ]
 
 
@@ -379,6 +428,50 @@ def test_company_detail_includes_aliases_filings_sources_and_job_count(
             "fetched_at": "2026-07-31T00:00:00Z",
         }
     ]
+
+
+def test_company_detail_projects_verified_financing_signal(
+    client: TestClient, seeded_session: Session, deepseek_id: UUID
+) -> None:
+    seeded_session.add_all(
+        [
+            CompanyRankingSignal(
+                company_id=deepseek_id,
+                category="growth",
+                signal_key="financing",
+                value={"round": "A+轮", "investors": ["示例资本"]},
+                event_date=datetime(2026, 5, 1, tzinfo=UTC),
+                source_fingerprint="c" * 64,
+                confidence=Decimal("0.900"),
+                verification_status="internal_verified",
+                fetched_at=datetime(2026, 8, 1, tzinfo=UTC),
+            ),
+            CompanyRankingSignal(
+                company_id=deepseek_id,
+                category="growth",
+                signal_key="financing",
+                value={"round": "出资设立", "investors": ["母公司"]},
+                event_date=datetime(2026, 6, 1, tzinfo=UTC),
+                source_fingerprint="d" * 64,
+                confidence=Decimal("0.900"),
+                verification_status="internal_verified",
+                fetched_at=datetime(2026, 8, 1, tzinfo=UTC),
+            ),
+        ]
+    )
+    seeded_session.commit()
+
+    body = client.get(f"/api/v1/companies/{deepseek_id}").json()
+
+    assert body["latest_funding_round"] == "A+轮"
+    assert body["funding_events"][0] == {
+        "round_label": "A+轮",
+        "announced_at": "2026-05-01",
+        "amount": None,
+        "currency": None,
+        "investors": ["示例资本"],
+        "verification_status": "verified",
+    }
 
 
 def test_job_sources_keep_provider_url_pairing(

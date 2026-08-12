@@ -1,6 +1,7 @@
 """Cached robots.txt policy for allowlisted company websites."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from urllib.parse import urlsplit, urlunsplit
 from urllib.robotparser import RobotFileParser
 
@@ -17,7 +18,12 @@ class RobotsPolicy:
         self._rules_by_origin: dict[_Origin, RobotFileParser | None] = {}
         self._locks_by_origin: dict[_Origin, asyncio.Lock] = {}
 
-    async def can_fetch(self, url: str) -> bool:
+    async def can_fetch(
+        self,
+        url: str,
+        *,
+        request_started: Callable[[str], Awaitable[None]] | None = None,
+    ) -> bool:
         origin = self._normalize_origin(url)
         if origin is None:
             return False
@@ -28,16 +34,29 @@ class RobotsPolicy:
             async with lock:
                 if origin_key not in self._rules_by_origin:
                     try:
-                        document = await self._http_client.get_text(
-                            robots_url, allowed_hosts={normalized_host}
-                        )
+                        if request_started is None:
+                            document = await self._http_client.get_text(
+                                robots_url, allowed_hosts={normalized_host}
+                            )
+                        else:
+                            document = await self._http_client.get_text(
+                                robots_url,
+                                allowed_hosts={normalized_host},
+                                request_started=request_started,
+                            )
                     except ProviderError as error:
                         if error.code in {
                             "provider_access_denied",
                             "provider_rate_limited",
                         }:
                             raise
-                        self._rules_by_origin[origin_key] = None
+                        if error.code == "http_not_found":
+                            # No robots.txt (RFC 9309): absence permits fetching.
+                            allow_all = RobotFileParser()
+                            allow_all.parse([])
+                            self._rules_by_origin[origin_key] = allow_all
+                        else:
+                            self._rules_by_origin[origin_key] = None
                     else:
                         parser = RobotFileParser()
                         parser.set_url(document.url)

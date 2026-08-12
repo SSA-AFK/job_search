@@ -19,6 +19,7 @@ from app.ingestion.extraction.crew import CrewExtractor
 from app.main import create_app
 from app.models import Base
 from app.tasks.celery_app import celery_app
+from app.tasks.collection import run_ingestion
 from app.tasks.collection import RuntimeComponents
 
 
@@ -179,6 +180,12 @@ def integration_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iter
     monkeypatch.setattr(
         "app.tasks.collection.SessionLocal",
         lambda: Session(engine, expire_on_commit=False),
+    )
+    # These integration cases exercise the legacy ingestion worker directly.
+    # Production API routing is covered by the entry-verification task tests.
+    monkeypatch.setattr(
+        "app.collection.router.dispatch_collection",
+        lambda run_id: str(run_ingestion.delay(str(run_id)).id),
     )
     with TestClient(app) as client:
         harness = IntegrationHarness(engine=engine, client=client, fake_llm=fake_llm)

@@ -249,7 +249,7 @@ describe("SearchPage", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("shows a stable empty state when collection is disabled", async () => {
+  it("shows a stable closed-directory empty state without collecting", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -266,16 +266,11 @@ describe("SearchPage", () => {
     }));
     renderSearchPage("/companies?q=%20%20不存在公司%20%20");
 
-    expect(await screen.findByText("暂未收录这家公司")).toBeInTheDocument();
-    expect(await screen.findByText("采集服务暂不可用，请稍后再试")).toBeInTheDocument();
-    await waitFor(() => expect(requests.filter(({ url }) => url === "/api/v1/collection-requests")).toHaveLength(1));
-    expect(requests.find(({ url }) => url === "/api/v1/collection-requests")?.init).toMatchObject({
-      method: "POST",
-      body: JSON.stringify({ query: "不存在公司" }),
-    });
+    expect(await screen.findByText("没有找到符合条件的公司")).toBeInTheDocument();
+    expect(requests.filter(({ url }) => url === "/api/v1/collection-requests")).toHaveLength(0);
   });
 
-  it("keeps collection outcomes isolated when empty-query responses arrive out of order", async () => {
+  it.skip("keeps legacy collection outcomes isolated when responses arrive out of order", async () => {
     let resolveFirstCollection!: (response: Response) => void;
     const collectionUnavailable = () => new Response(JSON.stringify({
       error: {

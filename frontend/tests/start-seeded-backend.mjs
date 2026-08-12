@@ -101,7 +101,7 @@ console.log("PLAYWRIGHT_SEED_STABLE true");
 
 const server = spawn(
   python.executable,
-  ["-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"],
+  ["-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8011"],
   { cwd: backendDirectory, env: environment, stdio: "inherit" },
 );
 

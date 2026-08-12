@@ -33,6 +33,13 @@ _PLATFORM_SELECTORS: dict[str, tuple[str, str]] = {
         ),
         "a.position_link, a.s-top-name, h3 a, a[href*='/jobs/'], a[href*='lagou.com/jobs']",
     ),
+    "bytedance": (
+        (
+            ".positionItem, a[href*='/detail'], a[href*='position/'], "
+            ".job-list-item, div[class*='job-card'], li[class*='job-item']"
+        ),
+        "a",
+    ),
     "generic": ("a.job-card, .job-listing a, .position a", "a"),
 }
 
@@ -201,6 +208,12 @@ def _extract_card_attributes(card: Tag, platform: str) -> dict[str, str]:
             "tags": _text(card.select_one(".industry, .position-label, [class*='con_list_item']")),
             "title_extra": _text(card.select_one(".position-name, h3, [class*='top']")),
         }
+    if platform == "bytedance":
+        return {
+            "city": _text(card.select_one("[class*='location'], [class*='city'], .job-location")),
+            "tags": _text(card.select_one("[class*='tag'], [class*='label'], .job-tags")),
+            "title_extra": _text(card.select_one("[class*='title'], .job-name, .job-subtitle")),
+        }
     return {}
 
 
@@ -266,7 +279,7 @@ def parse_html_job_list(html: str, platform: str) -> AtsListResult:
 
             # Aggregate all text blobs for city/type/salary inference
             blob_parts: list[str] = [title]
-            if platform in {"zhipin", "liepin", "lagou"}:
+            if platform in {"zhipin", "liepin", "lagou", "bytedance"}:
                 for v in attrs.values():
                     if v:
                         blob_parts.append(v)

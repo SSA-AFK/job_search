@@ -22,6 +22,14 @@ from app.models.import_batch import ImportBatch, ImportItem
 from app.models.job import JobPosting, JobSource
 from app.models.job_entry import JobCollectionSnapshot, JobEntry
 from app.models.source import CompanyProfileField, CompanySource, SourceDocument
+from app.rankings.models import (
+    CompanyRankingSignal,
+    CompanyRankingSnapshot,
+    CompanyRankingSnapshotEvidence,
+    RankingCollectionRun,
+    RankingPilot,
+    RankingPilotMember,
+)
 
 if TYPE_CHECKING:
     from app.company_identity.models import (
@@ -90,6 +98,7 @@ def __getattr__(name: str) -> object:
         return getattr(company_identity_models, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
+
 __all__ = [
     "GUID",
     "Base",
@@ -104,6 +113,9 @@ __all__ = [
     "CompanyManifest",
     "CompanyManifestMember",
     "CompanyProfileField",
+    "CompanyRankingSignal",
+    "CompanyRankingSnapshot",
+    "CompanyRankingSnapshotEvidence",
     "CompanyScale",
     "CompanySource",
     "CrawlRun",
@@ -125,6 +137,9 @@ __all__ = [
     "JobSnapshotStatus",
     "JobSource",
     "JobType",
+    "RankingCollectionRun",
+    "RankingPilot",
+    "RankingPilotMember",
     "RecruitingStatus",
     "RegulatoryFiling",
     "RunType",

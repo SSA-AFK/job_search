@@ -4,7 +4,7 @@ import { useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import type { CompanyListItem, Page } from "../api/types";
 import { CollectionStatus } from "../collection/CollectionStatus";
-import { defaultCollectionRegistry, type CollectionRegistry } from "../collection/polling";
+import { type CollectionRegistry } from "../collection/polling";
 import { CompanyResults } from "./CompanyResults";
 import { Filters } from "./Filters";
 import {
@@ -14,7 +14,7 @@ import {
   withSearchParam,
 } from "./search-params";
 
-export function SearchPage({ collectionRegistry = defaultCollectionRegistry }: { collectionRegistry?: CollectionRegistry }) {
+export function SearchPage({ collectionRegistry }: { collectionRegistry?: CollectionRegistry } = {}) {
   const [searchParams, setSearchParams] = useSearchParams();
   const serializedParams = searchParams.toString();
   const params = useMemo(
@@ -26,14 +26,6 @@ export function SearchPage({ collectionRegistry = defaultCollectionRegistry }: {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
-  const hasStructuredFilters = Boolean(
-    params.industry
-    || params.sub_industry
-    || params.funding_stage
-    || params.scale
-    || params.city,
-  );
-
   useEffect(() => {
     setSearchValue(params.q ?? "");
   }, [params.q]);
@@ -94,10 +86,10 @@ export function SearchPage({ collectionRegistry = defaultCollectionRegistry }: {
     setSearchParams(new URLSearchParams());
   };
 
-  const collectionQuery = !hasStructuredFilters
+  // Kept only for the collection module's isolated compatibility tests. The production
+  // route does not pass a registry, so the closed 100-company directory never collects.
+  const legacyCollectionQuery = collectionRegistry
     && params.q
-    && params.q.length >= 2
-    && params.q.length <= 100
     && data?.total === 0
     && !error
     ? params.q
@@ -107,18 +99,18 @@ export function SearchPage({ collectionRegistry = defaultCollectionRegistry }: {
     <main>
       <header className="app-header">
         <div className="content-width header-content">
-          <a className="product-name" href="/companies" aria-label="AI 公司检索首页">
+          <a className="product-name" href="/list" aria-label="AI 公司榜首页">
             <span aria-hidden="true">企</span>
-            AI 公司检索
+            AI 职业公司榜
           </a>
-          <p>面向求职决策的公司资料库</p>
+          <nav className="primary-nav" aria-label="主导航"><a href="/list">AI 榜单</a><a className="active" href="/companies">公司目录</a></nav>
         </div>
       </header>
       <div className="content-width workspace">
         <div className="workspace-heading">
           <div>
-            <h1>查找公司</h1>
-            <p>按名称、领域、融资阶段与所在城市缩小范围。</p>
+            <h1>AI 公司目录</h1>
+            <p>在本期 AI 公司集合中，按名称、领域、规模与城市查找；校招与实习机会不影响榜单评分。</p>
           </div>
         </div>
         <Filters
@@ -139,7 +131,7 @@ export function SearchPage({ collectionRegistry = defaultCollectionRegistry }: {
           onPageChange={(page) => setSearchParams(withPage(searchParams, page))}
           onClear={clearFilters}
           onRetry={() => setRetryCount((count) => count + 1)}
-          emptyQueryStatus={collectionQuery ? <CollectionStatus query={collectionQuery} registry={collectionRegistry} /> : null}
+          emptyQueryStatus={legacyCollectionQuery ? <CollectionStatus query={legacyCollectionQuery} registry={collectionRegistry} /> : null}
         />
       </div>
     </main>
