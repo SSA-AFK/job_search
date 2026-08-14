@@ -70,6 +70,7 @@ class CompanyListItem(BaseModel):
     rank: int | None
     ranking_score: int
     company_stage: Literal["early", "growth", "mature"]
+    active_job_count: int = 0
     campus_job_count: int = 0
     internship_job_count: int = 0
 

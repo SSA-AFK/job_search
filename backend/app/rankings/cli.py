@@ -8,35 +8,15 @@ from sqlalchemy.orm import Session
 from sqlalchemy.schema import MetaData
 
 from app.core.config import settings
-from app.ingestion.extraction.client import OpenAICompatibleLlmClient
-from app.ingestion.extraction.crew import CrewExtractor
 from app.models import *
 from app.models.base import Base
 from app.rankings.service import (
-    enrich_ai_pilot,
     import_ai_pilot,
     pilot_report,
     rescore_ai_pilot,
 )
 from app.rankings.tianyancha.client import TianyanchaRankingClient
 from app.rankings.tianyancha.service import collect_pilot_tianyancha
-
-
-def _configured_extractor() -> CrewExtractor | None:
-    if not (
-        settings.openai_compatible_base_url
-        and settings.openai_compatible_model
-        and settings.openai_compatible_api_key
-    ):
-        return None
-    return CrewExtractor(
-        OpenAICompatibleLlmClient(
-            base_url=settings.openai_compatible_base_url,
-            model=settings.openai_compatible_model,
-            api_key=settings.openai_compatible_api_key,
-            timeout_seconds=settings.openai_request_timeout_seconds,
-        )
-    )
 
 
 def main() -> None:
@@ -47,11 +27,6 @@ def main() -> None:
     parser.add_argument("--seed", default="ai-ranking-pilot-v1")
     parser.add_argument(
         "--report", action="store_true", help="include the internal calibration report"
-    )
-    parser.add_argument(
-        "--enrich",
-        action="store_true",
-        help="collect approved first-party pages, persist evidence, and refresh scores",
     )
     parser.add_argument(
         "--collect-tyc",
@@ -78,26 +53,6 @@ def main() -> None:
             "companies_matched": summary.companies_matched,
             "members_selected": summary.members_selected,
         }
-        if args.enrich:
-            extractor = _configured_extractor()
-            if extractor is None:
-                parser.error("extractor is not configured")
-            enrichment = asyncio.run(
-                enrich_ai_pilot(
-                    session,
-                    summary.pilot_id,
-                    args.workbook,
-                    extractor=extractor,
-                )
-            )
-            rescore_ai_pilot(session, summary.pilot_id)
-            result["enrichment"] = {
-                "succeeded": sum(item.status == "succeeded" for item in enrichment),
-                "no_website": sum(item.status == "no_website" for item in enrichment),
-                "failed": sum(
-                    item.status not in {"succeeded", "no_website"} for item in enrichment
-                ),
-            }
         if args.collect_tyc:
             collection = asyncio.run(
                 collect_pilot_tianyancha(

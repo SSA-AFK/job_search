@@ -134,6 +134,12 @@ class CompanyRepository:
         job_count = self.session.scalar(
             select(func.count(JobPosting.id)).where(JobPosting.company_id == company_id)
         )
+        source_rows = list(
+            {
+                (document.provider, document.url, document.content_hash): (company_source, document)
+                for company_source, document in source_rows
+            }.values()
+        )
         loaded_company = cast(Any, company)
         loaded_company._loaded_aliases = aliases
         loaded_company._loaded_filings = filings
@@ -144,12 +150,6 @@ class CompanyRepository:
                 .where(CompanyProfileField.company_id == company_id)
                 .order_by(CompanyProfileField.field_key)
             )
-        )
-        source_rows = list(
-            {
-                (document.provider, document.url, document.content_hash): (company_source, document)
-                for company_source, document in source_rows
-            }.values()
         )
         loaded_company._loaded_funding_events = list(
             self.session.scalars(
@@ -182,7 +182,9 @@ class CompanyRepository:
         company._loaded_job_count = job_count or 0  # type: ignore[attr-defined]
         return company
 
-    def list_jobs(self, company_id: UUID, query: JobQuery) -> tuple[list[JobPosting], int]:
+    def list_jobs(
+        self, company_id: UUID, query: JobQuery, *, total_limit: int | None = None
+    ) -> tuple[list[JobPosting], int]:
         source_exists = exists(
             select(1).where(
                 JobSource.job_posting_id == JobPosting.id,
@@ -192,32 +194,29 @@ class CompanyRepository:
         )
         filters: list[ColumnElement[bool]] = [
             JobPosting.company_id == company_id,
-            self._early_career_predicate(),
             source_exists,
         ]
         if query.city is not None:
             filters.append(JobPosting.city == query.city)
+        if query.job_type is not None:
+            filters.append(JobPosting.job_type == query.job_type)
         if query.active_only:
             filters.append(JobPosting.is_active.is_(True))
 
-        total = min(self.session.scalar(select(func.count(JobPosting.id)).where(*filters)) or 0, 20)
-        display_order = case(
-            (func.lower(JobPosting.title).like("%实习%"), 1),
-            (func.lower(JobPosting.title).like("%intern%"), 1),
-            (JobPosting.job_type == "campus", 0),
-            else_=1,
-        )
+        available = self.session.scalar(select(func.count(JobPosting.id)).where(*filters)) or 0
+        total = min(available, total_limit) if total_limit is not None else available
+        offset = (query.page - 1) * query.page_size
+        remaining = max(0, total - offset)
         statement = (
             select(JobPosting)
             .where(*filters)
             .order_by(
-                display_order,
                 JobPosting.posted_at.desc().nulls_last(),
                 JobPosting.updated_at.desc(),
                 JobPosting.id,
             )
-            .offset((query.page - 1) * min(query.page_size, 20))
-            .limit(min(query.page_size, 20))
+            .offset(offset)
+            .limit(min(query.page_size, remaining))
         )
         jobs = list(self.session.scalars(statement))
         if jobs:
@@ -262,6 +261,21 @@ class CompanyRepository:
             index = 0 if self._public_job_type(job_type, title) == "campus" else 1
             counts[company_id][index] += 1
         return {key: (value[0], value[1]) for key, value in counts.items()}
+
+    def active_job_counts(self, company_ids: list[UUID]) -> dict[UUID, int]:
+        if not company_ids:
+            return {}
+        rows = self.session.execute(
+            select(JobPosting.company_id, func.count(JobPosting.id))
+            .where(JobPosting.company_id.in_(company_ids), JobPosting.is_active.is_(True))
+            .where(exists(select(1).where(
+                JobSource.job_posting_id == JobPosting.id,
+                JobSource.provider.like("jobhunt:%"),
+                JobSource.is_active.is_(True),
+            )))
+            .group_by(JobPosting.company_id)
+        )
+        return {company_id: count for company_id, count in rows}
 
     @staticmethod
     def _public_job_type(job_type: object, title: str) -> str:

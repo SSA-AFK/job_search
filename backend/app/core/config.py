@@ -6,7 +6,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-    database_url: str = "sqlite:///./company_ranking_pilot_v2.sqlite3"
+    database_url: str = "sqlite:///./company_search.db"
+    app_environment: str = "development"
+    test_job_display_limit: int = 5
     collection_enabled: bool = False
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
@@ -41,17 +43,10 @@ class Settings(BaseSettings):
     ats_provider_enabled: bool = False
     ats_feishu_enabled: bool = False
     ats_moka_enabled: bool = False
-    ats_zhipin_enabled: bool = False
     ats_liepin_enabled: bool = False
     ats_lagou_enabled: bool = False
     ats_bytedance_enabled: bool = False
-    ats_approved_hosts: str = "jobs.feishu.cn,app.mokahr.com,zhipin.com,liepin.com,lagou.com,jobs.bytedance.com"
-    zhipin_cdp_company_provider_enabled: bool = False
-    zhipin_cdp_endpoint_url: str = "http://127.0.0.1:9222"
-    zhipin_cdp_min_match_score: float = 80.0
-    zhipin_cdp_page_size: int = 30
-    zhipin_cdp_max_pages: int = 20
-    zhipin_cdp_block_threshold: int = 2
+    ats_approved_hosts: str = "jobs.feishu.cn,app.mokahr.com,liepin.com,lagou.com,jobs.bytedance.com"
     playwright_pool_size: int = 2
     playwright_page_timeout_seconds: float = 30.0
     tianyancha_provider_enabled: bool = False

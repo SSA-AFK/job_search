@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.ingestion.errors import ProviderError
 from app.models import (
     Company,
+    CompanyAlias,
     CompanyProfileField,
     CompanyRankingSignal,
     RankingCollectionRun,
@@ -22,6 +23,7 @@ from app.models import (
 from app.rankings.gap_plan import EnrichmentCategory, plan_ranking_enrichment
 from app.rankings.selection import read_ranking_candidates
 from app.rankings.tianyancha.client import TianyanchaRankingClient
+from app.rankings.identity_anchor import legal_search_key
 from app.rankings.tianyancha.projectors import project_response
 
 COLLECTION_RULE_VERSION = "tyc-ranking-v2"
@@ -69,6 +71,9 @@ async def collect_pilot_tianyancha(
         candidate = candidates.get(identity_hash)
         if candidate is None:
             continue
+        search_aliases = _company_search_aliases(session, company.id, company, candidate)
+        # Enrichment is allowed only after the legal entity has been independently anchored.
+        primary_search_key = legal_search_key(company)
         fresh = _fresh_category_keys(session, pilot_id, company.id, today)
         plan = plan_ranking_enrichment(candidate, fresh_field_keys=fresh)
         counters["planned"] += len(plan.categories)
@@ -114,7 +119,7 @@ async def collect_pilot_tianyancha(
             try:
                 payload = await client.fetch(
                     category,
-                    company.canonical_name,
+                    primary_search_key,
                     window_start=window_start,
                     window_end=today,
                 )
@@ -124,7 +129,8 @@ async def collect_pilot_tianyancha(
                 signals = project_response(
                     category,
                     payload,
-                    company_name=company.canonical_name,
+                    company_name=primary_search_key,
+                    company_aliases=search_aliases,
                     window_start=window_start,
                 )
                 _persist_signals(
@@ -301,3 +307,31 @@ def _three_year_window(as_of: date) -> date:
         return as_of.replace(year=as_of.year - 3)
     except ValueError:
         return as_of.replace(year=as_of.year - 3, day=28)
+
+
+def _company_search_aliases(
+    session: Session,
+    company_id: UUID,
+    company: Company,
+    candidate: object,
+) -> frozenset[str]:
+    """Build alias set used by Tianyancha projectors for winner/investor matching.
+
+    Includes:
+    * workbook canonical_name    (真实工商注册名, e.g. 杭州深度求索人工智能科技有限公司)
+    * company.canonical_name     (seed/display name, e.g. DeepSeek（深度求索）)
+    * all rows from CompanyAlias (from company_aliases table)
+    """
+    aliases: set[str] = set()
+    aliases.add(candidate.canonical_name)
+    aliases.add(company.canonical_name)
+    for row in session.scalars(
+        select(CompanyAlias).where(CompanyAlias.company_id == company_id)
+    ):
+        aliases.add(row.alias)
+        if row.normalized_alias:
+            aliases.add(row.normalized_alias)
+    # Strip empties
+    aliases.discard("")
+    aliases.discard(None)
+    return frozenset(aliases)

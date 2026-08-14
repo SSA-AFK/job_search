@@ -42,6 +42,13 @@ class Company(Base, TimestampMixin):
     insured_employee_count: Mapped[int | None] = mapped_column(Integer())
     employee_report_year: Mapped[int | None] = mapped_column(Integer())
     business_scope: Mapped[str | None] = mapped_column(Text())
+    legal_name: Mapped[str | None] = mapped_column(String(255))
+    tianyancha_company_id: Mapped[str | None] = mapped_column(String(64))
+    uscc_sha256: Mapped[str | None] = mapped_column(String(64))
+    identity_anchor_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="unverified"
+    )
+    identity_anchored_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     logo_url: Mapped[str | None] = mapped_column(String(1000))
     website: Mapped[str | None] = mapped_column(String(1000))
     normalized_website: Mapped[str] = mapped_column(

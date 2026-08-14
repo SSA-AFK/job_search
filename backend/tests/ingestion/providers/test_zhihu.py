@@ -119,7 +119,7 @@ async def test_encodes_filter_and_authentication(
 
     result = await provider.search(
         ProviderQuery(
-            query="Example Company hiring", allowed_hosts=frozenset({"zhipin.com"}), max_results=20
+            query="Example Company hiring", allowed_hosts=frozenset({"jobs.feishu.cn"}), max_results=20
         )
     )
 
@@ -130,7 +130,7 @@ async def test_encodes_filter_and_authentication(
     assert request.headers["Content-Type"] == "application/json"
     assert request.url.params["Query"] == "Example Company hiring"
     assert request.url.params["Count"] == "20"
-    assert request.url.params["Filter"] == 'host=="zhipin.com"'
+    assert request.url.params["Filter"] == 'host=="jobs.feishu.cn"'
     assert request.url.params["SearchDB"] == "all"
     assert len(result.documents) == 1
 
@@ -157,13 +157,13 @@ async def test_excludes_zhihu_hosts_from_documented_filter(
         ProviderQuery(
             query="Example Company",
             allowed_hosts=frozenset(
-                {"zhipin.com", "zhihu.com", "www.zhihu.com", "careers.example.com"}
+                {"zhihu.com", "www.zhihu.com", "careers.example.com"}
             ),
         )
     )
 
     assert route.calls[0].request.url.params["Filter"] == (
-        '(host=="careers.example.com" OR host=="zhipin.com")'
+        '(host=="careers.example.com")'
     )
 
 

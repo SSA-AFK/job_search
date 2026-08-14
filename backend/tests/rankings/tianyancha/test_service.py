@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
-from app.models import Base, CompanyProfileField, CompanyRankingSignal, RankingCollectionRun
+from app.models import Base, Company, CompanyProfileField, CompanyRankingSignal, RankingCollectionRun
 from app.rankings.service import import_ai_pilot, rescore_ai_pilot
 from app.rankings.tianyancha.service import collect_pilot_tianyancha
 from tests.rankings.test_selection import _workbook
@@ -33,6 +33,11 @@ def test_collection_is_bounded_to_four_categories_and_resumes_without_calls(
     client = FakeClient()
     with Session(engine) as session:
         summary = import_ai_pilot(session, workbook, sample_size=1)
+        company = session.scalar(select(Company))
+        assert company is not None
+        company.legal_name = company.canonical_name
+        company.identity_anchor_status = "verified"
+        session.commit()
         first = asyncio.run(
             collect_pilot_tianyancha(
                 session,

@@ -6,7 +6,6 @@ from app.ingestion.providers.ats_extractors.feishu import FeishuAtsExtractor
 from app.ingestion.providers.ats_extractors.lagou import LagouAtsExtractor
 from app.ingestion.providers.ats_extractors.liepin import LiepinAtsExtractor
 from app.ingestion.providers.ats_extractors.moka import MokaAtsExtractor
-from app.ingestion.providers.ats_extractors.zhipin import ZhipinAtsExtractor
 from app.ingestion.providers.ats_renderer import AtsRenderer
 from app.ingestion.providers.http import SafeHttpClient
 from app.ingestion.providers.robots import RobotsPolicy
@@ -14,7 +13,6 @@ from app.ingestion.providers.robots import RobotsPolicy
 _PLATFORM_HOSTS = {
     "feishu": "jobs.feishu.cn",
     "moka": "app.mokahr.com",
-    "zhipin": "zhipin.com",
     "liepin": "liepin.com",
     "lagou": "lagou.com",
     "bytedance": "jobs.bytedance.com",
@@ -39,7 +37,7 @@ _ACCESS_BLOCK_ERROR_CODES = frozenset(
 )
 
 _AtsExtractor = (
-    FeishuAtsExtractor | MokaAtsExtractor | ZhipinAtsExtractor | LiepinAtsExtractor | LagouAtsExtractor | BytedanceAtsExtractor
+    FeishuAtsExtractor | MokaAtsExtractor | LiepinAtsExtractor | LagouAtsExtractor | BytedanceAtsExtractor
 )
 
 
@@ -67,7 +65,6 @@ class AtsProvider:
         renderer: AtsRenderer,
         feishu_extractor: FeishuAtsExtractor,
         moka_extractor: MokaAtsExtractor,
-        zhipin_extractor: ZhipinAtsExtractor | None = None,
         liepin_extractor: LiepinAtsExtractor | None = None,
         lagou_extractor: LagouAtsExtractor | None = None,
         bytedance_extractor: BytedanceAtsExtractor | None = None,
@@ -81,8 +78,6 @@ class AtsProvider:
             "feishu": feishu_extractor,
             "moka": moka_extractor,
         }
-        if zhipin_extractor is not None:
-            extractors["zhipin"] = zhipin_extractor
         if liepin_extractor is not None:
             extractors["liepin"] = liepin_extractor
         if lagou_extractor is not None:
@@ -116,7 +111,6 @@ class AtsProvider:
 
     async def search_with_url(self, url: str, query: ProviderQuery) -> ProviderResult:
         host = (urlsplit(url).hostname or "").lower().rstrip(".")
-        # Accept both exact host and subdomain (e.g. www.zhipin.com, www.liepin.com)
         platform: str | None = None
         for p, target_host in _PLATFORM_HOSTS.items():
             if host == target_host or host.endswith("." + target_host):

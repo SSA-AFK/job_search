@@ -9,7 +9,6 @@ from app.ingestion.providers.ats_extractors.feishu import FeishuAtsExtractor
 from app.ingestion.providers.ats_extractors.lagou import LagouAtsExtractor
 from app.ingestion.providers.ats_extractors.liepin import LiepinAtsExtractor
 from app.ingestion.providers.ats_extractors.moka import MokaAtsExtractor
-from app.ingestion.providers.ats_extractors.zhipin import ZhipinAtsExtractor
 from app.ingestion.providers.ats_renderer import AtsRenderer
 from app.ingestion.providers.company_site import CompanySiteProvider
 from app.ingestion.providers.http import SafeHttpClient
@@ -19,7 +18,6 @@ from app.ingestion.providers.serper import SerperProvider
 from app.ingestion.providers.tianyancha import TianyanchaProvider
 from app.ingestion.providers.ymicp import YmicpProvider
 from app.ingestion.providers.zhihu import ZhihuGlobalSearchProvider
-from app.ingestion.providers.zhipin_cdp import PlaywrightZhipinCdpClient, ZhipinCdpCompanyProvider
 from app.ingestion.runtime import RuntimeComponents
 
 _HOST_PATTERN = re.compile(
@@ -42,17 +40,10 @@ class RuntimeSettings(Protocol):
     ats_provider_enabled: bool
     ats_feishu_enabled: bool
     ats_moka_enabled: bool
-    ats_zhipin_enabled: bool
     ats_liepin_enabled: bool
     ats_lagou_enabled: bool
     ats_bytedance_enabled: bool
     ats_approved_hosts: str
-    zhipin_cdp_company_provider_enabled: bool
-    zhipin_cdp_endpoint_url: str
-    zhipin_cdp_min_match_score: float
-    zhipin_cdp_page_size: int
-    zhipin_cdp_max_pages: int
-    zhipin_cdp_block_threshold: int
     playwright_pool_size: int
     playwright_page_timeout_seconds: float
     tianyancha_provider_enabled: bool
@@ -113,24 +104,6 @@ def create_runtime_components(config: RuntimeSettings) -> RuntimeComponents:
                 hl=config.serper_hl,
             )
         )
-    if config.zhipin_cdp_company_provider_enabled:
-        if config.zhipin_cdp_page_size < 1 or config.zhipin_cdp_max_pages < 1:
-            raise ProductionRuntimeConfigurationError(
-                "ZHIPIN_CDP_PAGE_SIZE and ZHIPIN_CDP_MAX_PAGES must be positive"
-            )
-        providers.append(
-            ZhipinCdpCompanyProvider(
-                client=PlaywrightZhipinCdpClient(
-                    endpoint_url=config.zhipin_cdp_endpoint_url,
-                    page_timeout_seconds=config.playwright_page_timeout_seconds,
-                ),
-                enabled=True,
-                min_match_score=config.zhipin_cdp_min_match_score,
-                page_size=config.zhipin_cdp_page_size,
-                max_pages=config.zhipin_cdp_max_pages,
-                platform_block_threshold=config.zhipin_cdp_block_threshold,
-            )
-        )
     if config.company_site_provider_enabled:
         approved_hosts = frozenset(
             host.strip().lower().rstrip(".")
@@ -157,7 +130,6 @@ def create_runtime_components(config: RuntimeSettings) -> RuntimeComponents:
             for p, on in (
                 ("feishu", config.ats_feishu_enabled),
                 ("moka", config.ats_moka_enabled),
-                ("zhipin", config.ats_zhipin_enabled),
                 ("liepin", config.ats_liepin_enabled),
                 ("lagou", config.ats_lagou_enabled),
                 ("bytedance", config.ats_bytedance_enabled),
@@ -180,7 +152,6 @@ def create_runtime_components(config: RuntimeSettings) -> RuntimeComponents:
                 renderer=renderer,
                 feishu_extractor=FeishuAtsExtractor(),
                 moka_extractor=MokaAtsExtractor(),
-                zhipin_extractor=ZhipinAtsExtractor(),
                 liepin_extractor=LiepinAtsExtractor(),
                 lagou_extractor=LagouAtsExtractor(),
                 bytedance_extractor=BytedanceAtsExtractor(),
@@ -200,5 +171,4 @@ def create_runtime_components(config: RuntimeSettings) -> RuntimeComponents:
     )
     return RuntimeComponents(
         providers=controlled,
-        extractor=None,
     )

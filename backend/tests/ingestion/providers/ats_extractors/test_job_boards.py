@@ -1,4 +1,4 @@
-"""单元测试：BOSS直聘 / 猎聘 / 拉勾 HTML 解析器 + 字段提取。"""
+"""单元测试：猎聘 / 拉勾 HTML 解析器 + 字段提取。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -70,41 +70,6 @@ def test_employment_guess(text: str, etype: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Zhipin
-# ---------------------------------------------------------------------------
-
-def test_zhipin_parser_extracts_three_jobs() -> None:
-    html = (_DATA / "zhipin_list.html").read_text(encoding="utf-8")
-    result = parse_html_job_list(html, platform="zhipin")
-    assert result.status == AtsParseStatus.SUCCEEDED
-    assert result.observed_count == 3
-    titles = [c.title for c in result.candidates]
-    assert "高级算法工程师 (NLP)" in titles
-    assert "产品实习生" in titles
-    assert "前端开发工程师" in titles
-
-    algo = next(c for c in result.candidates if "算法" in c.title)
-    assert algo.city == "北京"
-    assert algo.employment_type == "full_time"
-    assert algo.raw_attributes.get("salary_min_k") == "25"
-    assert algo.raw_attributes.get("salary_max_k") == "50"
-    assert algo.raw_attributes.get("salary_months") == "16"
-
-    intern = next(c for c in result.candidates if "实习生" in c.title)
-    assert intern.city == "上海"
-    assert intern.employment_type == "internship"
-    # 日薪被保护跳过，无 K 值
-    assert intern.raw_attributes.get("salary_min_k") is None
-
-    fe = next(c for c in result.candidates if "前端" in c.title)
-    assert fe.city == "深圳"
-    # 2-3.5万 → 20K-35K
-    assert fe.raw_attributes.get("salary_min_k") == "20"
-    assert fe.raw_attributes.get("salary_max_k") == "35"
-    assert fe.raw_attributes.get("salary_months") == "14"
-
-
-# ---------------------------------------------------------------------------
 # Liepin
 # ---------------------------------------------------------------------------
 
@@ -160,65 +125,15 @@ def test_lagou_parser_extracts_three_jobs() -> None:
 # ---------------------------------------------------------------------------
 
 def test_wrong_platform_returns_partial_not_raises() -> None:
-    html = (_DATA / "zhipin_list.html").read_text(encoding="utf-8")
-    # feishu selectors won't match zhipin HTML → partial, no candidates, no raise
+    html = (_DATA / "liepin_list.html").read_text(encoding="utf-8")
     result = parse_html_job_list(html, platform="feishu")
     assert result.status == AtsParseStatus.PARTIAL
     assert result.observed_count == 0
     assert result.error_code == "no_candidates"
 
 
-def test_zhipin_real_company_mobile_snapshot_meituan_and_didi() -> None:
-    html = """
-    <html><body><ul class="job-list-box">
-      <li class="job-card-wrapper">
-        <a class="job-name" href="https://m.zhipin.com/job_detail/47d26b77ad245d230nd73Nu-F1pT.html">美团BD销售</a>
-        <span class="salary">8-13K·13薪</span>
-        <div class="job-area">成都武侯区科华北路</div>
-        <div class="tag-list">1-3年 大专 全职</div>
-        <a href="https://m.zhipin.com/gongsi/b633a34f787d94f21nZ_0929E1I~.html">美团</a>
-      </li>
-      <li class="job-card-wrapper">
-        <a class="job-name" href="https://m.zhipin.com/job_detail/65677bde329d768b0nFy2NW1ElZQ.html">高级专家工程师（乘客推荐引擎方向）</a>
-        <span class="salary">55-85K·15薪</span>
-        <div class="job-area">北京海淀区上地</div>
-        <div class="tag-list">10年以上 本科 全职</div>
-        <a href="https://m.zhipin.com/gongsi/8548fadc0b5c265403V93t61EQ~~.html">滴滴</a>
-      </li>
-      <li class="job-card-wrapper">
-        <a class="job-name" href="https://m.zhipin.com/job_detail/ec44da489b4627ce0nJ409-6F1FZ.html">潜力市场-产品与用户运营实习生</a>
-        <span class="salary">150-200元/天</span>
-        <div class="job-area">成都成华区建设路</div>
-        <div class="tag-list">本科 实习</div>
-        <a href="https://m.zhipin.com/gongsi/8548fadc0b5c265403V93t61EQ~~.html">滴滴</a>
-      </li>
-    </ul></body></html>
-    """
-    result = parse_html_job_list(html, platform="zhipin")
-    assert result.status == AtsParseStatus.SUCCEEDED
-    assert result.observed_count == 3
-
-    meituan = next(c for c in result.candidates if "美团BD" in c.title)
-    assert meituan.city == "成都"
-    assert meituan.employment_type == "full_time"
-    assert meituan.raw_attributes.get("salary_min_k") == "8"
-    assert meituan.raw_attributes.get("salary_max_k") == "13"
-    assert meituan.raw_attributes.get("salary_months") == "13"
-
-    didi = next(c for c in result.candidates if "乘客推荐" in c.title)
-    assert didi.city == "北京"
-    assert didi.raw_attributes.get("salary_min_k") == "55"
-    assert didi.raw_attributes.get("salary_max_k") == "85"
-    assert didi.raw_attributes.get("salary_months") == "15"
-
-    intern = next(c for c in result.candidates if "实习生" in c.title)
-    assert intern.city == "成都"
-    assert intern.employment_type == "internship"
-    assert intern.raw_attributes.get("salary_min_k") is None
-
-
 def test_empty_html_fails_cleanly() -> None:
-    result = parse_html_job_list("", platform="zhipin")
+    result = parse_html_job_list("", platform="liepin")
     assert result.status == AtsParseStatus.FAILED
     assert result.error_code == "parse_failed"
     assert result.candidates == ()

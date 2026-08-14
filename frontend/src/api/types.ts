@@ -60,6 +60,7 @@ export type CompanyListItem = {
   company_stage?: "early" | "growth" | "mature";
   campus_job_count?: number;
   internship_job_count?: number;
+  active_job_count?: number;
 };
 
 export type RankingComponents = {
@@ -80,8 +81,9 @@ export type RankingMember = {
   component_scores: RankingComponents;
   reason: string;
   missing_fields: string[];
-  campus_job_count: number;
-  internship_job_count: number;
+  campus_job_count?: number;
+  internship_job_count?: number;
+  active_job_count?: number;
 };
 
 export type RankingList = {

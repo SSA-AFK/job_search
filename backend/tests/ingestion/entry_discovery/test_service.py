@@ -133,24 +133,6 @@ async def test_site_queries_rejects_unrelated(moonshot_pool: CompanyNamePool) ->
 
 
 # ---------------------------------------------------------------------------
-# Tests - Known entry URLs
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_known_entry_url_is_validated_without_root_domain_probe() -> None:
-    pool = CompanyNamePool(
-        canonical_name="Acme",
-        known_entry_urls=("https://www.zhipin.com/web/geek/jobs?query=Acme",),
-        domains=("zhipin.com",),
-    )
-    svc = EntryDiscoveryService()
-    result = await svc.discover(pool)
-    assert len(result.high_confidence) == 1
-    assert result.high_confidence[0].platform == EntryPlatform.BOSS_ZHIPIN
-    assert result.high_confidence[0].source_provider == "known_entry_url"
-
-
-# ---------------------------------------------------------------------------
 # Tests - Careers page probe
 # ---------------------------------------------------------------------------
 
@@ -199,6 +181,6 @@ async def test_site_queries_concurrent_limit(moonshot_pool: CompanyNamePool) -> 
     svc = EntryDiscoveryService(serper_provider=serper)
     await svc.discover(moonshot_pool)
     # 变体数（canonical + 去后缀工商 + Kimi + 插入 canonical 去重） ≤ 4
-    # × 站点数（jobs.feishu.cn + app.mokahr.com + zhipin + liepin + lagou）= 5
+    # × 站点数（jobs.feishu.cn + app.mokahr.com + liepin + lagou）= 4
     # 所以总调用 ≤ ~20。如果 bug 导致爆炸，调用数会非常大。
     assert len(serper.calls) <= 25, f"Serper 调用数过多: {len(serper.calls)}"

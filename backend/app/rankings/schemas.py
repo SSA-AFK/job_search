@@ -23,6 +23,7 @@ class RankingMemberItem(BaseModel):
     component_scores: RankingComponents
     reason: str
     missing_fields: list[str]
+    active_job_count: int = 0
     campus_job_count: int = 0
     internship_job_count: int = 0
 

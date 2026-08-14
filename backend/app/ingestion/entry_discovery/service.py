@@ -55,7 +55,7 @@ class DiscoveryResult:
             c
             for c in self.high_confidence
             if c.platform
-            in {EntryPlatform.BOSS_ZHIPIN, EntryPlatform.LIEPIN, EntryPlatform.LAGOU}
+            in {EntryPlatform.LIEPIN, EntryPlatform.LAGOU}
         )
 
 
@@ -147,7 +147,6 @@ class EntryDiscoveryService:
             ("ats_feishu", "jobs.feishu.cn"),
             ("ats_moka", "app.mokahr.com"),
             ("ats_bytedance", "jobs.bytedance.com"),
-            ("boss_zhipin", "zhipin.com"),
             ("liepin", "liepin.com"),
             ("lagou", "lagou.com"),
         ]}
@@ -294,8 +293,6 @@ def _platform_from_url(url: str) -> str:
         return EntryPlatform.ATS_MOKA
     if host == "jobs.bytedance.com" or host.endswith(".jobs.bytedance.com"):
         return EntryPlatform.ATS_BYTEDANCE
-    if host == "zhipin.com" or host.endswith(".zhipin.com"):
-        return EntryPlatform.BOSS_ZHIPIN
     if host == "liepin.com" or host.endswith(".liepin.com"):
         return EntryPlatform.LIEPIN
     if host == "lagou.com" or host.endswith(".lagou.com"):

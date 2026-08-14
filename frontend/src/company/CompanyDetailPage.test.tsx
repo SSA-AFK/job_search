@@ -25,9 +25,9 @@ const company: CompanyDetail = {
 
 function response(body: unknown, status = 200) { return Promise.resolve(new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } })); }
 
-function renderDetail(fetchImpl: (input: RequestInfo | URL) => Promise<Response> = () => response(company)) {
+function renderDetail(fetchImpl: (input: RequestInfo | URL) => Promise<Response> = (input) => String(input).includes("/jobs") ? response({ items: [], page: 1, page_size: 20, total: 0 }) : response(company), from?: string) {
   vi.stubGlobal("fetch", vi.fn(fetchImpl));
-  window.history.replaceState({}, "", `/companies/${companyId}`);
+  window.history.replaceState(from ? { usr: { from }, key: "test", idx: 0 } : {}, "", `/companies/${companyId}`);
   render(<BrowserRouter><Routes><Route path="/companies/:companyId" element={<CompanyDetailPage />} /></Routes></BrowserRouter>);
 }
 
@@ -40,19 +40,27 @@ describe("CompanyDetailPage", () => {
     expect(screen.getByText("榜单第 1 名")).toBeInTheDocument();
     expect(screen.getByText("86")).toBeInTheDocument();
     expect(screen.getByText(/AI 发明专利：大模型推理方法/)).toBeInTheDocument();
-    expect(screen.getByText(/职位功能即将开放/)).toBeInTheDocument();
+    expect(await screen.findByText(/暂未发现有效职位/)).toBeInTheDocument();
     expect(screen.getAllByText("A+轮").length).toBeGreaterThan(0);
     expect(screen.getByText("1000万人民币")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /展开全文/ })).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByText("统一社会信用代码")).not.toBeInTheDocument();
   });
 
-  it("never requests the jobs endpoint", async () => {
+  it("requests the early-career jobs endpoint once", async () => {
     const requests: string[] = [];
-    renderDetail((input) => { requests.push(String(input)); return response(company); });
+    renderDetail((input) => { requests.push(String(input)); return String(input).includes("/jobs") ? response({ items: [], page: 1, page_size: 20, total: 0 }) : response(company); });
     await screen.findByRole("heading", { name: "DeepSeek", level: 1 });
-    await waitFor(() => expect(requests).toHaveLength(1));
-    expect(requests.some(url => url.includes("/jobs"))).toBe(false);
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests.filter(url => url.includes("/jobs"))).toHaveLength(1);
+  });
+
+  it("returns to the originating ranking stage and rejects unsafe return paths", async () => {
+    renderDetail(undefined, "/list?stage=growth");
+    expect(await screen.findByRole("link", { name: "返回 AI 榜单" })).toHaveAttribute("href", "/list?stage=growth");
+    cleanup();
+    renderDetail(undefined, "https://example.com/phishing");
+    expect(await screen.findByRole("link", { name: "返回公司列表" })).toHaveAttribute("href", "/companies");
   });
 
   it("shows explicit loading and not-found states", async () => {

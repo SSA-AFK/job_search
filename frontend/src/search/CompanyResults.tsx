@@ -84,8 +84,7 @@ function CompanyRow({ company }: { company: CompanyListItem }) {
           <h3><Link className="company-detail-link" to={`/companies/${company.id}`}>{company.canonical_name}</Link></h3>
           <span className={`ranking-status ranking-status--${company.ranking_status ?? "observation"}`}>{company.rank ? `第 ${company.rank} 名` : "观察中"}</span>
           <span>{company.city ? locationLabels[company.city] ?? company.city : "城市待确认"}</span>
-          {company.campus_job_count ? <span className="opportunity-tag">校招 {company.campus_job_count}</span> : null}
-          {company.internship_job_count ? <span className="opportunity-tag">实习 {company.internship_job_count}</span> : null}
+          {company.active_job_count ? <span className="opportunity-tag">在招 {company.active_job_count}</span> : null}
         </div>
         <p className="company-tags">
           {[company.industry, company.sub_industry, fundingLabels[company.funding_stage], scaleLabels[company.scale]]

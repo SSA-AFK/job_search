@@ -2,10 +2,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Select, func, select
+from collections import defaultdict
+
+from sqlalchemy import Select, exists, func, or_, select
 from sqlalchemy.orm import Session
 
-from app.models import Company, CompanyRankingSnapshot, RankingPilot, RankingPilotMember
+from app.models import Company, CompanyRankingSnapshot, JobPosting, JobSource, RankingPilot, RankingPilotMember
 from app.rankings.service import AI_INDUSTRY, RULE_VERSION
 
 
@@ -92,3 +94,39 @@ class RankingRepository:
                 CompanyRankingSnapshot.rule_version == RULE_VERSION,
             )
         )
+
+    def early_career_counts(self, company_ids: list[UUID]) -> dict[UUID, tuple[int, int]]:
+        if not company_ids:
+            return {}
+        title = func.lower(JobPosting.title)
+        predicate = or_(
+            JobPosting.job_type.in_(["campus", "internship"]),
+            *(title.like(f"%{keyword}%") for keyword in ("实习", "校招", "校园", "应届", "intern", "graduate")),
+        )
+        rows = self.session.execute(
+            select(JobPosting.company_id, JobPosting.job_type, JobPosting.title)
+            .where(JobPosting.company_id.in_(company_ids), JobPosting.is_active.is_(True), predicate)
+            .where(exists(select(1).where(JobSource.job_posting_id == JobPosting.id, JobSource.provider.like("jobhunt:%"), JobSource.is_active.is_(True))))
+        )
+        counts: dict[UUID, list[int]] = defaultdict(lambda: [0, 0])
+        for company_id, job_type, job_title in rows:
+            lowered = job_title.lower()
+            value = getattr(job_type, "value", str(job_type))
+            index = 1 if "实习" in lowered or "intern" in lowered or value == "internship" else 0
+            counts[company_id][index] += 1
+        return {key: (value[0], value[1]) for key, value in counts.items()}
+
+    def active_job_counts(self, company_ids: list[UUID]) -> dict[UUID, int]:
+        if not company_ids:
+            return {}
+        rows = self.session.execute(
+            select(JobPosting.company_id, func.count(JobPosting.id))
+            .where(JobPosting.company_id.in_(company_ids), JobPosting.is_active.is_(True))
+            .where(exists(select(1).where(
+                JobSource.job_posting_id == JobPosting.id,
+                JobSource.provider.like("jobhunt:%"),
+                JobSource.is_active.is_(True),
+            )))
+            .group_by(JobPosting.company_id)
+        )
+        return {company_id: count for company_id, count in rows}

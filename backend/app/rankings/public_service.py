@@ -1,7 +1,6 @@
 from fastapi import status
 
 from app.core.errors import DomainError
-from app.companies.repository import CompanyRepository
 from app.rankings.repository import PublishedRankingRow, RankingRepository
 from app.rankings.schemas import (
     RankingComponents,
@@ -54,8 +53,9 @@ class PublicRankingService:
         ]
         start = (query.page - 1) * query.page_size
         page_rows = selected[start : start + query.page_size]
-        counts = CompanyRepository(self.repository.session).early_career_counts([row.company.id for row in page_rows])
-        items = [self._item(row, counts.get(row.company.id, (0, 0))) for row in page_rows]
+        counts = self.repository.early_career_counts([row.company.id for row in page_rows])
+        active_counts = self.repository.active_job_counts([row.company.id for row in page_rows])
+        items = [self._item(row, counts.get(row.company.id, (0, 0)), active_counts.get(row.company.id, 0)) for row in page_rows]
         calculated_at = self.repository.calculated_at(pilot_id)
         assert calculated_at is not None
         return RankingListResponse(
@@ -70,7 +70,7 @@ class PublicRankingService:
         )
 
     @staticmethod
-    def _item(row: PublishedRankingRow, counts: tuple[int, int] = (0, 0)) -> RankingMemberItem:
+    def _item(row: PublishedRankingRow, counts: tuple[int, int] = (0, 0), active_count: int = 0) -> RankingMemberItem:
         scores = RankingComponents.model_validate(row.snapshot.component_scores)
         return RankingMemberItem(
             company_id=row.company.id,
@@ -84,4 +84,5 @@ class PublicRankingService:
             missing_fields=row.snapshot.missing_fields,
             campus_job_count=counts[0],
             internship_job_count=counts[1],
+            active_job_count=active_count,
         )

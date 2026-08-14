@@ -38,15 +38,11 @@ from app.ingestion.errors import (
     RetryableInfrastructureError,
     RunClaimError,
 )
-from app.ingestion.extraction.crew import Extractor
-from app.ingestion.extraction.prompts import assign_evidence_ids
 from app.ingestion.extraction.schemas import (
     CompanyCandidate,
     CompanyProfileCandidate,
-    CompanyRef,
     FilingCandidate,
     JobCandidate,
-    ProfileExtraction,
 )
 from app.ingestion.identity_matching import (
     company_name_mentioned,
@@ -413,7 +409,6 @@ class IngestionOrchestrator:
         self,
         *,
         providers: Sequence[Provider],
-        extractor: Extractor | None,
         batch_builder: NormalizedBatchBuilder,
         persistence: PersistenceService,
         direct_ats_persistence: DirectAtsPersistence | None = None,
@@ -422,7 +417,6 @@ class IngestionOrchestrator:
         identity_review_recorder: IdentityReviewRecorder,
     ) -> None:
         self.providers = list(providers)
-        self.extractor = extractor
         self.batch_builder = batch_builder
         self.persistence = persistence
         self.direct_ats_persistence = direct_ats_persistence
@@ -547,47 +541,6 @@ class IngestionOrchestrator:
                     error_code=provider_error or "no_documents",
                     diagnostics=diagnostics,
                 )
-            direct_job_board_results: list[PersistenceResult] = []
-            if self.direct_ats_persistence is not None:
-                for outcome in outcomes.values():
-                    if outcome.name != "zhipin_cdp_company" or not outcome.parsed_jobs:
-                        continue
-                    entry_url = str(outcome.documents[0].url) if outcome.documents else "https://www.zhipin.com"
-                    persisted = self.direct_ats_persistence.persist(
-                        company_name=request.query,
-                        entry_url=entry_url,
-                        platform="zhipin",
-                        jobs=outcome.parsed_jobs,
-                        crawl_run_id=run.id,
-                        snapshot=_snapshot_metadata_from_outcomes({0: outcome}),
-                    )
-                    if persisted is not None:
-                        direct_job_board_results.append(persisted)
-                if direct_job_board_results:
-                    company_id = direct_job_board_results[0].company_id
-                    if any(result.company_id != company_id for result in direct_job_board_results):
-                        raise _PipelineError("invalid_company_identity")
-                    persisted = PersistenceResult(
-                        company_id=company_id,
-                        documents_written=0,
-                        jobs_written=sum(result.jobs_written for result in direct_job_board_results),
-                        warnings=(),
-                    )
-                    return self._finish(
-                        run,
-                        expected_claim_token=claim_token,
-                        status=CollectionStatus.PARTIAL if provider_error else CollectionStatus.SUCCEEDED,
-                        providers_attempted=providers_attempted,
-                        documents_found=len(documents),
-                        jobs_found=sum(
-                            len(outcome.parsed_jobs)
-                            for outcome in outcomes.values()
-                            if outcome.name == "zhipin_cdp_company"
-                        ),
-                        persistence=persisted,
-                        error_code=provider_error,
-                        diagnostics=diagnostics,
-                    )
             ats_career_urls = _scan_ats_career_urls(
                 documents, company_name_variants(request.query)
             )
@@ -685,162 +638,15 @@ class IngestionOrchestrator:
                     error_code=provider_error or "ats_collection_failed",
                     diagnostics=diagnostics,
                 )
-            if self.extractor is None:
-                return self._finish(
-                    run,
-                    expected_claim_token=claim_token,
-                    status=CollectionStatus.FAILED,
-                    providers_attempted=providers_attempted,
-                    documents_found=len(documents),
-                    jobs_found=0,
-                    persistence=self._existing_company_result(request.query),
-                    error_code="ats_entry_discovery_pending",
-                    diagnostics=diagnostics,
-                )
-            stage = "discovery"
-            discovered = await self.extractor.discover(documents)
-            selected, discovery_error = _select_company(request.query, discovered)
-            if selected is None:
-                discovery_error = discovery_error or "ambiguous_company"
-                return self._finish(
-                    run,
-                    expected_claim_token=claim_token,
-                    status=CollectionStatus.FAILED,
-                    providers_attempted=providers_attempted,
-                    documents_found=len(documents),
-                    jobs_found=0,
-                    persistence=None,
-                    error_code=discovery_error,
-                    diagnostics=(_Diagnostic("discovery", discovery_error),),
-                )
-            company = CompanyRef(name=selected.name, website=selected.website)
-            if selected.website is not None and website_providers:
-                website_host = _normalized_website_host(selected.website)
-                if website_host is not None:
-                    outcomes = self._merge_outcome_dicts(
-                        outcomes,
-                        await self._collect_providers(
-                            website_providers,
-                            ProviderQuery(
-                                query=request.query,
-                                website=selected.website,
-                                allowed_hosts=frozenset({website_host}),
-                            ),
-                        ),
-                    )
-                    (
-                        providers_attempted,
-                        documents,
-                        provider_error,
-                        diagnostics,
-                    ) = self._merge_outcomes(outcomes)
-            if selected.career_page_url is not None and website_providers:
-                career_host = _normalized_website_host(selected.career_page_url)
-                if career_host is not None:
-                    outcomes = self._merge_outcome_dicts(
-                        outcomes,
-                        await self._collect_providers(
-                            website_providers,
-                            ProviderQuery(
-                                query=request.query,
-                                website=selected.career_page_url,
-                                allowed_hosts=frozenset({career_host}),
-                            ),
-                        ),
-                    )
-                    (
-                        providers_attempted,
-                        documents,
-                        provider_error,
-                        diagnostics,
-                    ) = self._merge_outcomes(outcomes)
-            # Also try ATS URLs found by regex scanning (bypasses LLM entirely)
-            processed_ats_urls: set[str] = set()
-            for ats_candidate in ats_career_urls:
-                url = ats_candidate.url
-                if url in processed_ats_urls:
-                    continue
-                processed_ats_urls.add(url)
-                try:
-                    parsed = HttpUrl(url)
-                except ValidationError:
-                    continue
-                ats_host = _normalized_website_host(parsed)
-                if ats_host is not None:
-                    outcomes = self._merge_outcome_dicts(
-                        outcomes,
-                        await self._collect_providers(
-                            website_providers,
-                            ProviderQuery(
-                                query=request.query,
-                                website=parsed,
-                                allowed_hosts=frozenset({ats_host}),
-                            ),
-                        ),
-                    )
-                    (
-                        providers_attempted,
-                        documents,
-                        provider_error,
-                        diagnostics,
-                    ) = self._merge_outcomes(outcomes)
-            stage = "profile"
-            profile = await self.extractor.extract_profile(company, documents)
-            stage = "jobs"
-            jobs = await self.extractor.extract_jobs(company, documents)
-            jobs_found = len(jobs)
-            stage = "normalization"
-            batch_outcome = await self.batch_builder.build(
-                company=company,
-                profile=profile,
-                jobs=jobs,
-                documents=documents,
-                discovered=selected,
-            )
-            stage = "claim_check"
-            if not self.runs.owns_claim(
-                run.id, expected_claim_token=claim_token
-            ):
-                current = self.runs.get_run(run.id)
-                return (
-                    IngestionResult.unknown_run(run.id)
-                    if current is None
-                    else IngestionResult.from_run(current)
-                )
-            if batch_outcome.review_draft is not None:
-                stage = "identity_review"
-                self.identity_review_recorder.record(
-                    crawl_run_id=run.id,
-                    draft=batch_outcome.review_draft,
-                )
-                code = "company_identity_review_required"
-                return self._finish(
-                    run,
-                    expected_claim_token=claim_token,
-                    status=CollectionStatus.FAILED,
-                    providers_attempted=providers_attempted,
-                    documents_found=len(documents),
-                    jobs_found=jobs_found,
-                    persistence=None,
-                    error_code=code,
-                    diagnostics=(*diagnostics, _Diagnostic("identity_resolution", code)),
-                )
-            batch = batch_outcome.batch
-            if batch is None:
-                raise _PipelineError("invalid_batch_outcome")
-            stage = "persistence"
-            persisted = self.persistence.persist(
-                batch, run.id, expected_claim_token=claim_token
-            )
             return self._finish(
                 run,
                 expected_claim_token=claim_token,
-                status=CollectionStatus.PARTIAL if provider_error else CollectionStatus.SUCCEEDED,
+                status=CollectionStatus.FAILED,
                 providers_attempted=providers_attempted,
                 documents_found=len(documents),
-                jobs_found=jobs_found,
-                persistence=persisted,
-                error_code=provider_error,
+                jobs_found=0,
+                persistence=self._existing_company_result(request.query),
+                error_code="ats_entry_discovery_pending",
                 diagnostics=diagnostics,
             )
         except IdentitySearchUnavailable as error:
@@ -1032,18 +838,15 @@ class _PipelineError(Exception):
 _ATS_URL_PATTERNS = (
     re.compile(r"https?://jobs\.feishu\.cn/[a-zA-Z0-9_@./#?&=-]+"),
     re.compile(r"https?://app\.mokahr\.com/[a-zA-Z0-9_@./#?&=-]+"),
-    re.compile(r"https?://(?:www\.)?zhipin\.com/[a-zA-Z0-9_@./#?&=-]+"),
     re.compile(r"https?://(?:www\.)?liepin\.com/[a-zA-Z0-9_@./#?&=-]+"),
     re.compile(r"https?://(?:www\.)?lagou\.com/[a-zA-Z0-9_@./#?&=-]+"),
     re.compile(r"https?://jobs\.bytedance\.com/[a-zA-Z0-9_@./#?&=-]+"),
 )
 
-_ATS_DISCOVERY_TERMS = ("jobs.feishu.cn", "app.mokahr.com", "zhipin.com", "liepin.com", "lagou.com", "jobs.bytedance.com")
+_ATS_DISCOVERY_TERMS = ("jobs.feishu.cn", "app.mokahr.com", "liepin.com", "lagou.com", "jobs.bytedance.com")
 _ATS_HOST_PLATFORMS = {
     "jobs.feishu.cn": "feishu",
     "app.mokahr.com": "moka",
-    "zhipin.com": "zhipin",
-    "www.zhipin.com": "zhipin",
     "liepin.com": "liepin",
     "www.liepin.com": "liepin",
     "lagou.com": "lagou",
@@ -1104,7 +907,6 @@ def _entry_candidate_to_ats_url(candidate: EntryCandidate) -> AtsCareerUrl | Non
         EntryPlatform.ATS_FEISHU,
         EntryPlatform.ATS_MOKA,
         EntryPlatform.ATS_BYTEDANCE,
-        EntryPlatform.BOSS_ZHIPIN,
         EntryPlatform.LIEPIN,
         EntryPlatform.LAGOU,
     }:
@@ -1218,28 +1020,3 @@ def _plain_text(value: str | None) -> str | None:
     return stripped or None
 
 
-def _select_company(
-    query: str, candidates: Sequence[CompanyCandidate]
-) -> tuple[CompanyCandidate | None, str | None]:
-    exact = [candidate for candidate in candidates if _candidate_matches_query(query, candidate)]
-    if len(exact) == 1:
-        candidate = exact[0]
-    elif len(candidates) == 1:
-        return None, "ambiguous_company"
-    elif not candidates:
-        return None, "no_valid_data"
-    else:
-        return None, "ambiguous_company"
-    return candidate, None
-
-
-def _candidate_matches_query(query: str, candidate: CompanyCandidate) -> bool:
-    normalized_query = normalize_name(query)
-    normalized_name = normalize_name(candidate.name)
-    if not normalized_query:
-        return False
-    if normalized_query == normalized_name:
-        return True
-    if normalized_query in {normalize_name(alias) for alias in candidate.aliases}:
-        return True
-    return len(normalized_query) >= 2 and normalized_query in normalized_name

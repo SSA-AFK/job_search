@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RankingList } from "../api/types";
@@ -15,9 +15,14 @@ const observation: RankingList = { ...ranked, total: 1, items: [{ ...ranked.item
 
 afterEach(() => vi.unstubAllGlobals());
 
-function setup() {
+function LocationState() {
+  const location = useLocation();
+  return <output>{JSON.stringify({ pathname: location.pathname, state: location.state })}</output>;
+}
+
+function setup(initialEntry = "/list") {
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.resolve(new Response(JSON.stringify(String(input).includes("observation") ? observation : ranked), { status: 200, headers: { "Content-Type": "application/json" } }))));
-  render(<MemoryRouter><RankingListPage /></MemoryRouter>);
+  render(<MemoryRouter initialEntries={[initialEntry]}><Routes><Route path="/list" element={<RankingListPage />} /><Route path="/companies/:companyId" element={<LocationState />} /></Routes></MemoryRouter>);
 }
 
 describe("RankingListPage", () => {
@@ -34,5 +39,11 @@ describe("RankingListPage", () => {
     await screen.findByText("示例智能");
     await userEvent.click(screen.getByRole("button", { name: "成熟" }));
     await waitFor(() => expect(fetch).toHaveBeenCalledWith(expect.stringContaining("stage=mature"), expect.anything()));
+  });
+
+  it("preserves the ranking stage when opening company detail", async () => {
+    setup("/list?stage=growth");
+    await userEvent.click(await screen.findByRole("link", { name: "查看示例智能详情" }));
+    expect(screen.getByText(/"pathname":"\/companies\/company-1"/)).toHaveTextContent('"from":"/list?stage=growth"');
   });
 });

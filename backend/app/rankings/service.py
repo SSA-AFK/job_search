@@ -10,8 +10,6 @@ from uuid import UUID
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.enrichment.official import OfficialEnrichmentResult, OfficialWebsiteEnricher
-from app.ingestion.extraction.crew import Extractor
 from app.models import (
     Company,
     CompanyProfileField,
@@ -61,37 +59,6 @@ class PilotImportSummary:
     members_selected: int
 
 
-async def enrich_ai_pilot(
-    session: Session, pilot_id: UUID, workbook_path: Path, *, extractor: Extractor
-) -> tuple[OfficialEnrichmentResult, ...]:
-    """Enrich pilot members using workbook URLs only as ephemeral crawl seeds."""
-    websites = {
-        candidate.identity_hash: candidate.website_candidate
-        for candidate in read_ranking_candidates(workbook_path)
-        if candidate.website_candidate is not None
-    }
-    rows = tuple(
-        session.execute(
-            select(Company, RankingPilotMember.source_identity_hash)
-            .join(RankingPilotMember, RankingPilotMember.company_id == Company.id)
-            .where(RankingPilotMember.pilot_id == pilot_id)
-        )
-    )
-    session.expunge_all()
-    session.rollback()
-    enricher = OfficialWebsiteEnricher(session, extractor=extractor, max_pages_per_provider=4)
-    results: list[OfficialEnrichmentResult] = []
-    for company, identity_hash in rows:
-        website = websites.get(identity_hash)
-        if website is None:
-            results.append(
-                OfficialEnrichmentResult(str(company.id), company.canonical_name, "no_website", 0)
-            )
-            continue
-        results.append(await enricher.refresh(company, website_override=website))
-    return tuple(results)
-
-
 def import_ai_pilot(
     session: Session,
     workbook_path: Path,
@@ -137,6 +104,11 @@ def import_ai_pilot(
                 created += 1
             else:
                 matched += 1
+                # Overwrite seed/display names with the workbook's true business registration
+                # name so that downstream lookups (Tianyancha, aliases, etc.) use the
+                # canonical工商注册名 instead of a brand/display name.
+                company.canonical_name = candidate.canonical_name
+                company.normalized_name = candidate.normalized_name
             company.industry = "人工智能"
             company.sub_industry = candidate.industry_major
             company.city = candidate.city if candidate.city != "未知" else None
@@ -157,6 +129,13 @@ def import_ai_pilot(
             company.insured_employee_count = candidate.insured_employee_count
             company.employee_report_year = candidate.employee_report_year
             company.business_scope = candidate.business_scope
+            # The ranking workbook stores the registered legal name and an irreversible
+            # identity derived from the USCC. It can therefore seed the legal search key
+            # without retaining the original credit code.
+            company.legal_name = candidate.canonical_name
+            company.uscc_sha256 = candidate.identity_hash
+            company.identity_anchor_status = "verified"
+            company.identity_anchored_at = now
             company.scale = _public_company_scale(candidate.company_size)
             company.website = candidate.website_candidate
             member = session.scalar(

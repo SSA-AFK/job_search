@@ -22,8 +22,15 @@ router = APIRouter(prefix="/companies", tags=["companies"])
 
 
 def get_company_service(session: Annotated[Session, Depends(get_session)]) -> CompanyService:
+    job_total_limit = (
+        settings.test_job_display_limit
+        if settings.app_environment.lower() in {"development", "test", "testing"}
+        else None
+    )
     return CompanyService(
-        CompanyRepository(session), cache=configured_company_cache(settings.cache_redis_url)
+        CompanyRepository(session),
+        cache=configured_company_cache(settings.cache_redis_url),
+        job_total_limit=job_total_limit,
     )
 
 

@@ -30,9 +30,16 @@ from app.recruiting_coverage.service import RecruitingCoverageService
 
 
 class CompanyService:
-    def __init__(self, repository: CompanyRepository, *, cache: CompanyCache | None = None) -> None:
+    def __init__(
+        self,
+        repository: CompanyRepository,
+        *,
+        cache: CompanyCache | None = None,
+        job_total_limit: int | None = None,
+    ) -> None:
         self.repository = repository
         self.cache = cache
+        self.job_total_limit = job_total_limit
 
     def search(self, query: CompanyQuery) -> Page[CompanyListItem]:
         params = query.model_dump(mode="json")
@@ -42,8 +49,9 @@ class CompanyService:
             return cached
         companies, total = self.repository.search(query)
         opportunity_counts = self.repository.early_career_counts([company.id for company in companies])
+        active_counts = self.repository.active_job_counts([company.id for company in companies])
         page = Page(
-            items=[self._company_list_item(company, opportunity_counts.get(company.id, (0, 0))) for company in companies],
+            items=[self._company_list_item(company, opportunity_counts.get(company.id, (0, 0)), active_counts.get(company.id, 0)) for company in companies],
             page=query.page,
             page_size=query.page_size,
             total=total,
@@ -180,7 +188,9 @@ class CompanyService:
         )
         if cached is not None:
             return cached
-        jobs, total = self.repository.list_jobs(company_id, query)
+        jobs, total = self.repository.list_jobs(
+            company_id, query, total_limit=self.job_total_limit
+        )
         page = Page(
             items=[self._job_list_item(job) for job in jobs],
             page=query.page,
@@ -225,17 +235,19 @@ class CompanyService:
             "company_stage": snapshot.company_stage or "growth",
         }
 
-    def _company_list_item(self, company: Company, counts: tuple[int, int] = (0, 0)) -> CompanyListItem:
+    def _company_list_item(self, company: Company, counts: tuple[int, int] = (0, 0), active_count: int = 0) -> CompanyListItem:
         return CompanyListItem(
             **self._company_fields(company),
             campus_job_count=counts[0],
             internship_job_count=counts[1],
+            active_job_count=active_count,
             recruiting_coverage=self._recruiting_coverage_item(company.id),
         )
 
     def _opportunity_fields(self, company_id: UUID) -> dict[str, int]:
         campus, internship = self.repository.early_career_counts([company_id]).get(company_id, (0, 0))
-        return {"campus_job_count": campus, "internship_job_count": internship}
+        active = self.repository.active_job_counts([company_id]).get(company_id, 0)
+        return {"campus_job_count": campus, "internship_job_count": internship, "active_job_count": active}
 
     def _recruiting_coverage_item(self, company_id: object) -> RecruitingCoverageItem:
         coverage = RecruitingCoverageService(self.repository.session).build(
@@ -297,7 +309,7 @@ class CompanyService:
             id=job.id,
             company_id=job.company_id,
             title=job.title,
-            job_type=CompanyRepository._public_job_type(job.job_type, job.title),
+            job_type=job.job_type,
             city=job.city,
             salary_min_monthly=job.salary_min_monthly,
             salary_max_monthly=job.salary_max_monthly,

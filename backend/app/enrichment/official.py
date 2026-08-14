@@ -100,7 +100,9 @@ class OfficialWebsiteEnricher:
             return self._result(company, "invalid_official_data", len(documents))
         return self._result(company, "succeeded", len(documents))
 
-    async def _collect(self, company: Company, website: HttpUrl, host: str) -> tuple[Sequence[RawDocument], str | None]:
+    async def _collect(
+        self, company: Company, website: HttpUrl, host: str
+    ) -> tuple[Sequence[RawDocument], str | None]:
         client = SafeHttpClient()
         provider = CompanySiteProvider(
             http_client=client,

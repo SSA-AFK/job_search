@@ -169,7 +169,6 @@ class EntryPlatform:
     ATS_MOKA = "ats_moka"
     ATS_BYTEDANCE = "ats_bytedance"
     COMPANY_SITE_CAREERS = "company_site_careers"
-    BOSS_ZHIPIN = "boss_zhipin"
     LIEPIN = "liepin"
     LAGOU = "lagou"
     ZHIHU = "zhihu_global_search"
@@ -209,7 +208,6 @@ _ATS_SITES = (
 )
 
 _JOB_BOARD_SITES = (
-    (EntryPlatform.BOSS_ZHIPIN, "zhipin.com"),
     (EntryPlatform.LIEPIN, "liepin.com"),
     (EntryPlatform.LAGOU, "lagou.com"),
 )
@@ -354,7 +352,7 @@ def validate_entry_candidate(
     if candidate.source_provider == "known_entry_url":
         if exact_domain or root_match_domain or name_mention or best_sim >= _NAME_LOW_THRESHOLD:
             score += 0.20
-        elif candidate.platform in {EntryPlatform.ATS_FEISHU, EntryPlatform.ATS_MOKA, EntryPlatform.ATS_BYTEDANCE, EntryPlatform.BOSS_ZHIPIN, EntryPlatform.LIEPIN, EntryPlatform.LAGOU}:
+        elif candidate.platform in {EntryPlatform.ATS_FEISHU, EntryPlatform.ATS_MOKA, EntryPlatform.ATS_BYTEDANCE, EntryPlatform.LIEPIN, EntryPlatform.LAGOU}:
             score += 0.55
     confidence = min(1.0, score)
     title_normalized = normalize_for_compare(candidate.title or "")

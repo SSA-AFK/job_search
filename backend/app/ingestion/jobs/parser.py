@@ -12,13 +12,6 @@ from app.ingestion.jobs.contracts import AtsJobCandidate, AtsListResult, AtsPars
 _PLATFORM_SELECTORS: dict[str, tuple[str, str]] = {
     "feishu": (".positionItem, div.job-card, li.job-item, [data-job-id]", "a"),
     "moka": ("a.link-abc, .link-abc, div.position-list-item, li.position-item, [data-position-id]", "a"),
-    "zhipin": (
-        (
-            "li.job-card-wrapper, div.job-list-box li, div.job-card, [ka='search_list'] li, "
-            ".search-job-result li, .job-lists li"
-        ),
-        "a.job-name, .job-card-left a, a[href*='/job_detail/']",
-    ),
     "liepin": (
         (
             "div.sojob-item, div.job-list-item, div.search-result-list div.job-item, "
@@ -187,13 +180,6 @@ def _guess_employment_type(text: str) -> str | None:
 
 def _extract_card_attributes(card: Tag, platform: str) -> dict[str, str]:
     """Return a flat dict of raw attributes from the card node, e.g. salary/city/area."""
-    if platform == "zhipin":
-        return {
-            "salary": _text(card.select_one(".salary, .job-salary, span.red, [class*='salary']")),
-            "city": _text(card.select_one(".job-area, .area-wrapper, [class*='job-area'], .info-area")),
-            "tags": _text(card.select_one(".tag-list, .job-labels, [class*='tag']")),
-            "title_extra": _text(card.select_one(".job-info, .job-title-box")),
-        }
     if platform == "liepin":
         return {
             "salary": _text(card.select_one(".job-salary, .text-warning, [class*='salary'], span.compensate")),
@@ -226,8 +212,6 @@ def _text(node: Tag | None) -> str:
 def _best_effort_title(card: Tag, link: Tag, platform: str) -> str:
     """Get job title with some per-platform fallbacks."""
     title_selectors = {
-        "zhipu": [".job-name", ".job-title", "h3", "h4", ".title"],  # typo kept accidentally; covered by generic
-        "zhipin": [".job-name", ".job-title-box .job-name", "h3 .name", "span.job-name", ".job-title", "h3", "h4"],
         "liepin": [".job-title", "h3.job-title", "span.title", "h3 a", "h4", ".title"],
         "lagou": [".position-name", "h3.position-name", ".s-top-name", "h3", ".job-name"],
     }
@@ -279,7 +263,7 @@ def parse_html_job_list(html: str, platform: str) -> AtsListResult:
 
             # Aggregate all text blobs for city/type/salary inference
             blob_parts: list[str] = [title]
-            if platform in {"zhipin", "liepin", "lagou", "bytedance"}:
+            if platform in {"liepin", "lagou", "bytedance"}:
                 for v in attrs.values():
                     if v:
                         blob_parts.append(v)

@@ -41,6 +41,7 @@ def project_response(
     *,
     company_name: str,
     window_start: date,
+    company_aliases: frozenset[str] | None = None,
 ) -> tuple[ProjectedSignal, ...]:
     responses = payload.get("responses")
     if isinstance(responses, list):
@@ -52,9 +53,13 @@ def project_response(
             nested = response.get("payload")
             if not isinstance(tool, str) or not isinstance(nested, dict):
                 continue
-            signals.extend(_project_tool(category, tool, nested, company_name, window_start))
+            signals.extend(
+                _project_tool(
+                    category, tool, nested, company_name, window_start, company_aliases
+                )
+            )
         return tuple(signals)
-    return _project_tool(category, "", payload, company_name, window_start)
+    return _project_tool(category, "", payload, company_name, window_start, company_aliases)
 
 
 def _project_tool(
@@ -63,6 +68,7 @@ def _project_tool(
     payload: dict[str, Any],
     company_name: str,
     window_start: date,
+    company_aliases: frozenset[str] | None,
 ) -> tuple[ProjectedSignal, ...]:
     if category == EnrichmentCategory.GROWTH:
         return _growth(payload, window_start)
@@ -73,7 +79,7 @@ def _project_tool(
     if category == EnrichmentCategory.MARKET_VALIDATION:
         if tool == "qualifications":
             return _qualifications(payload)
-        return _bids(payload, company_name, window_start)
+        return _bids(payload, company_name, window_start, company_aliases)
     if category == EnrichmentCategory.MATERIAL_RISK:
         return _risk(payload)
     raise ValueError(f"unsupported enrichment category: {category}")
@@ -164,15 +170,24 @@ def _patents(payload: dict[str, Any], window_start: date) -> tuple[ProjectedSign
 
 
 def _bids(
-    payload: dict[str, Any], company_name: str, window_start: date
+    payload: dict[str, Any],
+    company_name: str,
+    window_start: date,
+    company_aliases: frozenset[str] | None = None,
 ) -> tuple[ProjectedSignal, ...]:
-    normalized_company = normalize_name(company_name)
+    # Normalize all known aliases plus the primary company_name. Tianyancha records
+    # the winning bidder using any of the company's legal/brand/short forms, so we
+    # must check against the full normalized alias set instead of a single name.
+    alias_set: set[str] = {company_name}
+    if company_aliases:
+        alias_set.update(company_aliases)
+    normalized_company_names = frozenset(normalize_name(name) for name in alias_set if name)
     signals = []
     for item in _items(payload):
         event_date = _as_date(item.get("publishTime"))
         winners = _organization_names(item.get("bidWinner"))
         is_winner = item.get("enterpriseIdentity") == "中标方" or any(
-            normalize_name(winner) == normalized_company for winner in winners
+            normalize_name(winner) in normalized_company_names for winner in winners
         )
         if event_date is None or event_date < window_start or not is_winner:
             continue

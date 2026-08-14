@@ -98,17 +98,9 @@ def test_build_site_queries_contains_ats_sites(moonshot_pool: CompanyNamePool) -
     platforms = {k for k, _ in queries}
     assert EntryPlatform.ATS_FEISHU in platforms
     assert EntryPlatform.ATS_MOKA in platforms
-    # 确认至少有一个飞书查询包含 canonical 名 + site: 限定
     feishu_queries = [q for p, q in queries if p == EntryPlatform.ATS_FEISHU]
     assert any("site:jobs.feishu.cn" in q for q in feishu_queries)
     assert any('"月之暗面"' in q for q in feishu_queries)
-
-
-def test_build_site_queries_job_boards_toggle(moonshot_pool: CompanyNamePool) -> None:
-    with_boards = dict(build_site_queries(moonshot_pool, include_job_boards=True))
-    without_boards = dict(build_site_queries(moonshot_pool, include_job_boards=False))
-    assert any(k == EntryPlatform.BOSS_ZHIPIN for k in with_boards)
-    assert not any(k == EntryPlatform.BOSS_ZHIPIN for k in without_boards)
 
 
 def test_build_careers_probe_paths() -> None:

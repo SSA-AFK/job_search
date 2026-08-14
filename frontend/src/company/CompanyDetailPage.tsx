@@ -1,10 +1,10 @@
-import { ArrowLeft, ChevronDown, ExternalLink, RotateCw } from "lucide-react";
+import { ArrowLeft, ChevronDown, ExternalLink, LoaderCircle, RotateCw } from "lucide-react";
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useLocation, useParams } from "react-router-dom";
 
 import { api, ApiError } from "../api/client";
 import { safeHttpUrl } from "../api/http-url";
-import type { CompanyDetail, CompanyScale, FundingStage, RankingComponents, VerificationStatus } from "../api/types";
+import type { CompanyDetail, CompanyScale, FundingStage, JobListItem, RankingComponents, VerificationStatus } from "../api/types";
 
 const fundingLabels: Record<FundingStage, string> = {
   seed: "种子轮",
@@ -224,8 +224,42 @@ function SourceRowContent({ source }: { source: CompanyDetail["sources"][number]
   );
 }
 
+const jobTypeLabels: Record<JobListItem["job_type"], string> = {
+  full_time: "全职", part_time: "兼职", internship: "实习", temporary: "临时",
+  campus: "校招", experienced: "社招", unknown: "职位",
+};
+
+function CompanyJobs({ companyId }: { companyId: string }) {
+  const [jobs, setJobs] = useState<JobListItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [state, setState] = useState<"loading" | "ready" | "error">("loading");
+  const loadPage = (nextPage: number, signal?: AbortSignal) => {
+    setState("loading");
+    return api.getCompanyJobs(companyId, nextPage, signal).then(result => {
+      setJobs(current => nextPage === 1 ? result.items : [...current, ...result.items]);
+      setTotal(result.total); setPage(nextPage); setState("ready");
+    }).catch(error => {
+      if (!(error instanceof DOMException && error.name === "AbortError")) setState("error");
+    });
+  };
+  useEffect(() => {
+    const controller = new AbortController();
+    setJobs([]); setPage(1); void loadPage(1, controller.signal);
+    return () => controller.abort();
+  }, [companyId]);
+  if (state === "loading" && !jobs.length) return <p className="jobs-placeholder" role="status">正在加载职位…</p>;
+  if (state === "error" && !jobs.length) return <p className="jobs-placeholder">职位暂时无法加载，请稍后重试。</p>;
+  if (!jobs.length) return <p className="jobs-placeholder">暂未发现有效职位。</p>;
+  return <><ul className="job-list">{jobs.map(job => <li key={job.id}><article className="job-row"><div className="job-heading-line"><h3>{job.title}</h3><span className="status-active">{jobTypeLabels[job.job_type]}</span></div><p className="job-facts">{[job.city, job.posted_at ? `发布于 ${job.posted_at}` : null].filter(Boolean).join(" · ")}</p>{job.description ? <details className="job-description"><summary>查看职位说明</summary><p>{job.description}</p></details> : null}{job.sources[0] ? <a className="job-apply" href={safeHttpUrl(job.sources[0].apply_url) ?? undefined} target="_blank" rel="noreferrer">官网申请<ExternalLink aria-hidden="true" size={14} /></a> : null}</article></li>)}</ul>{jobs.length < total ? <button className="secondary-button jobs-load-more" type="button" disabled={state === "loading"} onClick={() => void loadPage(page + 1)}>{state === "loading" ? <LoaderCircle aria-hidden="true" size={15} /> : null}加载更多（{jobs.length}/{total}）</button> : null}{state === "error" ? <p className="jobs-load-error" role="alert">更多职位加载失败，请重试。</p> : null}</>;
+}
+
 export function CompanyDetailPage() {
   const { companyId = "" } = useParams();
+  const location = useLocation();
+  const routeState = location.state as { from?: unknown } | null;
+  const requestedReturn = typeof routeState?.from === "string" ? routeState.from : "";
+  const rankingReturn = /^\/list(?:\?stage=(?:early|growth|mature))?$/.test(requestedReturn) ? requestedReturn : null;
   const [company, setCompany] = useState<CompanyDetail | null>(null);
   const [detailState, setDetailState] = useState<"loading" | "ready" | "error" | "not-found">("loading");
   const [detailRetry, setDetailRetry] = useState(0);
@@ -252,7 +286,7 @@ export function CompanyDetailPage() {
         </div>
       </header>
       <div className="content-width detail-workspace">
-        <Link className="back-link" to="/companies"><ArrowLeft aria-hidden="true" size={16} />返回公司列表</Link>
+        <Link className="back-link" to={rankingReturn ?? "/companies"}><ArrowLeft aria-hidden="true" size={16} />{rankingReturn ? "返回 AI 榜单" : "返回公司列表"}</Link>
         {detailState === "loading" ? <div className="detail-state" role="status" aria-label="正在加载公司详情">正在加载公司详情…</div> : null}
         {detailState === "not-found" ? <div className="detail-state" role="status" aria-live="polite" aria-atomic="true"><h1>未找到这家公司</h1><p>该公司可能尚未收录，或链接已经失效。</p></div> : null}
         {detailState === "error" ? (
@@ -262,8 +296,8 @@ export function CompanyDetailPage() {
           <article>
             <DetailContent company={company} />
             <section className="detail-section jobs-section" aria-labelledby="jobs-heading">
-              <div className="section-heading"><h2 id="jobs-heading">职位信息</h2></div>
-              <p className="jobs-placeholder">职位功能即将开放。公司榜单与资料页当前不采集或展示职位数据。</p>
+              <div className="section-heading"><h2 id="jobs-heading">在招职位</h2><span>职位不参与榜单评分</span></div>
+              <CompanyJobs companyId={company.id} />
             </section>
           </article>
         ) : null}

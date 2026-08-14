@@ -71,7 +71,6 @@ def route_robots(text: str = "User-agent: *\nAllow: /") -> None:
         ("https://tenant.beisen.cn/recruit", "beisen", True),
         ("https://tenant.dayee.com/jobs", "dayee", True),
         ("https://jobs.acme.cn/careers", "self_hosted", False),
-        ("https://www.zhipin.com/gongsi/acme.html", "unknown", False),
         ("https://jobs.feishu.cn.evil.test/acme", "unknown", False),
         ("https://user@jobs.feishu.cn/acme", "unknown", False),
     ],
