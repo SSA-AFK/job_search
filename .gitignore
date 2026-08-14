@@ -4,6 +4,7 @@
 # Local backend environments, databases, and Python tooling output.
 .env
 .env.*
+*.env
 !.env.example
 .venv/
 venv/
